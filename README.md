@@ -1,0 +1,6 @@
+cd /opt/agent-system/backend (carpeta donde esta el sistema)
+sudo -u agentsys -H bash (pasa de usuario normal a agentsys)
+source venv/bin/activate (activa el entorno virtual)
+exit (salir de usuario agentsys)
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload (levanta el servidor)
+pkill -f uvicorn (lo elimina)
