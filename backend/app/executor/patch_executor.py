@@ -1,10 +1,10 @@
 import os
 import subprocess
-from app.executor.policy import validate_operation, safe_path, BASE_REPO
+from app.executor.policy import validate_operation, safe_path
 
 MAX_FILE_SIZE = 200_000
 
-def apply_operation(op):
+def apply_operation(op, base_repo):
     ok, reason = validate_operation(op)
 
     if not ok:
@@ -15,22 +15,23 @@ def apply_operation(op):
         }
 
     op_type = op.get("type")
-    path = safe_path(op.get("path", ""))
+    path = safe_path(op["path"], base_repo)
 
     if op_type == "modify":
-        return modify_file(path, op.get("diff", ""))
+        return modify_file(path, op.get("diff", ""), base_repo)
 
     if op_type == "create":
-        return create_file(path, op.get("diff", ""))
+        return create_file(path, op.get("diff", ""), base_repo)
 
     if op_type == "delete":
-        return delete_file(path)
+        return delete_file(path, base_repo)
 
     return {"error": "unknown_operation", "op": op}
 
 
-def create_file(path, content):
-    path = safe_path(path)
+def create_file(path, content, base_repo):
+    def create_file(path, content, base_repo):
+        path = safe_path(path, base_repo)
 
     if len(content.encode("utf-8")) > MAX_FILE_SIZE:
         return {"error": "file_too_large"}
@@ -45,8 +46,9 @@ def create_file(path, content):
     return {"status": "created", "path": path}
 
 
-def modify_file(path, content):
-    path = safe_path(path)
+def modify_file(path, content, base_repo):
+    def modify_file(path, content, base_repo):
+        path = safe_path(path, base_repo)
 
     if not os.path.isfile(path):
         return {"error": "file_not_found", "path": path}
@@ -62,8 +64,9 @@ def modify_file(path, content):
     return {"status": "modified", "path": path}
 
 
-def delete_file(path):
-    path = safe_path(path)
+def delete_file(path, base_repo):
+    def delete_file(path, base_repo):
+        path = safe_path(path, base_repo)
 
     if not os.path.isfile(path):
         return {"error": "file_not_found", "path": path}
@@ -73,10 +76,11 @@ def delete_file(path):
     return {"status": "deleted", "path": path}
 
 
-def get_git_diff():
+def get_git_diff(workspace):
+    subprocess.run(["git", "add", "-A"], cwd=workspace)
     result = subprocess.run(
-        ["git", "diff", "--no-ext-diff", "--ignore-submodules"],
-        cwd=BASE_REPO,
+        ["git", "diff", "--cached"],
+        cwd=workspace,
         capture_output=True,
         text=True
     )

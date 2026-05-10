@@ -16,3 +16,14 @@ curl -X POST http://0.0.0.0:8000/agent/run \
   "repo_context": []
 }
 EOF
+
+
+🔵 convertir policy en “deterministic validator + schema layer”
+
+y añadir:
+
+límites de operaciones por tipo
+validación de estructura del diff (no solo existencia)
+protección contra overwrite masivo
+
+Dime y lo hacemos paso a paso como hasta ahora.
