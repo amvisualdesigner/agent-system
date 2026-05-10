@@ -4,10 +4,12 @@ from typing import List, Dict, Any
 import json
 import ollama
 
+MAX_OPERATIONS = 20
+MAX_DELETES = 3
+
 from app.executor.patch_executor import (
     apply_operation,
     get_git_diff,
-    checkpoint_repo
 )
 
 app = FastAPI()
@@ -111,8 +113,6 @@ def run_agent(req: AgentRequest):
 
     prompt = build_prompt(req.task)
 
-    checkpoint_repo()
-
     result = call_llm(prompt)
 
     # fallback defensivo
@@ -124,6 +124,18 @@ def run_agent(req: AgentRequest):
         }
 
     operations = result.get("operations", [])
+
+    delete_ops = [op for op in operations if op.get("type") == "delete"]
+
+    if len(delete_ops) > MAX_DELETES:
+        return {
+            "error": "too_many_deletes",
+            "limit": MAX_DELETES,
+            "received": len(delete_ops)
+        }
+
+    if len(operations) > MAX_OPERATIONS:
+        return {"error": "too_many_operations"}
 
     execution = []
 
