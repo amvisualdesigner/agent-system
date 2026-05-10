@@ -5,6 +5,9 @@ exit (salir de usuario agentsys)
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload (levanta el servidor)
 pkill -f uvicorn (lo elimina)
 
+rm -rf /tmp/agent-runs/*
+git worktree prune
+
 
 curl -X POST http://0.0.0.0:8000/agent/run \
   -H "Content-Type: application/json" \

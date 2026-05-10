@@ -101,67 +101,168 @@ def health():
 @app.post("/agent/run")
 def run_agent(req: AgentRequest):
     REPO_ROOT = "/opt/agent-repos/agent-test-repo"
+
     run_id = str(uuid.uuid4())
+    branch = f"agent-run-{run_id}"
     base_dir = f"/tmp/agent-runs/{run_id}"
     workspace = f"{base_dir}/workspace"
     artifacts_dir = f"{base_dir}/artifacts"
 
-    # limpieza y creación de directorios
+    # estado del run (importante para cleanup seguro)
+    worktree_created = False
+
+    # limpieza inicial
     shutil.rmtree(base_dir, ignore_errors=True)
     os.makedirs(workspace, exist_ok=True)
     os.makedirs(artifacts_dir, exist_ok=True)
 
-    # limpiar worktrees zombies
-    subprocess.run(["git", "worktree", "prune"], cwd=REPO_ROOT, capture_output=True, text=True)
+    try:
+        # limpiar worktrees huérfanos
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True
+        )
 
-    branch = f"agent-run-{run_id}"
-    subprocess.run(["git", "worktree", "add", workspace, "-b", branch],
-                   cwd=REPO_ROOT, check=True)
+        # ----------------------------
+        # 1. crear worktree
+        # ----------------------------
+        branch = f"agent-run-{run_id}"
 
-    # contexto + prompt
-    workspace_files = list_workspace_files(workspace)
-    prompt = build_prompt(req.task, workspace_files)
+        result = subprocess.run(
+            ["git", "worktree", "add", workspace, "-b", branch],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True
+        )
 
-    # guardar request
-    with open(f"{artifacts_dir}/request.json", "w") as f:
-        json.dump(req.dict(), f, indent=2)
+        if result.returncode != 0:
+            raise Exception(result.stderr)
 
-    # llamar LLM
-    llm_result = call_llm(prompt)
+        worktree_created = True
 
-    with open(f"{artifacts_dir}/llm_raw.json", "w") as f:
-        json.dump(llm_result, f, indent=2)
+        # ----------------------------
+        # 2. contexto + prompt
+        # ----------------------------
+        workspace_files = list_workspace_files(workspace)
+        prompt = build_prompt(req.task, workspace_files)
 
-    # asegurar que siempre hay operaciones
-    if "operations" not in llm_result:
-        llm_result = {"operations": [], "warnings": ["missing_operations"], "raw": llm_result}
+        with open(f"{artifacts_dir}/request.json", "w") as f:
+            json.dump(req.dict(), f, indent=2)
 
-    operations = llm_result.get("operations", [])
-    with open(f"{artifacts_dir}/operations.json", "w") as f:
-        json.dump(operations, f, indent=2)
+        # ----------------------------
+        # 3. LLM
+        # ----------------------------
+        llm_result = call_llm(prompt)
 
-    # ------- SEGURIDAD -------
-    delete_ops = [op for op in operations if op.get("type") == "delete"]
-    if len(delete_ops) > MAX_DELETES:
-        return {"error": "too_many_deletes", "limit": MAX_DELETES, "received": len(delete_ops)}
-    if len(operations) > MAX_OPERATIONS:
-        return {"error": "too_many_operations"}
+        with open(f"{artifacts_dir}/llm_raw.json", "w") as f:
+            json.dump(llm_result, f, indent=2)
 
-    # ------- EJECUCIÓN SEGURA -------
-    execution = [apply_operation(op, workspace) for op in operations]
+        if "operations" not in llm_result:
+            llm_result = {
+                "operations": [],
+                "warnings": ["missing_operations"],
+                "raw": llm_result
+            }
 
-    # ------- GIT DIFF -------
-    subprocess.run(["git", "add", "-A"], cwd=workspace, capture_output=True, text=True)
-    diff_result = subprocess.run(["git", "diff", "--cached"], cwd=workspace, capture_output=True, text=True)
-    git_diff = diff_result.stdout
-    with open(f"{artifacts_dir}/diff.patch", "w") as f:
-        f.write(git_diff)
+        operations = llm_result.get("operations", [])
 
-    return {
-        "run_id": run_id,
-        "workspace": workspace,
-        "llm_result": llm_result,
-        "execution": execution,
-        "git_diff": git_diff,
-        "artifacts": artifacts_dir,
-    }
+        with open(f"{artifacts_dir}/operations.json", "w") as f:
+            json.dump(operations, f, indent=2)
+
+        # ----------------------------
+        # 4. seguridad (policy layer)
+        # ----------------------------
+        delete_ops = [op for op in operations if op.get("type") == "delete"]
+
+        if len(delete_ops) > MAX_DELETES:
+            return {
+                "error": "too_many_deletes",
+                "limit": MAX_DELETES,
+                "received": len(delete_ops)
+            }
+
+        if len(operations) > MAX_OPERATIONS:
+            return {"error": "too_many_operations"}
+
+        # ----------------------------
+        # 5. ejecución
+        # ----------------------------
+        execution = []
+
+        for op in operations:
+            execution.append(apply_operation(op, workspace))
+
+        # ----------------------------
+        # 6. git diff
+        # ----------------------------
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=workspace,
+            capture_output=True,
+            text=True
+        )
+
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached"],
+            cwd=workspace,
+            capture_output=True,
+            text=True
+        )
+
+        git_diff = diff_result.stdout
+
+        with open(f"{artifacts_dir}/diff.patch", "w") as f:
+            f.write(git_diff)
+
+        with open("/tmp/agent-runs/LAST_RUN.txt", "w") as f:
+            f.write(run_id)
+
+        # ----------------------------
+        # 7. respuesta
+        # ----------------------------
+        return {
+            "run_id": run_id,
+            "workspace": workspace,
+            "llm_result": llm_result,
+            "execution": execution,
+            "git_diff": git_diff,
+            "artifacts": artifacts_dir,
+        }
+
+    finally:
+        # ----------------------------
+        # CLEANUP SEGURO
+        # ----------------------------
+        try:
+            if worktree_created:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", workspace],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True
+                )
+                
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True
+                )
+        except Exception:
+            pass
+
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+@app.get("/agent/latest")
+def latest():
+    path = "/tmp/agent-runs/LAST_RUN.txt"
+
+    if not os.path.exists(path):
+        return {"error": "no runs yet"}
+
+    with open(path) as f:
+        run_id = f.read().strip()
+
+    return {"run_id": run_id}
