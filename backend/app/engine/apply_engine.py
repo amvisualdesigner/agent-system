@@ -7,15 +7,12 @@ from app.policy.policy import validate_plan_policy, validate_operation
 from app.utils.state import write_state
 
 
-def apply_engine(plan: dict, context):
+def apply_engine(run_id, plan: dict, context):
     # ----------------------------
     # 1. RUNTIME SETUP
     # ----------------------------
-    run_id  = context["run_id"]
-    workspace = context["workspace"]
-    
-    os.makedirs(workspace, exist_ok=True)
-    os.makedirs(context["artifacts"], exist_ok=True)
+    os.makedirs(context.artifacts, exist_ok=True)
+    os.makedirs(context.workspace, exist_ok=True)
 
     # ----------------------------
     # 2. PLAN POLICY
@@ -46,7 +43,7 @@ def apply_engine(plan: dict, context):
                 "reason": reason,
                 "run_id": run_id
             }
-
+        workspace = context.workspace
         results.append(apply_operation(op, workspace))
 
     # ----------------------------
@@ -57,16 +54,16 @@ def apply_engine(plan: dict, context):
     # ----------------------------
     # 6. ARTIFACTS
     # ----------------------------
-    with open(f"{context['artifacts']}/plan.json", "w") as f:
+    with open(f"{context.artifacts}/plan.json", "w") as f:
         json.dump(plan, f, indent=2)
 
-    with open(f"{context['artifacts']}/execution.json", "w") as f:
+    with open(f"{context.artifacts}/execution.json", "w") as f:
         json.dump({
             "operations": operations,
             "results": results
         }, f, indent=2)
-    
-    with open(f"{context['artifacts']}/summary.json", "w") as f:
+
+    with open(f"{context.artifacts}/summary.json", "w") as f:
         json.dump({
             "run_id": run_id,
             "status": "ok",

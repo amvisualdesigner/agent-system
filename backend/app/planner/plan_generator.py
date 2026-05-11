@@ -75,14 +75,10 @@ def call_llm(prompt: str) -> Dict[str, Any]:
         return {"error": "invalid_json_from_llm", "exception": str(e), "raw": raw}
     
 
-def generate_plan(req: PlanRequest, context):
-
-    workspace_files = context.get("workspace_files", [])
+def generate_plan(req: PlanRequest, workspace_files):
 
     prompt = build_prompt(req.task, workspace_files)
 
     llm_result = call_llm(prompt)
-
-    write_state(context["run_id"], "plan")
 
     return llm_result
