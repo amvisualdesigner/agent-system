@@ -34,7 +34,7 @@ def latest():
 
     return state
 
-@app.get("/maintenance/cleanup")
+@app.get("/maintenance/cleanup") # TODO: remove this in prod
 def cleanup():
     print("[cleanup] START")
 
