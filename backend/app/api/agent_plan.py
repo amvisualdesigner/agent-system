@@ -15,7 +15,6 @@ router = APIRouter()
 def agent_plan(req: PlanRequest):
 
     run_id = str(uuid.uuid4())
-    base_dir = f"/tmp/agent-runs/{run_id}"
 
     context = build_context(run_id)
 

@@ -7,16 +7,27 @@ MAX_FILE_SIZE = 200_000
 
 def apply_operation(op, base_repo):
     ok, reason = validate_operation(op)
+    print("[DEBUG] validate result:", ok, reason)
     if not ok:
         return {"status": "rejected", "reason": reason, "op": op}
 
     path = safe_path(op["path"], base_repo)
-    content = op.get("diff", "")
+    content = op.get("proposed_content") or op.get("diff") or ""
+
+    print("[DEBUG][apply] op:", op["action"], op["path"])
+    print("[DEBUG][apply] resolved path:", path)
+    print("[DEBUG][apply] exists before:", os.path.exists(path))
+    print("[DEBUG][apply] content length:", len(content))
+    print("[DEBUG][apply] content preview:", content[:100])
 
     if op["action"] == Action.create:
-        return create_file(path, content)
+        result = create_file(path, content)
+        print("CREATE: [DEBUG][apply] exists after:", os.path.exists(path))
+        return result
     elif op["action"] == Action.modify:
-        return modify_file(path, content)
+        result = modify_file(path, content)
+        print("MODIFY: [DEBUG][apply] exists after:", os.path.exists(path))
+        return result
     elif op["action"] == Action.delete:
         return delete_file(path)
     else:

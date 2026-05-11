@@ -50,6 +50,7 @@ def validate_operation(op: dict):
 
     # 4. extensión
     ext = os.path.splitext(op["path"])[1]
+
     if ext not in ALLOWED_EXTENSIONS:
         return False, "extension_not_allowed"
 

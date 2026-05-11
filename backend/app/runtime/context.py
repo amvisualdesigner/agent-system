@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from app.config.settings import settings
 
 @dataclass
 class RunContext:
@@ -10,7 +11,7 @@ class RunContext:
 
 
 def build_context(run_id: str, workspace_root: str | None = None) -> RunContext:
-    base_dir = workspace_root or f"/tmp/agent-runs/{run_id}"
+    base_dir = f"{settings.RUNS_DIR}/{run_id}"
 
     workspace = os.path.join(base_dir, "workspace")
     artifacts = os.path.join(base_dir, "artifacts")

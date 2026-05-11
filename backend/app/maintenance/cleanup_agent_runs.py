@@ -1,53 +1,60 @@
 import os
 import shutil
-import time
+import subprocess
 
 BASE_DIR = "/tmp/agent-runs"
-
-MAX_AGE_SECONDS = 60 * 60 * 2   # 2 horas
-MAX_RUNS = 30
-
-
-def get_runs():
-    if not os.path.exists(BASE_DIR):
-        return []
-
-    runs = []
-
-    for name in os.listdir(BASE_DIR):
-        path = os.path.join(BASE_DIR, name)
-
-        if not os.path.isdir(path):
-            continue
-
-        runs.append((path, os.path.getmtime(path)))
-
-    return runs
+REPO_ROOT = "/opt/agent-repos/agent-test-repo"
 
 
 def cleanup():
-    runs = get_runs()
+    print("[cleanup] NUCLEAR START")
 
-    if not runs:
-        return
+    # ----------------------------
+    # 1. GIT WORKTREES
+    # ----------------------------
+    subprocess.run(
+        ["git", "worktree", "prune", "--force"],
+        cwd=REPO_ROOT,
+        check=False
+    )
 
-    now = time.time()
+    # eliminar branches agent-*
+    try:
+        branches = subprocess.check_output(
+            ["git", "branch"],
+            cwd=REPO_ROOT,
+            text=True
+        ).splitlines()
+    except Exception:
+        branches = []
 
-    # ordena por más recientes primero
-    runs.sort(key=lambda x: x[1], reverse=True)
+    for b in branches:
+        b = b.strip().replace("*", "").strip()
 
-    for i, (path, mtime) in enumerate(runs):
+        if b.startswith("agent-"):
+            print(f"[cleanup] deleting branch {b}")
+            subprocess.run(
+                ["git", "branch", "-D", b],
+                cwd=REPO_ROOT,
+                check=False
+            )
 
-        age = now - mtime
+    # ----------------------------
+    # 2. FILESYSTEM TOTAL WIPE
+    # ----------------------------
+    if os.path.exists(BASE_DIR):
+        for name in os.listdir(BASE_DIR):
+            path = os.path.join(BASE_DIR, name)
 
-        # 1. conserva los últimos N runs
-        if i < MAX_RUNS:
-            continue
-
-        # 2. borra por TTL
-        if age > MAX_AGE_SECONDS:
             print(f"[cleanup] removing {path}")
             shutil.rmtree(path, ignore_errors=True)
+
+    # ----------------------------
+    # 3. FINAL CHECK (OPTIONAL)
+    # ----------------------------
+    subprocess.run(["git", "worktree", "prune"], cwd=REPO_ROOT)
+
+    print("[cleanup] DONE")
 
 
 if __name__ == "__main__":

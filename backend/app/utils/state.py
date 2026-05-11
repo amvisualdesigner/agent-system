@@ -1,8 +1,9 @@
 import os
 import json
 import time
+from app.config.settings import settings
 
-STATE_PATH = "/tmp/agent-runs/state.json"
+STATE_PATH =f"{settings.RUNS_DIR}/state.json"
 
 def write_state(run_id: str, status: str):
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
