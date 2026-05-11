@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict, Any
@@ -11,7 +10,9 @@ import time
 
 from app.executor.patch_executor import apply_operation
 from app.utils.workspace import list_workspace_files
-from app.executor.policy import safe_path, validate_operation
+from app.planner.plan_generator import build_prompt, call_llm
+from app.planner.plan_validator import validate_plan
+from app.planner.execution_compiler import compile_plan
 
 # -------- CONFIGURACIÓN --------
 MAX_OPERATIONS = 20
@@ -29,70 +30,6 @@ class AgentRequest(BaseModel):
     scope: List[str] = []
     constraints: List[str] = []
     repo_context: List[RepoFile] = []
-
-# -------- UTILIDADES LLM --------
-def clean_json(text: str) -> str:
-    """Extrae JSON robustamente del output del modelo."""
-    text = text.strip()
-    first = text.find("{")
-    last = text.rfind("}")
-    if first != -1 and last != -1 and last > first:
-        text = text[first:last + 1]
-    return text
-
-def call_llm(prompt: str) -> Dict[str, Any]:
-    import ollama
-    response = ollama.chat(
-        model="qwen3:14b",
-        messages=[
-            {"role": "system", "content": (
-                "You are a strict code generation engine. "
-                "You MUST return ONLY valid JSON. "
-                "No markdown. No explanations. No text outside JSON."
-            )},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    raw = clean_json(response["message"]["content"])
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        return {"error": "invalid_json_from_llm", "exception": str(e), "raw": raw}
-
-# -------- PROMPT ENGINE --------
-def build_prompt(task: str, workspace_files: list = []) -> str:
-    context = "\n".join(workspace_files) if workspace_files else ""
-    return f"""
-Return ONLY valid JSON.
-
-You are operating inside a git worktree.
-
-Workspace files (existing structure):
-{context}
-
-You MUST only modify, create or delete files inside this workspace.
-You MUST NOT use paths outside this list unless creating new files logically inside the project structure.
-
-Schema:
-{{
-  "operations": [
-    {{
-      "type": "create",
-      "path": "src/file.ts",
-      "diff": "..."
-    }}
-  ],
-  "warnings": []
-}}
-
-Rules:
-- NO markdown
-- NO explanations
-- ALWAYS include "operations"
-
-Task:
-{task}
-"""
 
 # -------- ENDPOINTS --------
 @app.get("/health")
@@ -162,17 +99,34 @@ def run_agent(req: AgentRequest):
         t1 = time.time()
         print("LLM:", t1 - t0)
 
+        # Plan
+        plan = llm_result
+        ok, reason = validate_plan(plan)
+        if not ok:
+            return {
+                "error": "invalid_plan",
+                "reason": reason,
+                "plan": plan
+        }
+
+        print("=== PLAN ===")
+        print(json.dumps(plan, indent=2))
+
+        # Artifacts
         with open(f"{artifacts_dir}/llm_raw.json", "w") as f:
             json.dump(llm_result, f, indent=2)
 
+        # Execution
         if "operations" not in llm_result:
             llm_result = {
                 "operations": [],
                 "warnings": ["missing_operations"],
                 "raw": llm_result
             }
+        operations = compile_plan(plan)
 
-        operations = llm_result.get("operations", [])
+        print("=== COMPILED OPERATIONS ===")
+        print(json.dumps(operations, indent=2))
 
         with open(f"{artifacts_dir}/operations.json", "w") as f:
             json.dump(operations, f, indent=2)
@@ -234,6 +188,7 @@ def run_agent(req: AgentRequest):
 
         with open("/tmp/agent-runs/LAST_RUN.txt", "w") as f:
             f.write(run_id)
+            
 
         # ----------------------------
         # 7. respuesta
