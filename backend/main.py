@@ -7,6 +7,7 @@ import json
 import uuid
 import subprocess
 import shutil
+import time
 
 from app.executor.patch_executor import apply_operation
 from app.utils.workspace import list_workspace_files
@@ -154,7 +155,12 @@ def run_agent(req: AgentRequest):
         # ----------------------------
         # 3. LLM
         # ----------------------------
+        t0 = time.time()
+
         llm_result = call_llm(prompt)
+        
+        t1 = time.time()
+        print("LLM:", t1 - t0)
 
         with open(f"{artifacts_dir}/llm_raw.json", "w") as f:
             json.dump(llm_result, f, indent=2)
@@ -191,8 +197,13 @@ def run_agent(req: AgentRequest):
         # ----------------------------
         execution = []
 
+        t2 = time.time()
+
         for op in operations:
             execution.append(apply_operation(op, workspace))
+
+        t3 = time.time()
+        print("EXEC:", t3 - t2)
 
         # ----------------------------
         # 6. git diff
@@ -211,7 +222,12 @@ def run_agent(req: AgentRequest):
             text=True
         )
 
+        t4 = time.time()
+
         git_diff = diff_result.stdout
+
+        t5 = time.time()
+        print("GIT:", t5 - t4)
 
         with open(f"{artifacts_dir}/diff.patch", "w") as f:
             f.write(git_diff)
