@@ -1,6 +1,7 @@
 import os
-import shutil
-from app.executor.policy import validate_operation, safe_path
+
+from app.policy.policy import validate_operation, safe_path
+from app.contracts.operations import Action
 
 MAX_FILE_SIZE = 200_000
 
@@ -12,11 +13,11 @@ def apply_operation(op, base_repo):
     path = safe_path(op["path"], base_repo)
     content = op.get("diff", "")
 
-    if op["type"] == "create":
+    if op["action"] == Action.create:
         return create_file(path, content)
-    elif op["type"] == "modify":
+    elif op["action"] == Action.modify:
         return modify_file(path, content)
-    elif op["type"] == "delete":
+    elif op["action"] == Action.delete:
         return delete_file(path)
     else:
         return {"status": "error", "reason": "unknown_operation"}

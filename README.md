@@ -31,3 +31,6 @@ y añadir:
 límites de operaciones por tipo
 validación de estructura del diff (no solo existencia)
 protección contra overwrite masivo
+
+# Limpiar
+python backend/app/maintenance/cleanup_agent_runs.py

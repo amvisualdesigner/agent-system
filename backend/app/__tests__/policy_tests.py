@@ -2,6 +2,8 @@ import requests
 import json
 import os
 
+from app.contracts.operations import Action
+
 URL = "http://0.0.0.0:8000/agent/run"
 
 tests = [
@@ -55,7 +57,7 @@ for test in tests:
 
     # mostrar contenido de archivos que creó el LLM
     for op in llm_ops:
-        if op["type"] in ["create", "modify"]:
+        if Action(op["action"]) in {Action.create, Action.modify}:
             path = os.path.join(workspace, op["path"])
             if os.path.exists(path):
                 with open(path, "r") as f:

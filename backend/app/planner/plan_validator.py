@@ -1,12 +1,20 @@
+from app.contracts.operations import Action
+
 def validate_plan(plan: dict):
-    if not plan.get("steps"):
+    steps = plan.get("steps", [])
+
+    if not steps:
         return False, "empty_steps"
 
-    for step in plan["steps"]:
+    for step in steps:
+
         if "path" not in step:
             return False, "missing_path"
 
-        if step["action"] not in ["create", "modify", "delete"]:
+        # 🔥 canonical validation via Enum
+        try:
+            Action(step["action"])
+        except Exception:
             return False, "invalid_action"
 
         if not step.get("intent"):

@@ -3,7 +3,7 @@ def compile_plan(plan):
 
     for step in plan["steps"]:
         operations.append({
-            "type": step["action"],
+            "action": step["action"],
             "path": step["path"],
             "diff": step.get("proposed_content", "")
         })

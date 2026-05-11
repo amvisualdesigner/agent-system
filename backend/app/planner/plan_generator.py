@@ -1,12 +1,15 @@
 from typing import Dict, Any
 import json
 
+from app.utils.state import write_state
+from app.contracts.plan_request import PlanRequest
+
 schema = """
 {
   "steps": [
     {
       "path": "src/file.ts",
-      "action": "create | modify | delete",
+      "action": "create",
       "intent": "why this change is needed",
       "proposed_content": "optional final content"
     }
@@ -26,6 +29,8 @@ Your task is to generate a semantic modification plan for a repository.
 You DO NOT execute changes.
 
 You ONLY describe intended modifications.
+
+action MUST be one of: create, modify, delete
 
 Schema:
 {schema}
@@ -68,3 +73,16 @@ def call_llm(prompt: str) -> Dict[str, Any]:
         return json.loads(raw)
     except Exception as e:
         return {"error": "invalid_json_from_llm", "exception": str(e), "raw": raw}
+    
+
+def generate_plan(req: PlanRequest, context):
+
+    workspace_files = context.get("workspace_files", [])
+
+    prompt = build_prompt(req.task, workspace_files)
+
+    llm_result = call_llm(prompt)
+
+    write_state(context["run_id"], "plan")
+
+    return llm_result
