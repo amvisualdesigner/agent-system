@@ -105,7 +105,7 @@ def cleanup():
 def get_run(run_id: str):
     import json
 
-    base = f"/tmp/agent-runs/{run_id}"
+    base = f"{settings.RUNS_DIR}/{run_id}"
     artifacts_dir = f"{base}/artifacts"
     result = {"run_id": run_id, "exists": os.path.exists(base)}
 

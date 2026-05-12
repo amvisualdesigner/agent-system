@@ -15,7 +15,7 @@ def create_worktree(run_id: str) -> str:
     ✔ Mantiene contrato: retorna SOLO workspace (str)
     """
 
-    workspace = f"/tmp/agent-runs/{run_id}/workspace"
+    workspace = f"{settings.RUNS_DIR}/{run_id}/workspace"
     repo_root = settings.REPO_ROOT
     branch = f"agent-{run_id[:8]}"
     base_branch = "master"
