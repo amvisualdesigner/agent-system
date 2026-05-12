@@ -4,7 +4,6 @@ import subprocess
 
 from app.planner.execution_compiler import compile_plan
 from app.executor.patch_executor import apply_operation
-from app.executor.worktree_manager import create_worktree
 from app.policy.policy import validate_plan_policy, validate_operation
 from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
@@ -24,8 +23,6 @@ def apply_engine(run_id, plan: dict, context):
     # ----------------------------
     # 1.5 WORKTREE SETUP
     # ----------------------------
-    context.workspace = create_worktree(run_id)
-
     print(f"[apply] workspace = {context.workspace}")
 
     # ----------------------------
@@ -100,6 +97,23 @@ def apply_engine(run_id, plan: dict, context):
     print("[apply] generating diff")
 
     diff = generate_diff(context.workspace)
+
+    result = subprocess.run(
+        ["git", "commit", "-m", f"agent:{run_id}"],
+        cwd=context.workspace,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        print("[apply][ERROR] git commit failed")
+        print(result.stderr)
+
+        return {
+            "status": "rejected",
+            "reason": "git_commit_failed",
+            "error": result.stderr
+        }
 
     print(f"[apply] diff length = {len(diff)}")
 

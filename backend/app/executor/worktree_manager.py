@@ -7,17 +7,33 @@ from app.config.settings import settings
 
 def create_worktree(run_id: str) -> str:
     """
-    Crea un workspace aislado para el run usando git worktree.
-    SIEMPRE desde HEAD (sin branches).
+    Crea un workspace aislado usando git worktree.
+
+    ✔ Siempre desde base_branch (master)
+    ✔ Rama única por run
+    ✔ No contamina HEAD del repo base
+    ✔ Mantiene contrato: retorna SOLO workspace (str)
     """
 
     workspace = f"/tmp/agent-runs/{run_id}/workspace"
     repo_root = settings.REPO_ROOT
+    branch = f"agent-{run_id[:8]}"
+    base_branch = "master"
 
-    print(f"[worktree] creating clean workspace for {run_id}")
+    print(f"[worktree] run_id={run_id}")
+    print(f"[worktree] branch={branch} base={base_branch}")
 
     # ----------------------------
-    # 1. limpiar estado git si existe
+    # 1. eliminar worktree previo si existe
+    # ----------------------------
+    subprocess.run(
+        ["git", "worktree", "remove", workspace, "--force"],
+        cwd=repo_root,
+        check=False
+    )
+
+    # ----------------------------
+    # 2. limpiar worktrees huérfanos
     # ----------------------------
     subprocess.run(
         ["git", "worktree", "prune"],
@@ -26,7 +42,7 @@ def create_worktree(run_id: str) -> str:
     )
 
     # ----------------------------
-    # 2. eliminar workspace físico si existe
+    # 3. eliminar workspace físico si existe
     # ----------------------------
     subprocess.run(
         ["rm", "-rf", workspace],
@@ -37,12 +53,56 @@ def create_worktree(run_id: str) -> str:
         shutil.rmtree(workspace, ignore_errors=True)
 
     # ----------------------------
-    # 3. crear worktree limpio desde HEAD
+    # 4. asegurar base limpia
     # ----------------------------
     subprocess.run(
-        ["git", "worktree", "add", workspace, "HEAD"],
+        ["git", "fetch", "--all"],
+        cwd=repo_root,
+        check=False
+    )
+
+    subprocess.run(
+        ["git", "checkout", base_branch],
         cwd=repo_root,
         check=True
+    )
+
+    subprocess.run(
+        ["git", "reset", "--hard", base_branch],
+        cwd=repo_root,
+        check=True
+    )
+
+    # ----------------------------
+    # 5. crear worktree desde base explícita
+    # ----------------------------
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            workspace,
+            "-b",
+            branch,
+            base_branch
+        ],
+        cwd=repo_root,
+        check=True
+    )
+
+    # ----------------------------
+    # 6. identidad git en workspace
+    # ----------------------------
+    subprocess.run(
+        ["git", "config", "user.email", "agent@local"],
+        cwd=workspace,
+        check=False
+    )
+
+    subprocess.run(
+        ["git", "config", "user.name", "agent"],
+        cwd=workspace,
+        check=False
     )
 
     print(f"[worktree] ready at {workspace}")

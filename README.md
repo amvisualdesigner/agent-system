@@ -141,3 +141,13 @@ curl -X POST http://localhost:8000/maintenance/cleanup
 ✔ Plan → Apply pipeline operativo
 ✔ Cleanup centralizado
 ✔ Diff generado por Git
+
+## MCP TOOLS
+Tool	Params	Description
+agent_plan | prompt | Genera un plan a partir de una tarea
+agent_apply | run_id, plan | Ejecuta el plan en sandbox
+get_run | run_id | Obtiene metadata del run
+agent_review | run_id | Muestra plan, diff, execution, files
+agent_run | prompt | One-shot plan + apply
+agent_approve | run_id | Aprueba y mergea cambios al repo
+agent_reject | run_id | Rechaza cambios y limpia
