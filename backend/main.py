@@ -99,3 +99,20 @@ def cleanup():
         "status": "ok",
         "message": "cleanup completed"
     }
+
+
+@app.get("/runs/{run_id}")
+def get_run(run_id: str):
+
+    base = f"/tmp/agent-runs/{run_id}"
+
+    return {
+        "run_id": run_id,
+        "exists": os.path.exists(base),
+        "artifacts": {
+            "plan": os.path.exists(f"{base}/artifacts/plan.json"),
+            "execution": os.path.exists(f"{base}/artifacts/execution.json"),
+            "summary": os.path.exists(f"{base}/artifacts/summary.json"),
+            "diff": os.path.exists(f"{base}/artifacts/diff.patch"),
+        }
+    }

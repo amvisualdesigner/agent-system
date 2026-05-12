@@ -9,10 +9,15 @@ MAX_OPERATIONS = 20
 MAX_DELETES = 3
 
 def safe_path(path: str, base_repo: str):
-    full_path = os.path.realpath(os.path.join(base_repo, path))
+    # normaliza ruta
+    normalized = os.path.normpath(path)
+
+    full_path = os.path.realpath(os.path.join(base_repo, normalized))
     base_path = os.path.realpath(base_repo)
+
     if not full_path.startswith(base_path + os.sep):
         raise Exception(f"Path escape detected: {path}")
+
     return full_path
 
 # PLAN POLICY (semantic limits)
@@ -30,31 +35,43 @@ def validate_plan_policy(plan):
 
     return True, "ok"
 
+def is_path_safe(path: str):
+    normalized = os.path.normpath(path)
+    parts = normalized.split(os.sep)
+
+    forbidden = {".git", "node_modules", "dist", "build", ".env"}
+
+    return not any(p in forbidden for p in parts)
+
 # EXECUTION POLICY (filesystem safety)
 def validate_operation(op: dict):
 
-    # 1. action válida (SOURCE OF TRUTH = Enum)
+    # 1. action válida
     try:
         action = Action(op.get("action"))
     except Exception:
         return False, "invalid_operation_action"
 
     # 2. path obligatorio
-    if "path" not in op:
+    path = op.get("path")
+    if not path:
         return False, "missing_path"
 
-    # 3. bloqueo de rutas peligrosas
-    for blocked in BLOCKED_PATTERNS:
-        if blocked in op["path"]:
-            return False, "blocked_path"
+    # 3. path safety
+    if not is_path_safe(path):
+        return False, "blocked_path"
 
     # 4. extensión
-    ext = os.path.splitext(op["path"])[1]
-
+    ext = os.path.splitext(path)[1]
     if ext not in ALLOWED_EXTENSIONS:
         return False, "extension_not_allowed"
 
-    # 5. diff obligatorio según acción
+    # 5. tamaño
+    content = op.get("content") or op.get("proposed_content")
+    if content and len(content) > MAX_FILE_SIZE:
+        return False, "file_too_large"
+
+    # 6. diff obligatorio
     if action in {Action.create, Action.modify} and not op.get("diff"):
         return False, "missing_diff"
 

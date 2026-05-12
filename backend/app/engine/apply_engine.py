@@ -148,7 +148,8 @@ def apply_engine(run_id, plan: dict, context):
         "reason": None if diff else "missing_diff",
         "run_id": run_id,
         "operations": operations,
-        "execution": results
+        "execution": results,
+        "workspace": context.workspace
     }
 
     print(f"[apply] response = {response}")
