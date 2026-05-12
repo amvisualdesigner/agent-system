@@ -2,7 +2,7 @@ import os
 
 from app.contracts.operations import Action
 
-ALLOWED_EXTENSIONS = {".ts", ".js", ".py", ".md", ".json", ".yaml", ".yml", ".txt"}
+ALLOWED_EXTENSIONS = {".ts", ".js", ".py", ".md", ".json", ".yaml", ".yml", ".txt", ".html", ".css"}
 BLOCKED_PATTERNS = [".git", "node_modules", "dist", "build", ".env"]
 MAX_FILE_SIZE = 200_000  # 200KB
 MAX_OPERATIONS = 20

@@ -58,7 +58,7 @@ def clean_json(text: str) -> str:
 def call_llm(prompt: str) -> Dict[str, Any]:
     import ollama
     response = ollama.chat(
-        model="qwen3:14b",
+        model="qwen2.5-coder:14b",
         messages=[
             {"role": "system", "content": (
                 "You are a strict code generation engine. "
