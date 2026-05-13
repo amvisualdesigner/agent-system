@@ -172,4 +172,6 @@ async def agent_reject(run_id: str):
 
 # -------------------------
 if __name__ == "__main__":
-    mcp.run()
+    mcp.settings.host = "127.0.0.1"
+    mcp.settings.port = 8510
+    mcp.run(transport="stdio", mount_path="/mcp")
