@@ -37,7 +37,7 @@ async def agent_plan(prompt: str):
 # APPLY (sandbox execution)
 # -------------------------
 @mcp.tool()
-async def agent_apply(run_id: str, plan):
+async def agent_apply(run_id: str, plan, dry_run: bool = False):
     plan = normalize_plan(plan)
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -45,7 +45,8 @@ async def agent_apply(run_id: str, plan):
             f"{BASE_URL}/agent/apply",
             json={
                 "run_id": run_id,
-                "plan": plan
+                "plan": plan,
+                "dry_run": dry_run
             }
         )
 
@@ -101,7 +102,7 @@ async def agent_review(run_id: str):
 # ONE-SHOT (fast mode)
 # -------------------------
 @mcp.tool()
-async def agent_run(prompt: str):
+async def agent_run(prompt: str, dry_run: bool = False):
     async with httpx.AsyncClient(timeout=120) as client:
 
         # 1. PLAN
@@ -119,7 +120,8 @@ async def agent_run(prompt: str):
             f"{BASE_URL}/agent/apply",
             json={
                 "run_id": run_id,
-                "plan": plan_data["plan"]
+                "plan": plan_data["plan"],
+                "dry_run": dry_run
             }
         )
         apply_resp.raise_for_status()
@@ -127,6 +129,7 @@ async def agent_run(prompt: str):
     return {
         "run_id": run_id,
         "plan": plan_data["plan"],
+        "dry_run": dry_run,
         "result": apply_resp.json()
     }
 

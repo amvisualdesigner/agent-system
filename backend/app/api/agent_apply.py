@@ -13,4 +13,4 @@ def agent_apply(req: ApplyRequest):
     context = build_context(req.run_id)
     context.workspace = create_worktree(req.run_id)
 
-    return apply_engine(req.run_id, req.plan, context)
+    return apply_engine(req.run_id, req.plan, context, dry_run=req.dry_run)

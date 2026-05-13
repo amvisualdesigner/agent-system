@@ -9,7 +9,7 @@ from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
 
 
-def apply_engine(run_id, plan: dict, context):
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
 
     print(f"[apply] run_id = {run_id}")
 
@@ -98,22 +98,27 @@ def apply_engine(run_id, plan: dict, context):
 
     diff = generate_diff(context.workspace)
 
-    result = subprocess.run(
-        ["git", "commit", "-m", f"agent:{run_id}"],
-        cwd=context.workspace,
-        capture_output=True,
-        text=True
-    )
+    if not dry_run:
+        result = subprocess.run(
+            ["git", "commit", "-m", f"agent:{run_id}"],
+            cwd=context.workspace,
+            capture_output=True,
+            text=True
+        )
 
-    if result.returncode != 0:
-        print("[apply][ERROR] git commit failed")
-        print(result.stderr)
+        if result.returncode != 0:
+            print("[apply][ERROR] git commit failed")
+            print(result.stderr)
 
-        return {
-            "status": "rejected",
-            "reason": "git_commit_failed",
-            "error": result.stderr
-        }
+            return {
+                "status": "rejected",
+                "reason": "git_commit_failed",
+                "error": result.stderr
+            }
+
+        print("[apply] committed")
+    else:
+        print("[apply] dry_run — skipped commit")
 
     print(f"[apply] diff length = {len(diff)}")
 
@@ -161,6 +166,7 @@ def apply_engine(run_id, plan: dict, context):
         "status": "ok" if diff else "rejected",
         "reason": None if diff else "missing_diff",
         "run_id": run_id,
+        "dry_run": dry_run,
         "operations": operations,
         "execution": results,
         "workspace": context.workspace

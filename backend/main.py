@@ -130,14 +130,37 @@ def get_run(run_id: str):
 
         workspace = f"{base}/workspace"
         if os.path.exists(workspace):
-            ws_files = []
-
-            for root, dirs, files in os.walk(workspace):
-                for fn in files:
-                    ws_files.append(os.path.join(root, fn).replace(workspace, "").lstrip("/"))
-
             result["workspace"] = workspace
-            result["files"] = ws_files
+
+            diff = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            cached = subprocess.run(
+                ["git", "diff", "--cached", "--name-only", "HEAD"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            committed = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            changed = set()
+            for out in [diff, cached, committed]:
+                changed.update(out.stdout.strip().splitlines())
+
+            result["files"] = sorted(f for f in changed if f)
 
     return result
 
@@ -181,6 +204,31 @@ def approve_run(run_id: str):
         )
 
     # ----------------------------
+    # 1.5. COMMIT STAGED CHANGES (dry_run recovery)
+    # ----------------------------
+    workspace = f"{settings.RUNS_DIR}/{run_id}/workspace"
+    if os.path.exists(workspace):
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=workspace,
+            check=False
+        )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=workspace,
+            check=False
+        )
+        if staged.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "-m", f"agent:{run_id}"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print(f"[approve] committed staged changes from dry_run")
+
+    # ----------------------------
     # 2. UPDATE BASE
     # ----------------------------
 
@@ -199,13 +247,23 @@ def approve_run(run_id: str):
     # ----------------------------
     # 3. MERGE BRANCH
     # ----------------------------
-    subprocess.run(
+    merge = subprocess.run(
         ["git", "merge", branch, "--no-edit"],
         cwd=settings.REPO_ROOT,
-        check=True
+        capture_output=True,
+        text=True
     )
 
-    print(f"[approve] merged {branch} into {base_branch}")
+    if merge.returncode != 0:
+
+        print("[approve][ERROR] merge failed")
+        print(merge.stderr)
+
+        return {
+            "status": "rejected",
+            "reason": "merge_conflict",
+            "error": merge.stderr
+        }
 
     # ----------------------------
     # 4. OPTIONAL CLEANUP (NO WORKTREES HERE)
