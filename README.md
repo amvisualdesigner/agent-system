@@ -1,153 +1,258 @@
 # 🤖 Agent System
 
-Sistema de ejecución de agentes que convierte planes LLM en operaciones reales sobre un repositorio Git mediante worktrees aislados.
+A coding agent system that turns LLM-generated plans into real, isolated Git-based operations using worktrees.
 
 ---
 
-## 📌 Arquitectura
+## 📌 Overview
 
-El sistema está compuesto por:
+The Agent System is a backend-driven framework that:
 
-- **Backend API (FastAPI)** → expone endpoints de planificación y ejecución
-- **Git Repository** → estado persistente de los agentes
-- **Worktrees efímeros** → ejecución aislada por `run_id`
-- **Filesystem `/tmp/agent-runs`** → artefactos temporales por ejecución
+- Converts natural language tasks into structured execution plans
+- Executes changes in isolated Git worktrees
+- Produces diffs and artifacts per run
+- Supports review, approval, and cleanup workflows
 
----
-
-## ⚙️ Flujo general
-
-1. `POST /agent/plan`
-   - El LLM genera un plan estructurado
-
-2. `POST /agent/apply`
-   - El plan se compila en operaciones
-   - Se ejecutan en un worktree aislado
-   - Se genera diff + artifacts
-
-3. `POST /maintenance/cleanup`
-   - Limpia:
-     - worktrees huérfanos
-     - branches `agent-*`
-     - `/tmp/agent-runs`
+It is designed for deterministic execution, reproducibility, and safe code generation.
 
 ---
 
-## 🚀 Cómo ejecutar el backend
+## ⚙️ Architecture
+
+### Core Components
+
+- **FastAPI Backend** → API layer for planning and execution
+- **LLM Engine (vLLM)** → generates structured JSON plans
+- **Git Repository** → source of truth for code state
+- **Ephemeral Worktrees** → isolated execution per `run_id`
+- **Temporary Storage (`/tmp/agent-runs`)** → artifacts per execution
+
+### LLM Layer (Current)
+
+The system now uses **vLLM OpenAI-compatible server** instead of Ollama:
+
+- Model: `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ`
+- Endpoint: `http://localhost:8000/v1/chat/completions`
+- Features:
+  - PagedAttention KV cache
+  - Tool-safe structured output
+  - High-throughput inference
+
+---
+
+## 🔄 Execution Flow
+
+### 1. Plan Generation
+`POST /agent/plan`
+
+- LLM receives task prompt
+- Returns structured JSON plan:
+
+```json
+{
+  "actions": [
+    {
+      "type": "create|update|delete",
+      "file_path": "path/to/file",
+      "description": "what to do"
+    }
+  ]
+}
+```
+
+---
+
+### 2. Plan Execution
+`POST /agent/apply`
+
+- Creates isolated Git worktree per `run_id`
+- Applies file operations
+- Stages and computes Git diff
+- Stores execution artifacts
+
+---
+
+### 3. Cleanup
+`POST /maintenance/cleanup`
+
+- Removes:
+  - Orphan worktrees
+  - Temporary branches (`agent-*`)
+  - `/tmp/agent-runs`
+
+---
+
+## 🚀 Running the Backend
 
 ```bash
 cd /opt/agent-system/backend
 source venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
+---
+
+## 🧠 LLM Configuration
+
+The system is configured via environment variables:
+
+```env
+LLM_BASE_URL=http://localhost:8000
+LLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ
+LLM_API_KEY=
+```
+
+### vLLM Deployment
+
+```bash
+docker compose up -d vllm
+```
+
+Key parameters:
+
+- Context: 6144 tokens (initial)
+- GPU utilization: 0.75
+- Max sequences: 4
+- Quantization: AWQ
+
+---
+
 ## 📡 API Usage
-### 1. 📥 Generar un plan
-```Request
-curl -X POST http://localhost:8000/agent/plan \
+
+### 1. Generate Plan
+
+```bash
+curl -X POST http://localhost:8001/agent/plan \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "Create a util function and a hello module that uses it"
+    "task": "Create a utility function and a hello module"
   }'
 ```
-```Response
+
+### Response
+
+```json
 {
-  "run_id": "0d74fb1a-01e4-4d0e-af51-8535e4263c4c",
+  "run_id": "uuid",
   "status": "ok",
   "plan": {
-    "steps": [
+    "actions": [
       {
-        "path": "src/util.ts",
-        "action": "create",
-        "proposed_content": "export function add(a, b) { return a + b; }"
+        "type": "create",
+        "file_path": "src/util.ts",
+        "description": "create utility function"
       }
     ]
   }
 }
 ```
-### 2. ⚙️ Ejecutar plan (apply)
-```Request
-curl -X POST http://localhost:8000/agent/apply \
+
+---
+
+### 2. Apply Plan
+
+```bash
+curl -X POST http://localhost:8001/agent/apply \
   -H "Content-Type: application/json" \
   -d '{
-    "run_id": "0d74fb1a-01e4-4d0e-af51-8535e4263c4c",
+    "run_id": "uuid",
     "plan": {
-      "steps": [
-        {
-          "path": "src/util.ts",
-          "action": "create",
-          "proposed_content": "export function add(a, b) { return a + b; }"
-        },
-        {
-          "path": "src/hello.ts",
-          "action": "create",
-          "proposed_content": "import { add } from \"./util\";\nconsole.log(add(2,3));"
-        }
-      ]
+      "actions": []
     }
   }'
 ```
-```Response
-{
-  "status": "ok",
-  "run_id": "0d74fb1a-01e4-4d0e-af51-8535e4263c4c",
-  "operations": [],
-  "execution": []
-}
-```
-### 3. 🧹 Cleanup del sistema
 
-```Request
-curl -X POST http://localhost:8000/maintenance/cleanup
-```
-```Response
-{
-  "status": "ok",
-  "message": "cleanup completed"
-}
+---
+
+### 3. Cleanup System
+
+```bash
+curl -X POST http://localhost:8001/maintenance/cleanup
 ```
 
-## 📁 Artefactos generados
-Cada ejecución crea:
+---
 
+## 📁 Artifact Structure
+
+Each execution creates:
+
+```
 /tmp/agent-runs/<run_id>/
-  ├── workspace/         # worktree aislado
+  ├── workspace/          # isolated git worktree
   ├── artifacts/
-  │     ├── plan.json
-  │     ├── execution.json
-  │     ├── summary.json
-  │     └── diff.patch
+  │    ├── plan.json
+  │    ├── execution.json
+  │    ├── summary.json
+  │    └── diff.patch
+```
 
-## 🧠 Conceptos clave
-run_id → identifica cada ejecución
-worktree → aislamiento por ejecución Git
-proposed_content → contenido final a escribir en archivo
-diff → generado desde git staging
-agent- branches* → ramas temporales del sistema
+---
 
-## ⚠️ Notas importantes
-El sistema requiere permisos consistentes en el repositorio Git
-No ejecutar operaciones Git como usuarios distintos sobre el mismo repo
-/tmp/agent-runs es efímero y puede limpiarse en cualquier momento
+## 🧠 Core Concepts
 
-## 🧹 Mantenimiento
-Si algo queda colgado:
+- **run_id** → unique execution identifier
+- **worktree** → isolated Git workspace per run
+- **actions** → atomic file operations
+- **diff** → Git-generated change set
+- **agent branches** → temporary branches (`agent-*`)
+
+---
+
+## 🧹 Maintenance
+
+Manual cleanup (if needed):
+
+```bash
 rm -rf /tmp/agent-runs/*
-o
-curl -X POST http://localhost:8000/maintenance/cleanup
+```
 
-## 🚀 Estado del sistema
-✔ Worktrees aislados por run
-✔ Plan → Apply pipeline operativo
-✔ Cleanup centralizado
-✔ Diff generado por Git
+Or via API:
 
-## MCP TOOLS
-Tool	Params	Description
-agent_plan | prompt | Genera un plan a partir de una tarea
-agent_apply | run_id, plan | Ejecuta el plan en sandbox
-get_run | run_id | Obtiene metadata del run
-agent_review | run_id | Muestra plan, diff, execution, files
-agent_run | prompt | One-shot plan + apply
-agent_approve | run_id | Aprueba y mergea cambios al repo
-agent_reject | run_id | Rechaza cambios y limpia
+```bash
+POST /maintenance/cleanup
+```
+
+---
+
+## 🤖 MCP Tools
+
+| Tool | Params | Description |
+|------|--------|-------------|
+| `agent_plan` | prompt | Generate execution plan |
+| `agent_apply` | run_id, plan | Execute plan in sandbox |
+| `get_run` | run_id | Retrieve run metadata |
+| `agent_review` | run_id | Inspect plan, diff, execution |
+| `agent_run` | prompt | One-shot plan + apply |
+| `agent_approve` | run_id | Approve and merge changes |
+| `agent_reject` | run_id | Reject and cleanup |
+
+---
+
+## ⚠️ Important Notes
+
+- Do NOT mix Ollama with vLLM (deprecated)
+- AWQ model requires GPU memory tuning (12GB constraint)
+- Keep `run_id` isolated per execution
+- Worktrees must never be shared between runs
+- Cleanup is mandatory to avoid disk accumulation
+
+---
+
+## 📊 System Status Goals
+
+- ✔ Deterministic plan generation
+- ✔ Isolated execution per run
+- ✔ Stable vLLM inference layer
+- ✔ Git-based diff tracking
+- ✔ Full cleanup lifecycle
+
+---
+
+## 🚀 Future Improvements
+
+- `/health/llm` endpoint (vLLM monitoring)
+- Streaming plan generation
+- Multi-model routing
+- Tool-calling structured enforcement
+- Review scoring system for generated code
+
