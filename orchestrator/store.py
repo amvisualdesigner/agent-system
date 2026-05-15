@@ -5,6 +5,8 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from run_id import validate_run_id, guard_within
+
 logger = logging.getLogger("orchestrator.store")
 
 RUNS_DIR = os.path.join(os.path.dirname(__file__), "runs")
@@ -15,11 +17,16 @@ def _ensure_dir():
 
 
 def _path(run_id: str) -> str:
-    return os.path.join(RUNS_DIR, f"{run_id}.json")
+    validate_run_id(run_id)
+    path = os.path.join(RUNS_DIR, f"{run_id}.json")
+    guard_within(path, RUNS_DIR)
+    return path
 
 
 def save_snapshot(run_id: str, snapshot: dict) -> str:
     _ensure_dir()
+
+    validate_run_id(run_id)
 
     snapshot["run_id"] = run_id
     snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -44,6 +51,7 @@ def save_snapshot(run_id: str, snapshot: dict) -> str:
 
 
 def load_snapshot(run_id: str) -> Optional[dict]:
+    validate_run_id(run_id)
     path = _path(run_id)
     if not os.path.exists(path):
         return None

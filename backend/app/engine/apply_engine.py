@@ -7,6 +7,8 @@ from app.executor.patch_executor import apply_operation
 from app.policy.policy import validate_plan_policy, validate_operation
 from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
+from app.utils.path_guard import guard_within
+from app.config.settings import settings
 
 
 def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
@@ -16,6 +18,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
     # ----------------------------
     # 1. RUNTIME SETUP
     # ----------------------------
+    guard_within(context.workspace, settings.RUNS_DIR)
+    guard_within(context.artifacts, settings.ARTIFACTS_DIR)
     os.makedirs(context.artifacts, exist_ok=True)
 
     print(f"[apply] artifacts = {context.artifacts}")

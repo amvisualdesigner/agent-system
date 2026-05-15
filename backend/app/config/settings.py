@@ -32,7 +32,8 @@ def optional_int(name: str, default: int) -> int:
 class Settings:
     # core paths
     REPO_ROOT: str = required_env("REPO_ROOT")
-    RUNS_DIR: str = optional_env("RUNS_DIR", "/tmp/agent-runs")
+    RUNS_DIR: str = optional_env("RUNS_DIR", "/opt/agent-repos/worktrees")
+    ARTIFACTS_DIR: str = optional_env("ARTIFACTS_DIR", "/opt/agent-repos/artifacts")
 
     # limits
     MAX_WORKSPACE_FILES: int = optional_int("MAX_WORKSPACE_FILES", 200)

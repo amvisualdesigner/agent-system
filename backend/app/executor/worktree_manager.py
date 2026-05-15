@@ -3,6 +3,8 @@ import shutil
 import subprocess
 
 from app.config.settings import settings
+from app.utils.run_id import validate_run_id
+from app.utils.path_guard import guard_within
 
 
 def create_worktree(run_id: str) -> str:
@@ -15,7 +17,10 @@ def create_worktree(run_id: str) -> str:
     ✔ Mantiene contrato: retorna SOLO workspace (str)
     """
 
-    workspace = f"{settings.RUNS_DIR}/{run_id}/workspace"
+    validate_run_id(run_id)
+
+    workspace = f"{settings.RUNS_DIR}/{run_id}"
+    guard_within(workspace, settings.RUNS_DIR)
     repo_root = settings.REPO_ROOT
     branch = f"agent-{run_id[:8]}"
     base_branch = "master"

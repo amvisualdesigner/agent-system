@@ -12,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from state import AgentState
 from graph import compiled_graph
 from models import RunRequest, RunResponse, SSEEvent
+from run_id import validate_run_id
 from sse import emitter
 from store import list_snapshots, load_snapshot
 
@@ -104,6 +105,7 @@ async def create_run(req: RunRequest):
 
 @app.get("/stream/{run_id}")
 async def stream_run(run_id: str):
+    validate_run_id(run_id)
     if not emitter.has_run(run_id):
         logger.warning("[run_id=%s] GET /stream not found", run_id)
         raise HTTPException(status_code=404, detail="run not found")
@@ -128,6 +130,7 @@ async def list_runs():
 
 @app.get("/runs/{run_id}")
 async def get_run_snapshot(run_id: str):
+    validate_run_id(run_id)
     snapshot = load_snapshot(run_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="run snapshot not found")

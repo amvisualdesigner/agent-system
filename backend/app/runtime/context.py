@@ -1,6 +1,8 @@
 import os
 from dataclasses import dataclass
+
 from app.config.settings import settings
+from app.utils.path_guard import guard_within
 
 @dataclass
 class RunContext:
@@ -11,17 +13,18 @@ class RunContext:
 
 
 def build_context(run_id: str, workspace_root: str | None = None) -> RunContext:
-    base_dir = f"{settings.RUNS_DIR}/{run_id}"
+    workspace = f"{settings.RUNS_DIR}/{run_id}"
+    artifacts = f"{settings.ARTIFACTS_DIR}/{run_id}"
 
-    workspace = os.path.join(base_dir, "workspace")
-    artifacts = os.path.join(base_dir, "artifacts")
+    guard_within(workspace, settings.RUNS_DIR)
+    guard_within(artifacts, settings.ARTIFACTS_DIR)
 
     os.makedirs(workspace, exist_ok=True)
     os.makedirs(artifacts, exist_ok=True)
 
     return RunContext(
         run_id=run_id,
-        base_dir=base_dir,
+        base_dir=workspace,
         workspace=workspace,
         artifacts=artifacts
     )

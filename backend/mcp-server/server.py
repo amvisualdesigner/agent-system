@@ -2,6 +2,8 @@ from mcp.server.fastmcp import FastMCP
 import httpx
 import json
 
+from app.utils.run_id import validate_run_id
+
 mcp = FastMCP("agent-runtime")
 
 BASE_URL = "http://localhost:8000"
@@ -40,6 +42,7 @@ async def agent_plan(prompt: str):
 # -------------------------
 @mcp.tool()
 async def agent_apply(run_id: str, plan, dry_run: bool = False):
+    validate_run_id(run_id)
     plan = normalize_plan(plan)
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -61,6 +64,7 @@ async def agent_apply(run_id: str, plan, dry_run: bool = False):
 # -------------------------
 @mcp.tool()
 async def get_run(run_id: str):
+    validate_run_id(run_id)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
             f"{BASE_URL}/runs/{run_id}"
@@ -75,6 +79,7 @@ async def get_run(run_id: str):
 # -------------------------
 @mcp.tool()
 async def agent_review(run_id: str):
+    validate_run_id(run_id)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
             f"{BASE_URL}/runs/{run_id}"
@@ -140,6 +145,7 @@ async def agent_run(prompt: str, dry_run: bool = False):
 # -------------------------
 @mcp.tool()
 async def agent_approve(run_id: str):
+    validate_run_id(run_id)
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             f"{BASE_URL}/runs/{run_id}/approve"
@@ -158,6 +164,7 @@ async def agent_approve(run_id: str):
 # -------------------------
 @mcp.tool()
 async def agent_reject(run_id: str):
+    validate_run_id(run_id)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             f"{BASE_URL}/runs/{run_id}/reject"

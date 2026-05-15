@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from app.api.agent_plan import router as agent_plan_router
 from app.api.agent_apply import router as agent_apply
 from app.utils.state import read_state
+from app.utils.run_id import validate_run_id
+from app.utils.path_guard import guard_within
 from app.config.settings import settings
 
 # -------- CONFIGURACIÓN --------
@@ -71,10 +73,12 @@ def cleanup():
             )
 
     # ----------------------------
-    # 3. WIPE /tmp/agent-runs
+    # 3. WIPE WORKTREE DIRECTORIES
     # ----------------------------
     if os.path.exists(settings.RUNS_DIR):
         for name in os.listdir(settings.RUNS_DIR):
+            if name == "state.json":
+                continue
             path = os.path.join(settings.RUNS_DIR, name)
 
             print(f"[cleanup] removing {path}")
@@ -85,7 +89,21 @@ def cleanup():
                 print(f"[cleanup][WARN] failed to remove {path}: {e}")
 
     # ----------------------------
-    # 4. FINAL
+    # 4. WIPE ARTIFACTS
+    # ----------------------------
+    if os.path.exists(settings.ARTIFACTS_DIR):
+        for name in os.listdir(settings.ARTIFACTS_DIR):
+            path = os.path.join(settings.ARTIFACTS_DIR, name)
+
+            print(f"[cleanup] removing artifact {path}")
+
+            try:
+                shutil.rmtree(path)
+            except Exception as e:
+                print(f"[cleanup][WARN] failed to remove {path}: {e}")
+
+    # ----------------------------
+    # 5. FINAL
     # ----------------------------
     subprocess.run(
         ["git", "worktree", "prune"],
@@ -107,13 +125,16 @@ def get_run(run_id: str):
     import json
     import subprocess
 
-    base = f"{settings.RUNS_DIR}/{run_id}"
-    artifacts_dir = f"{base}/artifacts"
-    workspace = f"{base}/workspace"
+    validate_run_id(run_id)
+
+    workspace = f"{settings.RUNS_DIR}/{run_id}"
+    guard_within(workspace, settings.RUNS_DIR)
+    artifacts_dir = f"{settings.ARTIFACTS_DIR}/{run_id}"
+    guard_within(artifacts_dir, settings.ARTIFACTS_DIR)
 
     result = {
         "run_id": run_id,
-        "exists": os.path.exists(base),
+        "exists": os.path.exists(workspace) or os.path.exists(artifacts_dir),
     }
 
     # ----------------------------
@@ -197,6 +218,8 @@ def get_base_branch():
 @app.post("/runs/{run_id}/approve")
 def approve_run(run_id: str):
 
+    validate_run_id(run_id)
+
     branch = f"agent-{run_id[:8]}"
     base_branch = get_base_branch()
 
@@ -221,7 +244,8 @@ def approve_run(run_id: str):
     # ----------------------------
     # 1.5. COMMIT STAGED CHANGES (dry_run recovery)
     # ----------------------------
-    workspace = f"{settings.RUNS_DIR}/{run_id}/workspace"
+    workspace = f"{settings.RUNS_DIR}/{run_id}"
+    guard_within(workspace, settings.RUNS_DIR)
     if os.path.exists(workspace):
         subprocess.run(
             ["git", "add", "-A"],
@@ -298,6 +322,8 @@ def approve_run(run_id: str):
 
 @app.post("/runs/{run_id}/reject")
 def reject_run(run_id: str):
+
+    validate_run_id(run_id)
 
     # TODO
 

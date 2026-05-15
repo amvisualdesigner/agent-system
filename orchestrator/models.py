@@ -1,6 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, Any, Dict, List
 from datetime import datetime, timezone
+
+from run_id import validate_run_id
 
 
 class RunRequest(BaseModel):
@@ -9,6 +11,11 @@ class RunRequest(BaseModel):
 
 class RunResponse(BaseModel):
     run_id: str
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, v: str) -> str:
+        return validate_run_id(v)
 
 
 class SSEEvent(BaseModel):
@@ -35,3 +42,8 @@ class RunResult(BaseModel):
     files: Optional[List[str]] = None
     status: str
     error: Optional[str] = None
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, v: str) -> str:
+        return validate_run_id(v)
