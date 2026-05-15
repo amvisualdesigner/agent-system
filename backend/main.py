@@ -36,78 +36,102 @@ def latest():
 
     return state
 
-@app.get("/maintenance/cleanup") # TODO: remove this in prod
+@app.get("/maintenance/cleanup")  # local-only debug endpoint
 def cleanup():
     print("[cleanup] START")
 
+    repo_root = settings.REPO_ROOT
+
     # ----------------------------
-    # 1. GIT WORKTREES
+    # 1. SAFE WORKTREE REMOVAL
     # ----------------------------
-    subprocess.run(
-        ["git", "worktree", "prune", "--force"],
-        cwd=settings.REPO_ROOT,
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
         check=False
     )
 
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+
+        wt = line[len("worktree "):].strip()
+
+        # HARD SAFETY: only allow inside RUNS_DIR
+        if not wt.startswith(os.path.abspath(settings.RUNS_DIR)):
+            continue
+
+        print(f"[cleanup] removing worktree {wt}")
+
+        subprocess.run(
+            ["git", "worktree", "remove", wt, "--force"],
+            cwd=repo_root,
+            check=False
+        )
+
     # ----------------------------
-    # 2. DELETE agent BRANCHES
+    # 2. DELETE MERGED BRANCHES
     # ----------------------------
     result = subprocess.run(
-        ["git", "branch"],
-        cwd=settings.REPO_ROOT,
+        ["git", "branch", "--merged"],
+        cwd=repo_root,
         capture_output=True,
         text=True
     )
 
-    branches = result.stdout.splitlines()
-
-    for b in branches:
+    for b in result.stdout.splitlines():
         b = b.strip().replace("*", "").strip()
 
         if b.startswith("agent-"):
-            print(f"[cleanup] deleting branch {b}")
+            print(f"[cleanup] deleting merged branch {b}")
             subprocess.run(
-                ["git", "branch", "-D", b],
-                cwd=settings.REPO_ROOT,
+                ["git", "branch", "-d", b],
+                cwd=repo_root,
                 check=False
             )
 
     # ----------------------------
-    # 3. WIPE WORKTREE DIRECTORIES
+    # 3. CLEAN RUNS_DIR SAFELY
     # ----------------------------
-    if os.path.exists(settings.RUNS_DIR):
-        for name in os.listdir(settings.RUNS_DIR):
+    runs_dir = os.path.abspath(settings.RUNS_DIR)
+
+    if os.path.exists(runs_dir):
+        for name in os.listdir(runs_dir):
+            path = os.path.abspath(os.path.join(runs_dir, name))
+
+            # SAFETY: enforce containment
+            if not path.startswith(runs_dir):
+                continue
+
             if name == "state.json":
                 continue
-            path = os.path.join(settings.RUNS_DIR, name)
 
             print(f"[cleanup] removing {path}")
-
-            try:
-                shutil.rmtree(path)
-            except Exception as e:
-                print(f"[cleanup][WARN] failed to remove {path}: {e}")
+            shutil.rmtree(path, ignore_errors=True)
 
     # ----------------------------
-    # 4. WIPE ARTIFACTS
+    # 4. CLEAN ARTIFACTS DIR SAFELY
     # ----------------------------
-    if os.path.exists(settings.ARTIFACTS_DIR):
-        for name in os.listdir(settings.ARTIFACTS_DIR):
-            path = os.path.join(settings.ARTIFACTS_DIR, name)
+    artifacts_dir = os.path.abspath(settings.ARTIFACTS_DIR)
+
+    if os.path.exists(artifacts_dir):
+        for name in os.listdir(artifacts_dir):
+            path = os.path.abspath(os.path.join(artifacts_dir, name))
+
+            if not path.startswith(artifacts_dir):
+                continue
 
             print(f"[cleanup] removing artifact {path}")
-
-            try:
-                shutil.rmtree(path)
-            except Exception as e:
-                print(f"[cleanup][WARN] failed to remove {path}: {e}")
+            shutil.rmtree(path, ignore_errors=True)
 
     # ----------------------------
-    # 5. FINAL
+    # 5. FINAL PRUNE
     # ----------------------------
     subprocess.run(
         ["git", "worktree", "prune"],
-        cwd=settings.REPO_ROOT,
+        cwd=repo_root,
         check=False
     )
 
@@ -117,7 +141,6 @@ def cleanup():
         "status": "ok",
         "message": "cleanup completed"
     }
-
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
