@@ -103,64 +103,79 @@ def cleanup():
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
+    import os
     import json
+    import subprocess
 
     base = f"{settings.RUNS_DIR}/{run_id}"
     artifacts_dir = f"{base}/artifacts"
-    result = {"run_id": run_id, "exists": os.path.exists(base)}
+    workspace = f"{base}/workspace"
 
+    result = {
+        "run_id": run_id,
+        "exists": os.path.exists(base),
+    }
+
+    # ----------------------------
+    # 1. ARTIFACTS (source of truth)
+    # ----------------------------
     if os.path.exists(artifacts_dir):
-        plan_path = f"{artifacts_dir}/plan.json"
-        exec_path = f"{artifacts_dir}/execution.json"
-        summary_path = f"{artifacts_dir}/summary.json"
-        diff_path = f"{artifacts_dir}/diff.patch"
 
-        if os.path.exists(plan_path):
-            with open(plan_path) as f:
-                result["plan"] = json.load(f)
-        if os.path.exists(exec_path):
-            with open(exec_path) as f:
-                result["execution"] = json.load(f)
-        if os.path.exists(summary_path):
-            with open(summary_path) as f:
-                result["summary"] = json.load(f)
-        if os.path.exists(diff_path):
-            with open(diff_path) as f:
-                result["diff"] = f.read()
+        def load_json(path):
+            if os.path.exists(path):
+                with open(path) as f:
+                    return json.load(f)
+            return None
 
-        workspace = f"{base}/workspace"
-        if os.path.exists(workspace):
-            result["workspace"] = workspace
+        def load_text(path):
+            if os.path.exists(path):
+                with open(path) as f:
+                    return f.read()
+            return None
 
-            diff = subprocess.run(
-                ["git", "diff", "--name-only", "HEAD"],
+        result["plan"] = load_json(f"{artifacts_dir}/plan.json")
+        result["execution"] = load_json(f"{artifacts_dir}/execution.json")
+        result["summary"] = load_json(f"{artifacts_dir}/summary.json")
+        result["diff"] = load_text(f"{artifacts_dir}/diff.patch")
+
+    # ----------------------------
+    # 2. WORKSPACE
+    # ----------------------------
+    if os.path.exists(workspace):
+        result["workspace"] = workspace
+
+        # ----------------------------
+        # 3. GIT STATE (SAFE)
+        # ----------------------------
+
+        def run_git(cmd):
+            return subprocess.run(
+                cmd,
                 cwd=workspace,
                 capture_output=True,
                 text=True,
                 check=False
-            )
+            ).stdout.strip()
 
-            cached = subprocess.run(
-                ["git", "diff", "--cached", "--name-only", "HEAD"],
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        unstaged = run_git(["git", "diff", "--name-only"])
+        staged = run_git(["git", "diff", "--cached", "--name-only"])
+        last_commit = run_git(["git", "log", "-1", "--name-only", "--pretty=format:"])
 
-            committed = subprocess.run(
-                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        changed = set()
 
-            changed = set()
-            for out in [diff, cached, committed]:
-                changed.update(out.stdout.strip().splitlines())
+        for block in [unstaged, staged, last_commit]:
+            for line in block.splitlines():
+                line = line.strip()
+                if line:
+                    changed.add(line)
 
-            result["files"] = sorted(f for f in changed if f)
+        result["files"] = sorted(changed)
+
+        # ----------------------------
+        # 4. OPTIONAL: commit existence check
+        # ----------------------------
+        commit_exists = run_git(["git", "rev-parse", "--verify", "HEAD"])
+        result["has_commit"] = bool(commit_exists)
 
     return result
 
