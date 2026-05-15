@@ -1,6 +1,7 @@
 import uuid
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -13,6 +14,12 @@ from graph import compiled_graph
 from models import RunRequest, RunResponse, SSEEvent
 from sse import emitter
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S%z",
+)
+logger = logging.getLogger("orchestrator.main")
 
 background_tasks: dict[str, asyncio.Task] = {}
 
@@ -33,14 +40,18 @@ async def run_graph(run_id: str, task: str):
         "_next_node": None,
     }
 
+    logger.info("[run_id=%s] graph started task=%s", run_id, task[:80])
     try:
         await compiled_graph.ainvoke(initial_state)
+        logger.info("[run_id=%s] graph completed", run_id)
     except asyncio.CancelledError:
+        logger.warning("[run_id=%s] graph cancelled", run_id)
         await emitter.emit(
             run_id,
             SSEEvent(type="error", phase="cancelled", run_id=run_id, error="cancelled"),
         )
     except Exception as e:
+        logger.error("[run_id=%s] graph crashed: %s", run_id, str(e))
         await emitter.emit(
             run_id,
             SSEEvent(type="error", phase="error", run_id=run_id, error=str(e)),
@@ -76,6 +87,9 @@ async def health():
 @app.post("/run", response_model=RunResponse)
 async def create_run(req: RunRequest):
     run_id = str(uuid.uuid4())
+    logger.info("[run_id=%s] POST /run task=%s", run_id, req.task[:80])
+
+    emitter.register(run_id)
 
     task = asyncio.create_task(run_graph(run_id, req.task))
     background_tasks[run_id] = task
@@ -86,11 +100,17 @@ async def create_run(req: RunRequest):
 @app.get("/stream/{run_id}")
 async def stream_run(run_id: str):
     if not emitter.has_run(run_id):
+        logger.warning("[run_id=%s] GET /stream not found", run_id)
         raise HTTPException(status_code=404, detail="run not found")
 
+    logger.info("[run_id=%s] GET /stream connected", run_id)
+
     async def event_generator():
-        async for event in emitter.subscribe(run_id):
-            yield {"event": "message", "data": json.dumps(event.model_dump())}
+        try:
+            async for event in emitter.subscribe(run_id):
+                yield {"event": "message", "data": json.dumps(event.model_dump())}
+        finally:
+            logger.info("[run_id=%s] GET /stream disconnected", run_id)
 
     return EventSourceResponse(event_generator())
 

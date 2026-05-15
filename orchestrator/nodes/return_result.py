@@ -1,6 +1,9 @@
+import logging
 from state import AgentState
 from sse import emitter
 from models import SSEEvent, RunResult
+
+logger = logging.getLogger("orchestrator.nodes.return_result")
 
 
 async def return_result_node(state: AgentState) -> dict:
@@ -9,8 +12,10 @@ async def return_result_node(state: AgentState) -> dict:
     cancelled = state.get("cancelled", False)
 
     if cancelled:
+        logger.warning("[run_id=%s] result: cancelled", run_id)
         result = RunResult(run_id=run_id, status="cancelled")
     elif error:
+        logger.warning("[run_id=%s] result: error=%s", run_id, error)
         result = RunResult(run_id=run_id, status="error", error=error)
     else:
         run_details = state.get("run_details") or {}
@@ -19,6 +24,13 @@ async def return_result_node(state: AgentState) -> dict:
         status = "ok"
         if execution and execution.get("status") == "rejected":
             status = "rejected"
+
+        has_diff = bool(run_details.get("diff"))
+        has_files = bool(run_details.get("files"))
+        logger.info(
+            "[run_id=%s] result: ok has_diff=%s has_files=%s",
+            run_id, has_diff, has_files,
+        )
 
         result = RunResult(
             run_id=run_id,

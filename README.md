@@ -256,3 +256,40 @@ POST /maintenance/cleanup
 - Tool-calling structured enforcement
 - Review scoring system for generated code
 
+
+## Future
+           ┌─────────────────────┐
+           │  Semantic Router    │
+           │ (Annoy + embeddings)│
+           └────────┬────────────┘
+                    │
+     ┌──────────────┴──────────────┐
+     ▼                             ▼
+Skill execution path        LLM planning path
+(deterministic)            (flexible)
+     │                             │
+     └──────────────┬──────────────┘
+                    ▼
+           LangGraph executor
+                    ▼
+        Backend + MCP tools
+____
+        User Task
+   ↓
+Intent Router
+   ↓
+Code Retrieval Engine
+   ├─ embeddings
+   ├─ import graph
+   ├─ AST analysis
+   ├─ symbol lookup
+   └─ git relevance
+   ↓
+Context Builder
+   ↓
+Planner LLM
+   ↓
+Executor
+   ↓
+Validator
+

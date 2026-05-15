@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, Dict, List
 from models import SSEEvent
+
+logger = logging.getLogger("orchestrator.sse")
 
 
 class EventEmitter(ABC):
@@ -18,6 +21,11 @@ class InMemoryEventEmitter(EventEmitter):
     def __init__(self):
         self._queues: Dict[str, asyncio.Queue] = {}
         self._buffers: Dict[str, List[SSEEvent]] = {}
+
+    def register(self, run_id: str):
+        if run_id not in self._buffers:
+            self._buffers[run_id] = []
+            logger.info("[run_id=%s] emitter registered", run_id)
 
     async def emit(self, run_id: str, event: SSEEvent):
         if run_id not in self._buffers:
