@@ -1,0 +1,99 @@
+import uuid
+import asyncio
+import json
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
+
+from state import AgentState
+from graph import compiled_graph
+from models import RunRequest, RunResponse, SSEEvent
+from sse import emitter
+
+
+background_tasks: dict[str, asyncio.Task] = {}
+
+
+async def run_graph(run_id: str, task: str):
+    initial_state = {
+        "task": task,
+        "run_id": run_id,
+        "plan": None,
+        "execution": None,
+        "run_details": None,
+        "error": None,
+        "retry_count": 0,
+        "trace": [],
+        "phase": "planning",
+        "cancelled": False,
+        "backend_run_id": None,
+        "_next_node": None,
+    }
+
+    try:
+        await compiled_graph.ainvoke(initial_state)
+    except asyncio.CancelledError:
+        await emitter.emit(
+            run_id,
+            SSEEvent(type="error", phase="cancelled", run_id=run_id, error="cancelled"),
+        )
+    except Exception as e:
+        await emitter.emit(
+            run_id,
+            SSEEvent(type="error", phase="error", run_id=run_id, error=str(e)),
+        )
+    finally:
+        background_tasks.pop(run_id, None)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    for tid, task in background_tasks.items():
+        task.cancel()
+    background_tasks.clear()
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/run", response_model=RunResponse)
+async def create_run(req: RunRequest):
+    run_id = str(uuid.uuid4())
+
+    task = asyncio.create_task(run_graph(run_id, req.task))
+    background_tasks[run_id] = task
+
+    return RunResponse(run_id=run_id)
+
+
+@app.get("/stream/{run_id}")
+async def stream_run(run_id: str):
+    if not emitter.has_run(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+
+    async def event_generator():
+        async for event in emitter.subscribe(run_id):
+            yield {"event": "message", "data": json.dumps(event.model_dump())}
+
+    return EventSourceResponse(event_generator())
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=9000)

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Runtime</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #38bdf8; }
+textarea {
+  width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155;
+  background: #1e293b; color: #e2e8f0; font-size: 1rem; resize: vertical;
+  font-family: inherit;
+}
+button {
+  padding: 10px 24px; border-radius: 8px; border: none; background: #38bdf8;
+  color: #0f172a; font-weight: 600; cursor: pointer; font-size: 1rem;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#log {
+  margin-top: 1rem; background: #1e293b; border-radius: 8px; padding: 12px;
+  font-family: monospace; font-size: 0.85rem; max-height: 500px; overflow-y: auto;
+}
+.entry { padding: 4px 0; border-bottom: 1px solid #334155; }
+.entry:last-child { border-bottom: none; }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;
+  font-weight: 600; margin-right: 8px;
+}
+.badge-planning { background: #818cf8; color: #1e1b4b; }
+.badge-executing { background: #f59e0b; color: #451a03; }
+.badge-completed { background: #22c55e; color: #052e16; }
+.badge-error { background: #ef4444; color: #450a0a; }
+#result {
+  margin-top: 12px; background: #1e293b; border-radius: 8px; padding: 12px; display: none;
+}
+#result.show { display: block; }
+pre { background: #0f172a; padding: 8px; border-radius: 4px; margin-top: 4px; overflow-x: auto; white-space: pre-wrap; }
+ul { margin: 4px 0 0 20px; color: #94a3b8; }
+.run-id { color: #64748b; font-size: 0.75rem; margin-top: 4px; }
+.status-ok { color: #22c55e; font-weight: 600; }
+.status-error { color: #ef4444; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Agent Runtime</h1>
+<form id="form">
+  <textarea id="task" rows="3" placeholder='Ej: "create a file called hello.txt with content HELLO"'></textarea>
+  <div style="margin-top:8px;text-align:right">
+    <button id="runBtn" type="submit">▶ Run</button>
+  </div>
+</form>
+<div id="result"></div>
+<div id="runId" class="run-id"></div>
+<div id="log"><div style="color:#64748b">Escribe una tarea y presiona Run</div></div>
+
+<script>
+const ORCH = "http://127.0.0.1:9000";
+const form = document.getElementById("form");
+const task = document.getElementById("task");
+const runBtn = document.getElementById("runBtn");
+const logEl = document.getElementById("log");
+const resultEl = document.getElementById("result");
+const runIdEl = document.getElementById("runId");
+
+form.onsubmit = async (e) => {
+  e.preventDefault();
+  if (!task.value.trim() || runBtn.disabled) return;
+
+  runBtn.disabled = true;
+  runBtn.textContent = "Ejecutando...";
+  resultEl.classList.remove("show");
+  resultEl.innerHTML = "";
+  runIdEl.textContent = "";
+  logEl.innerHTML = "";
+
+  try {
+    const resp = await fetch(`${ORCH}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: task.value }),
+    });
+    const data = await resp.json();
+    runIdEl.textContent = `Run ID: ${data.run_id}`;
+
+    const evtSource = new EventSource(`${ORCH}/stream/${data.run_id}`);
+
+    evtSource.onmessage = (event) => {
+      const evt = JSON.parse(event.data);
+      appendEvent(evt);
+
+      if (evt.type === "result") {
+        showResult(evt.data);
+        evtSource.close();
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
+      }
+      if (evt.type === "error") {
+        showError(evt.error);
+        evtSource.close();
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
+      }
+    };
+
+    evtSource.onerror = () => {
+      evtSource.close();
+      runBtn.disabled = false;
+      runBtn.textContent = "▶ Run";
+    };
+  } catch (err) {
+    appendEvent({ type: "error", phase: "error", error: String(err) });
+    runBtn.disabled = false;
+    runBtn.textContent = "▶ Run";
+  }
+};
+
+function appendEvent(evt) {
+  const div = document.createElement("div");
+  div.className = "entry";
+  if (evt.phase) {
+    const badge = document.createElement("span");
+    badge.className = `badge badge-${evt.phase}`;
+    badge.textContent = evt.phase;
+    div.appendChild(badge);
+  }
+  const strong = document.createElement("strong");
+  strong.textContent = evt.node || evt.type;
+  div.appendChild(strong);
+
+  if (evt.type === "tool_call" && evt.data?.tool) {
+    const span = document.createElement("span");
+    span.style.cssText = "color:#94a3b8;margin-left:8px";
+    span.textContent = evt.data.tool;
+    div.appendChild(span);
+  }
+  if (evt.data?.valid !== undefined) {
+    const span = document.createElement("span");
+    span.style.cssText = "color:#94a3b8;margin-left:8px";
+    span.textContent = evt.data.valid ? "✓ valido" : "✗ invalido";
+    div.appendChild(span);
+  }
+
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function showResult(data) {
+  resultEl.classList.add("show");
+  let html = `<div><span class="status-${data.status}">${data.status.toUpperCase()}</span></div>`;
+
+  if (data.files?.length) {
+    html += '<div style="margin-top:8px"><strong>Archivos:</strong><ul>';
+    data.files.forEach(f => html += `<li>${f}</li>`);
+    html += "</ul></div>";
+  }
+  if (data.diff) {
+    html += '<div style="margin-top:8px"><strong>Diff:</strong><pre>' + escapeHtml(data.diff) + '</pre></div>';
+  }
+  if (data.plan?.actions) {
+    html += '<div style="margin-top:8px"><strong>Plan:</strong><pre>' + escapeHtml(JSON.stringify(data.plan, null, 2)) + '</pre></div>';
+  }
+  resultEl.innerHTML = html;
+}
+
+function showError(err) {
+  resultEl.classList.add("show");
+  resultEl.innerHTML = `<div><span class="status-error">ERROR</span> ${escapeHtml(err)}</div>`;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+</script>
+</body>
+</html>

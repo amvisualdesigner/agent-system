@@ -1,0 +1,53 @@
+from state import AgentState
+from sse import emitter
+from models import SSEEvent
+
+
+async def validate_plan_node(state: AgentState) -> dict:
+    if state.get("cancelled"):
+        return {"phase": "cancelled", "_next_node": "return_result"}
+
+    if state.get("error"):
+        return {"phase": "error", "_next_node": "return_result"}
+
+    phase = state.get("phase", "planning")
+
+    await emitter.emit(
+        state.get("run_id", ""),
+        SSEEvent(type="node_start", node="validate_plan", phase=phase, run_id=state.get("run_id")),
+    )
+
+    plan = state.get("plan")
+    retry_count = state.get("retry_count", 0)
+    input_data = {"plan_exists": plan is not None, "retry_count": retry_count}
+
+    if plan is None:
+        output = {"valid": False, "reason": "no_plan"}
+        trace = _add_trace(state, "validate_plan", input_data, output, 0)
+        await emitter.emit(state.get("run_id", ""), SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=state.get("run_id"), data=output))
+        return {"trace": trace[-50:], "phase": "error", "error": "no_plan", "_next_node": "return_result"}
+
+    actions = plan.get("actions", [])
+    valid = len(actions) > 0 and all(a.get("file_path", "") for a in actions)
+
+    if valid:
+        output = {"valid": True}
+        trace = _add_trace(state, "validate_plan", input_data, output, 0)
+        await emitter.emit(state.get("run_id", ""), SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=state.get("run_id"), data=output))
+        return {"trace": trace[-50:], "_next_node": "call_apply"}
+
+    if retry_count < 1:
+        output = {"valid": False, "decision": "retry"}
+        trace = _add_trace(state, "validate_plan", input_data, output, 0)
+        await emitter.emit(state.get("run_id", ""), SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=state.get("run_id"), data=output))
+        return {"trace": trace[-50:], "_next_node": "call_plan", "retry_count": retry_count + 1}
+
+    output = {"valid": False, "decision": "abort", "reason": "max_retries_exceeded"}
+    trace = _add_trace(state, "validate_plan", input_data, output, 0)
+    await emitter.emit(state.get("run_id", ""), SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=state.get("run_id"), data=output))
+    return {"trace": trace[-50:], "_next_node": "return_result", "error": "max_retries_exceeded", "phase": "error"}
+
+
+def _add_trace(state, node, input_data, output, latency):
+    entry = {"node": node, "input": input_data, "output": output, "latency_ms": latency}
+    return (state.get("trace") or []) + [entry]

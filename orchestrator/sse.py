@@ -1,0 +1,52 @@
+import asyncio
+from abc import ABC, abstractmethod
+from typing import AsyncIterator, Dict, List
+from models import SSEEvent
+
+
+class EventEmitter(ABC):
+    @abstractmethod
+    async def emit(self, run_id: str, event: SSEEvent):
+        ...
+
+    @abstractmethod
+    async def subscribe(self, run_id: str) -> AsyncIterator[SSEEvent]:
+        ...
+
+
+class InMemoryEventEmitter(EventEmitter):
+    def __init__(self):
+        self._queues: Dict[str, asyncio.Queue] = {}
+        self._buffers: Dict[str, List[SSEEvent]] = {}
+
+    async def emit(self, run_id: str, event: SSEEvent):
+        if run_id not in self._buffers:
+            self._buffers[run_id] = []
+        self._buffers[run_id].append(event)
+
+        queue = self._queues.get(run_id)
+        if queue is not None:
+            await queue.put(event)
+
+    async def subscribe(self, run_id: str) -> AsyncIterator[SSEEvent]:
+        for event in self._buffers.get(run_id, []):
+            yield event
+            if event.type in ("result", "error"):
+                return
+
+        queue: asyncio.Queue = asyncio.Queue()
+        self._queues[run_id] = queue
+        try:
+            while True:
+                event = await queue.get()
+                yield event
+                if event.type == "result" or event.type == "error":
+                    break
+        finally:
+            self._queues.pop(run_id, None)
+
+    def has_run(self, run_id: str) -> bool:
+        return run_id in self._buffers or run_id in self._queues
+
+
+emitter = InMemoryEventEmitter()

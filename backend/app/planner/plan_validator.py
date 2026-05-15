@@ -4,7 +4,7 @@ def validate_plan(plan: dict):
     actions = plan.get("actions", [])
 
     if not actions:
-        return False, "empty_steps"
+        return False, "empty_actions"
 
     for a in actions:
 
