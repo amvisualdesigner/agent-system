@@ -2,6 +2,7 @@ import logging
 from state import AgentState
 from sse import emitter
 from models import SSEEvent, RunResult
+from store import save_snapshot
 
 logger = logging.getLogger("orchestrator.nodes.return_result")
 
@@ -46,6 +47,23 @@ async def return_result_node(state: AgentState) -> dict:
         phase = "cancelled"
 
     event_type = "result" if result.status == "ok" else "error"
+
+    snapshot = {
+        "run_id": run_id,
+        "task": state.get("task"),
+        "phase": phase,
+        "status": result.status,
+        "plan": result.plan,
+        "execution": result.execution,
+        "diff": result.diff,
+        "files": result.files,
+        "trace": state.get("trace"),
+        "error": result.error,
+    }
+    try:
+        save_snapshot(run_id, snapshot)
+    except Exception as e:
+        logger.error("[run_id=%s] failed to persist snapshot: %s", run_id, str(e))
 
     await emitter.emit(
         run_id,

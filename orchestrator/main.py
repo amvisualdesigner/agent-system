@@ -13,6 +13,7 @@ from state import AgentState
 from graph import compiled_graph
 from models import RunRequest, RunResponse, SSEEvent
 from sse import emitter
+from store import list_snapshots, load_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +63,10 @@ async def run_graph(run_id: str, task: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import store as _store
+    _store._ensure_dir()
+    existing = _store.list_snapshots()
+    logger.info("startup: runs/ ready, %d past snapshots found", len(existing))
     yield
     for tid, task in background_tasks.items():
         task.cancel()
@@ -113,6 +118,20 @@ async def stream_run(run_id: str):
             logger.info("[run_id=%s] GET /stream disconnected", run_id)
 
     return EventSourceResponse(event_generator())
+
+
+@app.get("/runs")
+async def list_runs():
+    snapshots = list_snapshots()
+    return {"runs": snapshots, "count": len(snapshots)}
+
+
+@app.get("/runs/{run_id}")
+async def get_run_snapshot(run_id: str):
+    snapshot = load_snapshot(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="run snapshot not found")
+    return snapshot
 
 
 if __name__ == "__main__":

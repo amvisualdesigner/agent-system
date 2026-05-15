@@ -99,12 +99,14 @@ form.onsubmit = async (e) => {
 
       if (evt.type === "result") {
         showResult(evt.data);
+        showWorktree(data.run_id);
         evtSource.close();
         runBtn.disabled = false;
         runBtn.textContent = "▶ Run";
       }
       if (evt.type === "error") {
         showError(evt.error);
+        showWorktree(data.run_id);
         evtSource.close();
         runBtn.disabled = false;
         runBtn.textContent = "▶ Run";
@@ -174,6 +176,18 @@ function showResult(data) {
 function showError(err) {
   resultEl.classList.add("show");
   resultEl.innerHTML = `<div><span class="status-error">ERROR</span> ${escapeHtml(err)}</div>`;
+}
+
+function showWorktree(runId) {
+  fetch(`${ORCH}/runs/${runId}`)
+    .then(r => r.json())
+    .then(snapshot => {
+      const workspace = snapshot?.execution?.workspace;
+      if (workspace) {
+        runIdEl.innerHTML = `Run ID: ${runId} &nbsp;|&nbsp; Worktree: <code>${escapeHtml(workspace)}</code>`;
+      }
+    })
+    .catch(() => {});
 }
 
 function escapeHtml(s) {
