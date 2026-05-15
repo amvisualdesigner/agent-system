@@ -42,5 +42,10 @@ class Settings:
     # git / execution
     GIT_DIFF_CONTEXT: int = optional_int("GIT_DIFF_CONTEXT", 3)
 
+    # LLM config
+    LLM_BASE_URL: str = optional_env("LLM_BASE_URL", "http://localhost:8001")
+    LLM_MODEL: str = optional_env("LLM_MODEL", "Qwen/Qwen2.5-Coder-3B-Instruct")
+    LLM_API_KEY: str = optional_env("LLM_API_KEY", "")
+
 
 settings = Settings()

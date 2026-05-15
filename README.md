@@ -87,7 +87,7 @@ The system now uses **vLLM OpenAI-compatible server** instead of Ollama:
 ```bash
 cd /opt/agent-system/backend
 source venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
@@ -122,7 +122,7 @@ Key parameters:
 ### 1. Generate Plan
 
 ```bash
-curl -X POST http://localhost:8001/agent/plan \
+curl -X POST http://localhost:8000/agent/plan \
   -H "Content-Type: application/json" \
   -d '{
     "task": "Create a utility function and a hello module"
@@ -152,7 +152,7 @@ curl -X POST http://localhost:8001/agent/plan \
 ### 2. Apply Plan
 
 ```bash
-curl -X POST http://localhost:8001/agent/apply \
+curl -X POST http://localhost:8000/agent/apply \
   -H "Content-Type: application/json" \
   -d '{
     "run_id": "uuid",
@@ -167,7 +167,7 @@ curl -X POST http://localhost:8001/agent/apply \
 ### 3. Cleanup System
 
 ```bash
-curl -X POST http://localhost:8001/maintenance/cleanup
+curl -X POST http://localhost:8000/maintenance/cleanup
 ```
 
 ---

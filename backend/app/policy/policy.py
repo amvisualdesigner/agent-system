@@ -23,12 +23,12 @@ def safe_path(path: str, base_repo: str):
 # PLAN POLICY (semantic limits)
 # NOTE: PLAN policy is independent of execution node
 def validate_plan_policy(plan):
-    steps = plan.get("steps", [])
+    actions = plan.get("actions", [])
 
-    if len(steps) > MAX_OPERATIONS:
+    if len(actions) > MAX_OPERATIONS:
         return False, "too_many_operations"
 
-    delete_ops = [s for s in steps if s.get("action") == Action.delete]
+    delete_ops = [a for a in actions if a.get("type") == "delete"]
 
     if len(delete_ops) > MAX_DELETES:
         return False, "too_many_deletes"

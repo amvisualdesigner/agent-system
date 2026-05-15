@@ -1,0 +1,39 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    restart: unless-stopped
+
+    ports:
+      - "8001:8000"
+
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+
+    environment:
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+    gpus: all
+    ipc: host
+
+    command:
+      - "Qwen/Qwen2.5-Coder-3B-Instruct"
+      - "--max-model-len"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.75"
+      - "--max-num-seqs"
+      - "1"
+      - "--dtype"
+      - "half"
+      - "--trust-remote-code"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "openai"
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s

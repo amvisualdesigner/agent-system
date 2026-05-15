@@ -11,11 +11,13 @@ BASE_URL = "http://localhost:8000"
 # HELPERS
 # -------------------------
 def normalize_plan(plan):
-    if isinstance(plan, str):
-        return json.loads(plan)
-    if isinstance(plan, dict):
+    if not isinstance(plan, dict):
+        return None
+
+    if "actions" in plan:
         return plan
-    raise ValueError("Invalid plan format")
+
+    return None
 
 
 # -------------------------

@@ -26,6 +26,6 @@ class Plan(BaseModel):
 
     status: str = "draft"
 
-    steps: List[PlanStep]
+    actions: List[dict]
 
     metadata: PlanMetadata
