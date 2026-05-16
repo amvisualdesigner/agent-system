@@ -65,9 +65,15 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
         print(f"[apply] validate_operation = {ok}")
 
         if not ok:
-
+            if op.get("target") == "skill":
+                print(f"[apply] skill validation failed — skipping: {reason}")
+                results.append({
+                    "status": "skipped",
+                    "target": "skill",
+                    "reason": f"fallback_to_file: {reason}",
+                })
+                continue
             print(f"[apply] rejected operation: {reason}")
-
             return {
                 "status": "rejected",
                 "reason": reason,
@@ -79,6 +85,59 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
         print(f"[apply] result = {result}")
 
         results.append(result)
+
+    has_skills = any(r.get("target") == "skill" and r.get("status") == "executed" for r in results)
+    has_files = any(r.get("target") == "file" for r in results)
+    file_results = [r for r in results if r.get("target") == "file"]
+    file_ok = all(r.get("status") != "error" for r in file_results)
+
+    intent_fidelity = {
+        "requested_skill": any(op.get("target") == "skill" for op in operations),
+        "executed_skill": any(
+            r.get("target") == "skill" and r.get("status") == "executed" for r in results
+        ),
+        "fallback_used": any(
+            r.get("status") == "skipped"
+            or str(r.get("reason", "")).startswith("fallback_to_file")
+            for r in results
+        ),
+    }
+
+    # skill-only runs skip git/diff — no filesystem changes
+    if has_skills and not has_files:
+        write_state(run_id, "apply")
+        if intent_fidelity["requested_skill"] and not intent_fidelity["executed_skill"]:
+            skill_status = "rejected"
+            skill_reason = "skill_resolution_failed"
+        else:
+            skill_status = "ok"
+            skill_reason = None
+        response = {
+            "status": skill_status,
+            "reason": skill_reason,
+            "run_id": run_id,
+            "dry_run": dry_run,
+            "operations": operations,
+            "execution": results,
+            "workspace": context.workspace,
+            "execution_mode": "skill_only",
+            "intent_fidelity": intent_fidelity,
+        }
+        with open(f"{context.artifacts}/execution.json", "w") as f:
+            json.dump({"operations": operations, "results": results}, f, indent=2)
+        with open(f"{context.artifacts}/summary.json", "w") as f:
+            json.dump({
+                "run_id": run_id,
+                "status": skill_status,
+                "skills_executed": [
+                    r.get("name") for r in results if r.get("status") == "executed"
+                ],
+                "skill_asts": [
+                    r.get("ast") for r in results if r.get("ast")
+                ],
+                "intent_fidelity": intent_fidelity,
+            }, f, indent=2)
+        return response
 
     # ----------------------------
     # 5. STATE
@@ -151,10 +210,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
         json.dump({
             "run_id": run_id,
             "status": "ok",
-            "files_created": [
-                r.get("path") for r in results if r.get("status") == "created"
-            ]
-        }, f, indent=2)
+        "files_created": [
+            r.get("path") for r in results if r.get("status") == "created"
+        ],
+        "skills_executed": [
+            r.get("name") for r in results if r.get("target") == "skill" and r.get("status") == "executed"
+        ],
+        "skill_asts": [
+            r.get("ast") for r in results if r.get("target") == "skill" and r.get("ast")
+        ]
+    }, f, indent=2)
 
     print("[apply] wrote summary.json")
 
@@ -166,14 +231,36 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
     # ----------------------------
     # 8. RESPONSE
     # ----------------------------
+    if has_skills and not has_files:
+        status = "ok"
+        reason = None
+    elif has_files:
+        status = "ok" if (diff and file_ok) else "rejected"
+        reason = None if (diff and file_ok) else ("missing_diff" if not diff else "file_execution_error")
+    else:
+        status = "ok" if diff else "rejected"
+        reason = None if diff else "missing_diff"
+
+    if intent_fidelity["requested_skill"] and not intent_fidelity["executed_skill"]:
+        status = "rejected"
+        reason = "skill_resolution_failed"
+
+    execution_mode = (
+        "skill_only" if has_skills and not has_files else
+        "skill_mixed" if has_skills else
+        "file_only"
+    )
+
     response = {
-        "status": "ok" if diff else "rejected",
-        "reason": None if diff else "missing_diff",
+        "status": status,
+        "reason": reason,
         "run_id": run_id,
         "dry_run": dry_run,
         "operations": operations,
         "execution": results,
-        "workspace": context.workspace
+        "workspace": context.workspace,
+        "execution_mode": execution_mode,
+        "intent_fidelity": intent_fidelity,
     }
 
     print(f"[apply] response = {response}")

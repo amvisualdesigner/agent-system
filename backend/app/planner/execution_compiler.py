@@ -2,10 +2,15 @@ def compile_plan(plan):
     operations = []
 
     for action in plan["actions"]:
-        operations.append({
+        op = {
             "action": action["type"],
-            "path": action["file_path"],
-            "diff": action.get("content", "")
-        })
+            "target": action.get("target", "file"),
+            "path": action.get("file_path", ""),
+            "name": action.get("name", ""),
+            "params": action.get("params", {}),
+            "diff": action.get("content", ""),
+            "intent": action.get("intent", ""),
+        }
+        operations.append(op)
 
     return operations

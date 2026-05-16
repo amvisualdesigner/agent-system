@@ -35,7 +35,10 @@ async def validate_plan_node(state: AgentState) -> dict:
         return {"trace": trace[-50:], "phase": "error", "error": "no_plan", "_next_node": "return_result"}
 
     actions = plan.get("actions", [])
-    valid = len(actions) > 0 and all(a.get("file_path", "") for a in actions)
+    valid = len(actions) > 0 and all(
+        a.get("file_path") or (a.get("target") and a.get("name"))
+        for a in actions
+    )
 
     if valid:
         logger.info("[run_id=%s] validate_plan: valid (%d actions)", run_id, len(actions))

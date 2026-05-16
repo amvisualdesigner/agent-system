@@ -58,10 +58,12 @@ services:
       - REPO_ROOT=/opt/agent-repos/agent-test-repo
       - RUNS_DIR=/opt/agent-repos/worktrees
       - ARTIFACTS_DIR=/opt/agent-repos/artifacts
+      - SEMANTIC_DIR=/app/backend/app/semantic
       - LLM_BASE_URL=http://vllm:8000
       - LLM_MODEL=Qwen/Qwen2.5-Coder-3B-Instruct
       - LLM_API_KEY=not-needed
       - MAX_WORKSPACE_FILES=200
+      - PYTHONUNBUFFERED=1
     depends_on:
       vllm:
         condition: service_healthy

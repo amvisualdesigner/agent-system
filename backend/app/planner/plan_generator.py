@@ -8,50 +8,78 @@ import httpx
 from app.utils.state import write_state
 from app.contracts.plan_request import PlanRequest
 from app.config.settings import settings
+from app.semantic_engine import load_semantic_entries, retrieve, compile_context, is_semantic_task
 
 logger = logging.getLogger(__name__)
 
 schema = """
+Skill execution (optional):
+{
+  "actions": [
+    {
+      "type": "use_skill",
+      "target": "skill",
+      "name": "dashboard.sales_overview",
+      "params": {
+        "metrics": ["revenue", "growth"],
+        "timeseries_metric": "revenue"
+      }
+    }
+  ]
+}
+
+File execution:
 {
   "actions": [
     {
       "type": "create",
+      "target": "file",
       "file_path": "src/file.ts",
-      "description": "why this change is needed",
-      "content": "optional final content"
+      "description": "what this change does",
+      "intent": "empty | scaffold"  # optional, default=empty
     }
   ]
 }
 """
 
-def build_prompt(task: str, workspace_files: list | None = None) -> str:
+def build_prompt(task: str, workspace_files: list | None = None, semantic_context: str | None = None) -> str:
     if workspace_files is None:
         workspace_files = []
     context = "\n".join(workspace_files) if workspace_files else ""
+    hint = ""
+    if semantic_context:
+        hint = (
+            "\n- Semantic context is present as hints only, never binding. "
+            "You decide the action type based on the task."
+        )
     return f"""
-Return ONLY valid JSON.
+You must output STRICT JSON only.
+
+Rules:
+- Output must be valid JSON parsable by json.loads
+- Do NOT use markdown
+- Do NOT use backticks (`) under any circumstance
+- Do NOT include raw code (JS/TS/React) inside JSON strings
+- If code is needed, represent it as structured data or description, not literal source code
+- All strings must use escaped newlines (\\n), not template literals
+- Maximum 10 actions in the plan. Focus on essential files only.
+- Each scaffold operation has cost = 1. Total scaffold cost must be ≤ 3.
+  Use intent "empty" for data/config files (cost = 0).
+- If you cannot comply, return: {{"error": "invalid_plan"}}
+{hint}
+
+Violation of these rules makes the output invalid.
 
 You are a software planning engine.
-
 Your task is to generate a semantic modification plan for a repository.
-
 You DO NOT execute changes.
-
 You ONLY describe intended modifications.
-
-action MUST be one of: create, modify, delete
-YOU MUST output ONLY "actions".
-DO NOT use "steps".
 
 Schema:
 {schema}
 
-Rules:
-- NO markdown
-- NO explanations
-- ONLY valid JSON
-- describe intent clearly
-- proposed_content is optional
+# Semantic System Context
+{semantic_context}
 
 Task:
 {task}
@@ -82,9 +110,8 @@ def _validate_plan(data: Dict[str, Any]) -> Dict[str, Any]:
     for i, action in enumerate(data["actions"]):
         if not isinstance(action, dict):
             return {"error": "invalid_json_from_llm", "exception": f"Action {i} is not a dict", "raw": json.dumps(data)}
-        for key in ("type", "file_path", "description"):
-            if key not in action:
-                return {"error": "invalid_json_from_llm", "exception": f"Action {i} missing '{key}'", "raw": json.dumps(data)}
+        if "type" not in action:
+            return {"error": "invalid_json_from_llm", "exception": f"Action {i} missing 'type'", "raw": json.dumps(data)}
 
     return data
 
@@ -124,7 +151,7 @@ def call_llm(prompt: str) -> Dict[str, Any]:
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.0,
-        "max_tokens": 512,
+        "max_tokens": 2048,
         "stop": None
     }
 
@@ -193,9 +220,22 @@ def call_llm(prompt: str) -> Dict[str, Any]:
             }
 
 
+SEMANTIC_ENTRIES = load_semantic_entries(
+    settings.SEMANTIC_DIR
+)
+
+
+def build_semantic_context(task: str) -> str:
+    # include_as_hint_only = True  — context is advisory, never forced
+    matches = retrieve(task, SEMANTIC_ENTRIES, top_k=5, min_score=0)
+    return compile_context(matches)
+
+
 def generate_plan(req: PlanRequest, workspace_files):
 
-    prompt = build_prompt(req.task, workspace_files)
+    semantic_context = build_semantic_context(req.task)
+
+    prompt = build_prompt(req.task, workspace_files, semantic_context)
 
     llm_result = call_llm(prompt)
 

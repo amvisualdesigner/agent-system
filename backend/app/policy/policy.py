@@ -2,11 +2,14 @@ import os
 
 from app.contracts.operations import Action
 
-ALLOWED_EXTENSIONS = {".ts", ".js", ".py", ".md", ".json", ".yaml", ".yml", ".txt", ".html", ".css"}
+ALLOWED_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".json", ".yaml", ".yml", ".txt", ".html", ".css"}
 BLOCKED_PATTERNS = [".git", "node_modules", "dist", "build", ".env"]
 MAX_FILE_SIZE = 200_000  # 200KB
-MAX_OPERATIONS = 20
+MAX_OPERATIONS = 10
 MAX_DELETES = 3
+MAX_SCAFFOLD_OPS_PER_RUN = 3
+
+ALLOWED_TARGETS = {"skill", "component", "layout", "file"}
 
 def safe_path(path: str, base_repo: str):
     # normaliza ruta
@@ -33,6 +36,10 @@ def validate_plan_policy(plan):
     if len(delete_ops) > MAX_DELETES:
         return False, "too_many_deletes"
 
+    scaffold_count = sum(1 for a in actions if a.get("intent") == "scaffold")
+    if scaffold_count > MAX_SCAFFOLD_OPS_PER_RUN:
+        return False, "scaffold_budget_exceeded"
+
     return True, "ok"
 
 def is_path_safe(path: str):
@@ -44,7 +51,27 @@ def is_path_safe(path: str):
     return not any(p in forbidden for p in parts)
 
 # EXECUTION POLICY (filesystem safety)
+def validate_skill_operation(op):
+    if not op.get("name"):
+        return False, "missing_skill_name"
+    params = op.get("params", {})
+    if not isinstance(params, dict):
+        return False, "invalid_skill_params"
+    if len(params) == 0:
+        return False, "empty_skill_params"
+    return True, "ok"
+
+
 def validate_operation(op: dict):
+
+    # 0. target válido
+    target = op.get("target", "file")
+    if target not in ALLOWED_TARGETS:
+        return False, "invalid_target"
+
+    # skill operations bypass file checks
+    if target == "skill":
+        return validate_skill_operation(op)
 
     # 1. action válida
     try:
@@ -52,27 +79,32 @@ def validate_operation(op: dict):
     except Exception:
         return False, "invalid_operation_action"
 
-    # 2. path obligatorio
-    path = op.get("path")
-    if not path:
-        return False, "missing_path"
+    # 2. path obligatorio (solo para target=file)
+    if target == "file":
+        path = op.get("path")
+        if not path:
+            return False, "missing_path"
 
-    # 3. path safety
-    if not is_path_safe(path):
-        return False, "blocked_path"
+        if not is_path_safe(path):
+            return False, "blocked_path"
 
-    # 4. extensión
-    ext = os.path.splitext(path)[1]
-    if ext not in ALLOWED_EXTENSIONS:
-        return False, "extension_not_allowed"
+        ext = os.path.splitext(path)[1]
+        if ext not in ALLOWED_EXTENSIONS:
+            return False, "extension_not_allowed"
 
-    # 5. tamaño
+    # 3. tamaño
     content = op.get("content") or op.get("proposed_content")
     if content and len(content) > MAX_FILE_SIZE:
         return False, "file_too_large"
 
-    # 6. diff obligatorio
-    if action in {Action.create, Action.modify} and not op.get("diff"):
+    # 4. intent validation for create (structural operation)
+    if action == Action.create:
+        intent = op.get("intent", "")
+        if intent and intent not in {"empty", "scaffold", "full"}:
+            return False, "invalid_intent"
+
+    # 5. diff obligatorio solo para modify (patch operation)
+    if action == Action.modify and not op.get("diff"):
         return False, "missing_diff"
 
     return True, "ok"

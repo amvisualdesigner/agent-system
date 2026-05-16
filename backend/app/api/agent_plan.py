@@ -3,7 +3,8 @@ import os
 
 from fastapi import APIRouter
 from app.planner.plan_generator import generate_plan
-from app.planner.plan_validator import validate_plan
+from app.planner.plan_validator import validate_plan, prune_scaffold
+from app.policy.policy import MAX_SCAFFOLD_OPS_PER_RUN
 from app.contracts.plan_request import PlanRequest
 from app.utils.workspace import list_workspace_files
 from app.runtime.context import build_context
@@ -24,6 +25,11 @@ def agent_plan(req: PlanRequest):
 
     write_state(run_id, "plan")
 
+    # Hybrid soft-hard constraint: prune scaffold budget instead of rejecting
+    llm_feedback = ""
+    if "actions" in plan:
+        prune_scaffold(plan)
+
     ok, reason = validate_plan(plan)
 
     if not ok:
@@ -34,8 +40,19 @@ def agent_plan(req: PlanRequest):
             "plan": plan
         }
 
+    if plan.get("pruned"):
+        scaffold_count = len([a for a in plan["actions"] if a.get("intent") == "scaffold"])
+        llm_feedback = (
+            f"Your previous plan exceeded scaffold budget "
+            f"({MAX_SCAFFOLD_OPS_PER_RUN} max). "
+            f"Pruned {plan['pruned_count']} scaffold operations. "
+            f"Final scaffold count: {scaffold_count}. "
+            f"You MUST reduce scaffold operations in your next plan."
+        )
+
     return {
         "run_id": run_id,
         "status": "ok",
-        "plan": plan
+        "plan": plan,
+        "llm_feedback": llm_feedback,
     }

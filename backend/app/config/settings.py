@@ -31,6 +31,7 @@ class Settings:
     REPO_ROOT: str = required_env("REPO_ROOT")
     RUNS_DIR: str = optional_env("RUNS_DIR", "/opt/agent-repos/worktrees")
     ARTIFACTS_DIR: str = optional_env("ARTIFACTS_DIR", "/opt/agent-repos/artifacts")
+    SEMANTIC_DIR: str = optional_env("SEMANTIC_DIR", "/app/backend/app/semantic")
 
     # limits
     MAX_WORKSPACE_FILES: int = optional_int("MAX_WORKSPACE_FILES", 200)
