@@ -12,7 +12,6 @@ services:
 
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - LLM_BASE_URL=http://localhost:8000
 
     gpus: all
     ipc: host
@@ -39,5 +38,64 @@ services:
       retries: 5
       start_period: 180s
 
+    networks:
+      - agent-network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: agent-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - /opt/agent-repos:/opt/agent-repos
+    environment:
+      - REPO_ROOT=/opt/agent-repos/agent-test-repo
+      - RUNS_DIR=/opt/agent-repos/worktrees
+      - ARTIFACTS_DIR=/opt/agent-repos/artifacts
+      - LLM_BASE_URL=http://vllm:8000
+      - LLM_MODEL=Qwen/Qwen2.5-Coder-3B-Instruct
+      - LLM_API_KEY=not-needed
+      - MAX_WORKSPACE_FILES=200
+    depends_on:
+      vllm:
+        condition: service_healthy
+    networks:
+      - agent-network
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: agent-orchestrator
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./orchestrator/runs:/app/orchestrator/runs
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - agent-network
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: agent-ui
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    networks:
+      - agent-network
+
 volumes:
   hf_cache:
+
+networks:
+  agent-network:
+    driver: bridge

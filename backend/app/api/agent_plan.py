@@ -14,7 +14,7 @@ router = APIRouter()
 @router.post("/agent/plan")
 def agent_plan(req: PlanRequest):
 
-    run_id = str(uuid.uuid4())
+    run_id = req.run_id or str(uuid.uuid4())
 
     context = build_context(run_id)
 

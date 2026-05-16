@@ -34,7 +34,7 @@ async def call_plan_node(state: AgentState) -> dict:
 
     start = time.time()
     try:
-        result = await backend_call_plan(state["task"])
+        result = await backend_call_plan(state["task"], run_id=run_id)
         latency = int((time.time() - start) * 1000)
     except Exception as e:
         latency = int((time.time() - start) * 1000)

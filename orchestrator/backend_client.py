@@ -12,9 +12,9 @@ MAX_RETRIES = 2
 RETRY_DELAY_MS = 500
 
 
-async def call_plan(task: str) -> Dict[str, Any]:
+async def call_plan(task: str, run_id: str = "") -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post(f"{BACKEND_URL}/agent/plan", json={"task": task})
+        r = await client.post(f"{BACKEND_URL}/agent/plan", json={"task": task, "run_id": run_id})
         r.raise_for_status()
         return r.json()
 

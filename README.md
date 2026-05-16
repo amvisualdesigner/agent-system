@@ -533,34 +533,45 @@ docker compose up -d vllm
 
 Health check: `curl http://localhost:7000/health`
 
-### 2. Backend
+### 2. Todos los servicios
 
 ```bash
-cd /opt/agent-system/backend
-source venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000
+cd /opt/agent-system
+docker compose up -d
 ```
 
-Health check: `curl http://localhost:8000/health`
+Health checks:
+```bash
+curl -s http://localhost:8000/health   # Backend
+curl -s http://localhost:9000/health   # Orchestrator
+curl -s http://localhost:7000/health   # vLLM
+curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/  # UI
+```
 
-### 3. Orchestrator
+Logs:
+```bash
+docker compose logs -f            # Todos
+docker logs agent-orchestrator -f # Solo orchestrator
+docker logs agent-backend -f      # Solo backend
+```
+
+### 3. Refrescar sistema (tras cambios en código)
 
 ```bash
-export PYTHONPATH=/opt/agent-system/orchestrator
-cd /opt/agent-system/orchestrator
-python -m uvicorn main:app --host 0.0.0.0 --port 9000
+cd /opt/agent-system
+docker compose up -d --build
 ```
 
-Health check: `curl http://localhost:9000/health`
+Esto reconstruye las imágenes que tienen cambios y reinicia solo los containers necesarios.
 
-### 4. UI
+### 4. Detener sistema
 
 ```bash
-cd /opt/agent-system/ui
-node server.mjs
+cd /opt/agent-system
+docker compose down
 ```
 
-Abrir en navegador: `http://localhost:5173`
+Para detener todo y liberar puertos. Los datos persisten (worktrees, artifacts, snapshots).
 
 ### Verificar todo
 

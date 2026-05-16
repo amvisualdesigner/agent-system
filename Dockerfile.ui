@@ -1,0 +1,7 @@
+FROM node:20-alpine
+
+WORKDIR /app
+COPY ui/ .
+EXPOSE 5173
+
+CMD ["node", "server.mjs"]

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from app.utils.run_id import validate_run_id
 
 mcp = FastMCP("agent-runtime")
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 # -------------------------
