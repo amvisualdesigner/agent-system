@@ -5,13 +5,14 @@ services:
     restart: unless-stopped
 
     ports:
-      - "8001:8000"
+      - "7000:8000"
 
     volumes:
       - hf_cache:/root/.cache/huggingface
 
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - LLM_BASE_URL=http://localhost:8000
 
     gpus: all
     ipc: host

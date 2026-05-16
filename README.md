@@ -157,7 +157,7 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
                                                                               POST /v1/chat/completions
                                                                                        │
                                                                                 ┌──────▼───────┐
-                                                                                │  vLLM :8001  │
+                                                                                │  vLLM :7000  │
                                                                                 │  Qwen 3B     │
                                                                                 └──────────────┘
 ```
@@ -167,7 +167,7 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 | Servicio | Puerto | Descripcion |
 |----------|--------|-------------|
 | Backend | 8000 | API de planificacion y ejecucion |
-| vLLM | 8001 | LLM OpenAI-compatible |
+| vLLM | 7000 | LLM OpenAI-compatible |
 | Orchestrator | 9000 | LangGraph orquestador |
 | UI | 5173 | Chat web |
 
@@ -531,7 +531,7 @@ cd /opt/agent-system
 docker compose up -d vllm
 ```
 
-Health check: `curl http://localhost:8001/health`
+Health check: `curl http://localhost:7000/health`
 
 ### 2. Backend
 
@@ -567,11 +567,18 @@ Abrir en navegador: `http://localhost:5173`
 ```bash
 curl -s http://localhost:8000/health   # Backend
 curl -s http://localhost:9000/health   # Orchestrator
-curl -s http://localhost:8001/health   # vLLM
+curl -s http://localhost:7000/health   # vLLM
 curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/  # UI
 ```
 
 ---
+
+## API surface
+8000 → backend API
+7000 → vLLM inference
+9000 → orchestrator API
+5173 → UI frontend
+8050 → Docker admin (portainer)
 
 ## Uso
 
@@ -684,7 +691,7 @@ docker run --rm -v hf_cache:/data alpine tar czf /backup/hf.tar.gz -C /data .
 |----------|---------|-------------|
 | `REPO_ROOT` | - | Ruta al repo Git |
 | `RUNS_DIR` | `/tmp/agent-runs` | Directorio de worktrees y artifacts |
-| `LLM_BASE_URL` | `http://localhost:8001` | URL de vLLM |
+| `LLM_BASE_URL` | `http://localhost:7000` | URL de vLLM |
 | `LLM_MODEL` | `Qwen/Qwen2.5-Coder-3B-Instruct` | Modelo LLM |
 | `MAX_WORKSPACE_FILES` | `200` | Limite de archivos por workspace |
 
