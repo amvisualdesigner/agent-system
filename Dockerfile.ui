@@ -1,7 +1,12 @@
 FROM node:20-alpine
 
+RUN addgroup -g 984 agentsys && \
+    adduser -u 994 -D -G agentsys agentsys
+
 WORKDIR /app
 COPY ui/ .
 EXPOSE 5173
+
+USER agentsys
 
 CMD ["node", "server.mjs"]

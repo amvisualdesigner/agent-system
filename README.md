@@ -688,8 +688,7 @@ Esto expone las 7 herramientas para que un modelo MCP-compatible pueda planifica
 
 ### Backup Docker compose
 ```bash
-docker volume ls
-docker run --rm -v hf_cache:/data alpine tar czf /backup/hf.tar.gz -C /data .
+sudo bash /opt/agent-system/scripts/backup_system.sh
 ```
 
 ---
@@ -767,10 +766,12 @@ El backend clona/usa un repo Git en `REPO_ROOT` (`/opt/agent-repos/agent-test-re
 4. Hace `git add -A` y `git commit -m "agent:{run_id}"`
 5. Genera diff
 
+// TODO: crear un garbage
 Los worktrees persisten en disco. Para limpiar:
 
 ```bash
 curl -X POST http://localhost:8000/maintenance/cleanup
+git branch | grep -v "master" | xargs git branch -D (OJO, elimina todas las ramas excepto master)
 ```
 
 ---

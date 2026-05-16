@@ -1,6 +1,2 @@
 __pycache__
-venv
-artifacts
-.env
 tmp
-orchestrator/runs

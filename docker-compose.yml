@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   vllm:
     image: vllm/vllm-openai:latest
@@ -13,7 +15,7 @@ services:
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-    gpus: all
+    runtime: nvidia
     ipc: host
 
     command:
@@ -46,6 +48,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: agent-backend
+    user: "994:984"
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -70,11 +73,12 @@ services:
       context: .
       dockerfile: Dockerfile.orchestrator
     container_name: agent-orchestrator
+    user: "994:984"
     restart: unless-stopped
     ports:
       - "9000:9000"
     volumes:
-      - ./orchestrator/runs:/app/orchestrator/runs
+      - /opt/agent-repos/orchestrator/runs:/app/orchestrator/runs
     environment:
       - BACKEND_URL=http://backend:8000
     depends_on:
@@ -87,6 +91,7 @@ services:
       context: .
       dockerfile: Dockerfile.ui
     container_name: agent-ui
+    user: "994:984"
     restart: unless-stopped
     ports:
       - "5173:5173"

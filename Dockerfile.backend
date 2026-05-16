@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* && \
-    git config --global --add safe.directory '*'
+    groupadd -g 984 agentsys && \
+    useradd -u 994 -g agentsys -m -d /home/agentsys -s /bin/bash agentsys && \
+    git config --system safe.directory /opt/agent-repos/agent-test-repo
 
 WORKDIR /app/backend
 
@@ -11,5 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ .
 
 EXPOSE 8000
+
+USER agentsys
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
