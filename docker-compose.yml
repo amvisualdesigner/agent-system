@@ -8,7 +8,7 @@ services:
       - "8001:8000"
 
     volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
+      - hf_cache:/root/.cache/huggingface
 
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -30,10 +30,13 @@ services:
       - "--enable-auto-tool-choice"
       - "--tool-call-parser"
       - "openai"
-      
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 180s
+
+volumes:
+  hf_cache:

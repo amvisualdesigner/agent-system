@@ -668,6 +668,12 @@ python mcp-server/server.py
 
 Esto expone las 7 herramientas para que un modelo MCP-compatible pueda planificar, ejecutar, revisar y aprobar cambios directamente.
 
+### Backup Docker compose
+```bash
+docker volume ls
+docker run --rm -v hf_cache:/data alpine tar czf /backup/hf.tar.gz -C /data .
+```
+
 ---
 
 ## Variables de Entorno
