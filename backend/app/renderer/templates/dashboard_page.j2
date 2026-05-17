@@ -1,0 +1,16 @@
+import React from 'react';
+import { KpiRow } from './components/KpiRow';
+import { Timeseries } from './components/Timeseries';
+
+interface DashboardProps {
+  title?: string;
+}
+
+export const SalesOverview: React.FC<DashboardProps> = ({ title }) => {
+  return (
+    <div className="analytics-grid">
+      <KpiRow metrics={__METRICS__} />
+      <Timeseries metric={__METRIC__} />
+    </div>
+  );
+};

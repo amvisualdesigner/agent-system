@@ -1,8 +1,10 @@
+import logging
 import subprocess
 import os
 import shutil
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.agent_plan import router as agent_plan_router
@@ -13,7 +15,13 @@ from app.utils.path_guard import guard_within
 from app.config.settings import settings
 
 # -------- CONFIGURACIÓN --------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 app = FastAPI()
+
+
+@app.exception_handler(ValueError)
+def value_error_handler(request, exc):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 app.include_router(agent_plan_router)
 app.include_router(agent_apply)
 

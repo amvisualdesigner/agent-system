@@ -8,7 +8,10 @@ logger = logging.getLogger("orchestrator.nodes.return_result")
 
 
 async def return_result_node(state: AgentState) -> dict:
-    run_id = state.get("run_id", "")
+    assert state.get("run_id") is not None, "run_id must not be None"
+    run_id = state["run_id"]
+    logger.info("node=return_result run_id=%s", run_id)
+
     error = state.get("error")
     cancelled = state.get("cancelled", False)
 
@@ -76,4 +79,4 @@ async def return_result_node(state: AgentState) -> dict:
         ),
     )
 
-    return {"phase": phase}
+    return {**state, "phase": phase}

@@ -1,8 +1,12 @@
 import os
+import logging
 
 from app.policy.policy import validate_operation, safe_path
 from app.contracts.operations import Action
 from app.executor.skill_resolver import resolve_skill
+from app.config.feature_flags import FEATURE_FLAGS
+
+logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 200_000
 
@@ -35,6 +39,9 @@ def _template_for(path: str) -> str:
 
 
 def _resolve_intent(intent: str, path: str) -> str:
+    if FEATURE_FLAGS["freeze_scaffold"]:
+        logger.warning("[DEPRECATED] scaffold/empty intent blocked by freeze_scaffold flag")
+        return ""
     if intent == "empty":
         return ""
     if intent == "scaffold":
@@ -64,6 +71,9 @@ def _apply_file_op(op, base_repo):
 
     if op["action"] == Action.create:
         intent = op.get("intent", "")
+        if FEATURE_FLAGS["freeze_scaffold"] and intent in ("scaffold", "empty"):
+            logger.warning("[DEPRECATED] scaffold/empty rejected by freeze_scaffold flag", extra={"path": path})
+            return {"status": "rejected", "reason": "scaffold_disabled", "path": path}
         if intent in ALLOWED_INTENTS:
             content = _resolve_intent(intent, path)
         else:

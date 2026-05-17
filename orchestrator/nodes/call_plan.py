@@ -9,11 +9,14 @@ logger = logging.getLogger("orchestrator.nodes.call_plan")
 
 
 async def call_plan_node(state: AgentState) -> dict:
-    if state.get("cancelled"):
-        logger.warning("[run_id=%s] call_plan cancelled", state.get("run_id"))
-        return {"phase": "cancelled", "_next_node": "return_result"}
+    assert state.get("run_id") is not None, "run_id must not be None"
+    run_id = state["run_id"]
+    logger.info("node=call_plan run_id=%s", run_id)
 
-    run_id = state["run_id"] or ""
+    if state.get("cancelled"):
+        logger.warning("[run_id=%s] call_plan cancelled", run_id)
+        return {**state, "phase": "cancelled", "_next_node": "return_result"}
+
     phase = "planning"
 
     await emitter.emit(
@@ -63,10 +66,11 @@ async def call_plan_node(state: AgentState) -> dict:
         ),
     )
 
-    if result.get("status") == "rejected":
+    if result.get("status") in ("rejected", "noop"):
         reason = result.get("reason", "plan_rejected")
-        logger.warning("[run_id=%s] plan rejected: %s", run_id, reason)
+        logger.warning("[run_id=%s] plan rejected/noop: %s", run_id, reason)
         return {
+            **state,
             "backend_run_id": result.get("run_id"),
             "plan": result.get("plan"),
             "planner_meta": planner_meta,
@@ -77,6 +81,7 @@ async def call_plan_node(state: AgentState) -> dict:
         }
 
     return {
+        **state,
         "backend_run_id": result.get("run_id"),
         "plan": result.get("plan"),
         "planner_meta": planner_meta,
@@ -90,6 +95,7 @@ def _error_state(state, run_id, node, error, input_data, latency):
     trace_entry = {"node": node, "input": input_data, "output": {"error": error}, "latency_ms": latency}
     trace = (state.get("trace") or []) + [trace_entry]
     return {
+        **state,
         "error": error,
         "trace": trace[-50:],
         "phase": "error",

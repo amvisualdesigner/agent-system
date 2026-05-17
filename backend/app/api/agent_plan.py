@@ -1,23 +1,49 @@
-import uuid
 import os
+import json
+import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from app.config.settings import settings
+from app.config.feature_flags import FEATURE_FLAGS
 from app.planner.plan_generator import generate_plan
-from app.planner.plan_validator import validate_plan, prune_scaffold
 from app.planner.task_classifier import classify_task
-from app.planner.semantic_validator import validate_semantic_plan
-from app.policy.policy import MAX_SCAFFOLD_OPS_PER_RUN
+from app.planner.skill_ir_planner import generate_skill_ir
 from app.contracts.plan_request import PlanRequest
 from app.utils.workspace import list_workspace_files
 from app.runtime.context import build_context
 from app.utils.state import write_state
+from app.utils.run_id import validate_run_id
+
+logger = logging.getLogger(__name__)
+
 
 router = APIRouter()
+
+
+def _dump_legacy_snapshot(run_id: str, task: str, classification, plan: dict):
+    snapshot = {
+        "run_id": run_id,
+        "task": task,
+        "classification": {
+            "mode": classification.mode,
+            "semantic_score": classification.semantic_score,
+            "composition_score": classification.composition_score,
+            "matched_patterns": classification.matched_patterns,
+        },
+        "plan": plan,
+    }
+    path = f"{settings.ARTIFACTS_DIR}/{run_id}/baseline_plan.json"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(snapshot, f, indent=2, default=str)
+
 
 @router.post("/agent/plan")
 def agent_plan(req: PlanRequest):
 
-    run_id = req.run_id or str(uuid.uuid4())
+    if not req.run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    run_id = validate_run_id(req.run_id)
 
     context = build_context(run_id)
 
@@ -25,25 +51,36 @@ def agent_plan(req: PlanRequest):
 
     classification = classify_task(req.task)
 
-    plan = generate_plan(req, workspace_files, task_mode=classification.mode)
+    if FEATURE_FLAGS["skill_ir_output"]:
+        skill_ir = generate_skill_ir(req.task, classification.mode)
+        ok, reason = skill_ir.should_execute()
 
-    plan = validate_semantic_plan(plan, classification.mode, task=req.task)
+        if not ok:
+            return {
+                "run_id": run_id,
+                "status": "noop",
+                "reason": reason,
+                "skill_ir": skill_ir.to_dict(),
+                "planner_meta": {
+                    "task_mode": classification.mode,
+                    "semantic_score": classification.semantic_score,
+                    "composition_score": classification.composition_score,
+                    "matched_patterns": classification.matched_patterns,
+                },
+            }
 
-    write_state(run_id, "plan")
+        plan = {
+            "skill_ir": skill_ir.to_dict(),
+            "actions": [],
+        }
 
-    # Hybrid soft-hard constraint: prune scaffold budget instead of rejecting
-    llm_feedback = ""
-    if "actions" in plan:
-        prune_scaffold(plan)
+        write_state(run_id, "plan")
 
-    ok, reason = validate_plan(plan)
-
-    if not ok:
         return {
             "run_id": run_id,
-            "status": "rejected",
-            "reason": reason,
+            "status": "ok",
             "plan": plan,
+            "skill_ir": skill_ir.to_dict(),
             "planner_meta": {
                 "task_mode": classification.mode,
                 "semantic_score": classification.semantic_score,
@@ -52,21 +89,19 @@ def agent_plan(req: PlanRequest):
             },
         }
 
-    if plan.get("pruned"):
-        scaffold_count = len([a for a in plan["actions"] if a.get("intent") == "scaffold"])
-        llm_feedback = (
-            f"Your previous plan exceeded scaffold budget "
-            f"({MAX_SCAFFOLD_OPS_PER_RUN} max). "
-            f"Pruned {plan['pruned_count']} scaffold operations. "
-            f"Final scaffold count: {scaffold_count}. "
-            f"You MUST reduce scaffold operations in your next plan."
-        )
+    # Legacy path (skill_ir_output disabled)
+    plan = generate_plan(req, workspace_files, task_mode=classification.mode)
+
+    write_state(run_id, "plan")
+
+    _dump_legacy_snapshot(run_id, req.task, classification, {
+        "original": plan,
+    })
 
     return {
         "run_id": run_id,
         "status": "ok",
         "plan": plan,
-        "llm_feedback": llm_feedback,
         "planner_meta": {
             "task_mode": classification.mode,
             "semantic_score": classification.semantic_score,

@@ -163,21 +163,21 @@ def _close_http_client():
         _http_client.close()
 
 
-def call_llm(prompt: str) -> Dict[str, Any]:
+def call_llm(prompt: str, system_prompt: str | None = None) -> Dict[str, Any]:
     url = f"{settings.LLM_BASE_URL}/v1/chat/completions"
+
+    if system_prompt is None:
+        system_prompt = (
+            "You are a strict code generation engine. "
+            "Return ONLY valid JSON with this structure:\n"
+            "{ 'actions': [ { 'type': str, 'file_path': str, 'description': str } ] }\n"
+            "No markdown. No explanations. No text outside JSON."
+        )
 
     payload = {
         "model": settings.LLM_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict code generation engine. "
-                    "Return ONLY valid JSON with this structure:\n"
-                    "{ 'actions': [ { 'type': str, 'file_path': str, 'description': str } ] }\n"
-                    "No markdown. No explanations. No text outside JSON."
-                )
-            },
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.0,

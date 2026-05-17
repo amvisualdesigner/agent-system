@@ -1,13 +1,9 @@
-from pydantic import BaseModel, field_validator
+from typing import Optional
 
-from app.utils.run_id import validate_run_id
+from pydantic import BaseModel
+
 
 class ApplyRequest(BaseModel):
-    run_id: str
+    run_id: Optional[str] = None
     plan: dict
     dry_run: bool = False
-
-    @field_validator("run_id")
-    @classmethod
-    def _validate_run_id(cls, v: str) -> str:
-        return validate_run_id(v)

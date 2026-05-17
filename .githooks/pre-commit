@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-commit hook: validate contracts on every commit that touches skill_registry
+set -euo pipefail
+
+CHANGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -c "skill_registry.py" || true)
+
+if [ "$CHANGED" -gt 0 ]; then
+    echo "[pre-commit] Contracts changed — running validation..."
+    python3 scripts/contract_validator.py
+    python3 scripts/contract_lint.py
+    python3 scripts/contract_duplicate_detector.py
+    echo "[pre-commit] Contract checks passed"
+fi

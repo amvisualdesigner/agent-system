@@ -7,7 +7,5 @@ UUID_PATTERN = re.compile(
 
 def validate_run_id(run_id: str) -> str:
     if not isinstance(run_id, str) or not UUID_PATTERN.match(run_id):
-        raise ValueError(
-            f"Invalid run_id: {run_id!r}. Must be a valid UUID v4 string."
-        )
+        raise ValueError(f"Invalid run_id: {run_id!r}")
     return run_id

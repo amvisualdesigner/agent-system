@@ -13,22 +13,25 @@ RETRY_GETRUN_DELAY_MS = 500
 
 
 async def call_apply_node(state: AgentState) -> dict:
-    run_id = state.get("run_id", "")
+    assert state.get("run_id") is not None, "run_id must not be None"
+    run_id = state["run_id"]
+    logger.info("node=call_apply run_id=%s", run_id)
+
     backend_run_id = state.get("backend_run_id", "")
     phase = "executing"
     input_data = {"backend_run_id": backend_run_id, "plan": state.get("plan")}
 
     if state.get("cancelled"):
         logger.warning("[run_id=%s] call_apply cancelled", run_id)
-        return {"phase": "cancelled", "_next_node": "return_result"}
+        return {**state, "phase": "cancelled", "_next_node": "return_result"}
 
     if state.get("error"):
         logger.warning("[run_id=%s] call_apply skipped (prior error)", run_id)
-        return {"phase": "error", "_next_node": "return_result"}
+        return {**state, "phase": "error", "_next_node": "return_result"}
 
     if state.get("execution") is not None:
         logger.info("[run_id=%s] call_apply already executed, skipping", run_id)
-        return {"phase": state.get("phase", "completed"), "_next_node": "return_result"}
+        return {**state, "phase": state.get("phase", "completed"), "_next_node": "return_result"}
 
     await emitter.emit(
         run_id,
@@ -46,7 +49,7 @@ async def call_apply_node(state: AgentState) -> dict:
 
     start = time.time()
     try:
-        apply_result = await backend_call_apply(backend_run_id or run_id, state["plan"])
+        apply_result = await backend_call_apply(run_id, state["plan"])
         latency = int((time.time() - start) * 1000)
     except Exception as e:
         latency = int((time.time() - start) * 1000)
@@ -66,7 +69,7 @@ async def call_apply_node(state: AgentState) -> dict:
 
     run_details = None
     try:
-        run_details = await _get_run_with_retry(run_id, backend_run_id or run_id)
+        run_details = await _get_run_with_retry(run_id, run_id)
         if run_details:
             output["diff"] = run_details.get("diff")
             output["files"] = run_details.get("files")
@@ -83,6 +86,7 @@ async def call_apply_node(state: AgentState) -> dict:
     )
 
     return {
+        **state,
         "execution": apply_result,
         "run_details": run_details,
         "trace": trace[-50:],
@@ -121,6 +125,7 @@ def _error_state(state, run_id, node, error, input_data, latency):
     trace_entry = {"node": node, "input": input_data, "output": {"error": error}, "latency_ms": latency}
     trace = (state.get("trace") or []) + [trace_entry]
     return {
+        **state,
         "error": error,
         "trace": trace[-50:],
         "phase": "error",
