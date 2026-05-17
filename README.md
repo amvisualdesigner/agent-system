@@ -303,7 +303,8 @@ Task (lenguaje natural)
 ┌──────────────────────────────────────────────────────┐
 │  1. SkillIR (LLM)                                    │
 │     Elige: contract_id + version + params + confidence│
-│     Opciones: "dashboard.sales_overview" o "noop"    │
+│     Opciones: "dashboard.sales_overview",             │
+│               "analytics.table", "noop"              │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
@@ -311,7 +312,7 @@ Task (lenguaje natural)
 │  2. Scoring Fusion (post-LLM calibration)            │
 │     final = 0.7 * llm_conf + 0.3 * token_overlap    │
 │     Domain prior: si no hay keyword, llm_conf × 0.5  │
-│     threshold 0.5 → noop si no alcanza               │
+│     threshold 0.5 (default) o por contrato           │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
@@ -323,8 +324,17 @@ Task (lenguaje natural)
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  4. Render + Execute (determinista)                  │
+│  4. Example Retrieval (determinista)                 │
+│     contract_id → domain → catalog.json              │
+│     ExampleContext { imports, components, layouts }  │
+│     (offline catalog, no TSX parsing at runtime)     │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  5. Render + Execute (determinista)                  │
 │     Renderer: structural expansion (for loops only)  │
+│     + raw HTML placeholders for tables               │
 │     Executor: dumb create/modify/delete on filesystem│
 └──────────────────────────────────────────────────────┘
 ```
@@ -334,12 +344,22 @@ Task (lenguaje natural)
 El sistema usa un **prompt de dos etapas** para guiar al LLM:
 
 ```
-STEP 1 — Decide relevance:
-Is this task about BUSINESS METRICS, SALES, DASHBOARD, KPI, or ANALYTICS?
-- YES → contract_id="dashboard.sales_overview"
-- NO → contract_id="noop"
+STEP 1 — Decide relevance (check in this order):
 
-STEP 2 — Extract parameters (only for dashboard.sales_overview):
+1. Is this task about a TABLE, DATA TABLE, ANALYTICS TABLE, TABULAR DATA, or COLUMNS?
+   - YES → contract_id="analytics.table"
+
+2. Is this task about BUSINESS METRICS, SALES KPIs, DASHBOARD, or REVENUE?
+   - YES → contract_id="dashboard.sales_overview"
+
+3. Otherwise → contract_id="noop"
+
+STEP 2 — Extract parameters (only for matching contract):
+
+For analytics.table:
+- columns: list of column names
+
+For dashboard.sales_overview:
 - metrics: list from [revenue, growth, retention, churn]
 - timeseries_metric: from [revenue, growth, retention] (default revenue)
 ```
@@ -418,6 +438,7 @@ Contrato actual disponible:
 | contract_id | version | input_schema | output |
 |-------------|---------|--------------|--------|
 | `dashboard.sales_overview` | 1 | `metrics: list[str]` (enum), `timeseries_metric: str` (opcional, default revenue) | 3 archivos: SalesOverview.tsx, KpiRow.tsx, Timeseries.tsx |
+| `analytics.table` | 1 | `columns: list[str]` | 1 archivo: AnalyticsTable.tsx con Card wrapper + thead/tbody |
 | `noop` | 1 | `{}` | Ninguno |
 
 ### Invariantes de seguridad
@@ -829,7 +850,13 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   │   ├── config/            # Settings + feature flags
   │   │   ├── contracts/         # SkillIR + SkillContract registry
   │   │   ├── contract_resolver/ # Validate → defaults → AST builder
-  │   │   └── renderer/          # Render estructural de templates
+  │   │   ├── renderer/          # Render estructural de templates
+  │   │   └── examples/          # Catalogo de ejemplos arquitectonicos
+  │   │       ├── catalog/       # JSONs offline (dashboard, tables, forms)
+  │   │       ├── react/         # .tsx canónicos de referencia
+  │   │       ├── models.py      # ExampleContext dataclass
+  │   │       ├── catalog_loader.py  # Carga + schema validation
+  │   │       └── retrieval.py   # contract_id → domain → ExampleContext
   │   └── mcp-server/            # MCP bridge (legacy)
   │
   ├── orchestrator/              # LangGraph orquestador
@@ -920,6 +947,16 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] Executor dumb: solo create/modify/delete sin logica de negocio
 - [x] Templates en filesystem (ya no en memoria)
 - [x] files de FASE 1: feature flags, tooling scripts (lint, diff, dump), CI gate, pre-commit hook
+- [x] **Architectural Gravity Layer**: sistema de ejemplos arquitectonicos canónicos
+  - [x] Examples .tsx reales: dashboard (5), forms (2), tables (1)
+  - [x] Script offline: `scripts/build_examples_catalog.py`
+  - [x] Catalog JSONs versionados: dashboard.json, forms.json, tables.json
+  - [x] ExampleContext dataclass + retrieval determinista (contract_id → domain)
+  - [x] Renderer extendido: acepta ExampleContext, precomputo de HTML para tablas
+  - [x] Integracion en apply_engine: retrieve + pass context
+  - [x] Schema version assertion + sha1 imports hash + metric stub
+  - [x] Contrato `analytics.table`: genera AnalyticsTable.tsx con Card + columnas
+  - [ ] Contrato `settings.form`: genera formularios SettingsForm + UserProfileForm
 
 ### Context & Retrieval
 

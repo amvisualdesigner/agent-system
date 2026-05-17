@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-PER_CONTRACT_THRESHOLDS: dict[str, float] = {}
+PER_CONTRACT_THRESHOLDS: dict[str, float] = {
+    "analytics.table": 0.4,
+}
 
 
 @dataclass
@@ -56,6 +58,34 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
                 {"path": "SalesOverview.tsx", "template": "dashboard_page.j2"},
                 {"path": "components/KpiRow.tsx", "template": "kpi_row.j2"},
                 {"path": "components/Timeseries.tsx", "template": "timeseries.j2"},
+            ],
+        },
+    ),
+    ("analytics.table", 1): SkillContract(
+        contract_id="analytics.table",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": ["columns"],
+            "properties": {
+                "columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 8,
+                },
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "AnalyticsTable", "props": {"columns": "columns", "table_data": "table_data"}},
+            ],
+        },
+        renderer={
+            "base_path": "src/pages/analytics/",
+            "files": [
+                {"path": "AnalyticsTable.tsx", "template": "analytics_table.j2"},
             ],
         },
     ),

@@ -1,16 +1,22 @@
 import React from 'react';
+import { Card } from '@/components/ui/Card';
+import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { KpiRow } from './components/KpiRow';
 import { Timeseries } from './components/Timeseries';
 
-interface DashboardProps {
+interface SalesOverviewProps {
   title?: string;
 }
 
-export const SalesOverview: React.FC<DashboardProps> = ({ title }) => {
+export const SalesOverview: React.FC<SalesOverviewProps> = ({ title }) => {
   return (
-    <div className="analytics-grid">
-      <KpiRow metrics={__METRICS__} />
-      <Timeseries metric={__METRIC__} />
-    </div>
+    <DashboardLayout>
+      <Card>
+        <KpiRow metrics={__METRICS__} />
+      </Card>
+      <Card>
+        <Timeseries metric={__METRIC__} />
+      </Card>
+    </DashboardLayout>
   );
 };

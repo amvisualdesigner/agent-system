@@ -1,4 +1,5 @@
 import React from 'react';
+import { Card } from '@/components/ui/Card';
 
 interface TimeseriesProps {
   metric: string;
@@ -6,8 +7,10 @@ interface TimeseriesProps {
 
 export const Timeseries: React.FC<TimeseriesProps> = ({ metric }) => {
   return (
-    <div className="timeseries-chart">
-      <h3>{__METRIC__} over time</h3>
-    </div>
+    <Card>
+      <div className="timeseries-chart">
+        <h3>{__METRIC__} over time</h3>
+      </div>
+    </Card>
   );
 };

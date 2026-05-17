@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "renderer_schema_version": "2026-05",
+  "domain": "dashboard",
+  "imports": [
+    "import React from 'react';",
+    "import { Card } from '@/components/ui/Card';",
+    "import { DashboardLayout } from '@/components/layout/DashboardLayout';",
+    "import { KpiRow } from './KpiRow';",
+    "import { RevenueChart } from './RevenueChart';",
+    "import { RevenueTable } from './RevenueTable';"
+  ],
+  "components": [
+    "DashboardLayout",
+    "KpiRow",
+    "RevenueChart",
+    "RevenueTable",
+    "SalesOverview"
+  ],
+  "layouts": [
+    "DashboardLayout"
+  ],
+  "composition": [
+    [
+      "SalesOverview",
+      "DashboardLayout"
+    ],
+    [
+      "SalesOverview",
+      "KpiRow"
+    ],
+    [
+      "SalesOverview",
+      "RevenueChart"
+    ],
+    [
+      "SalesOverview",
+      "RevenueTable"
+    ]
+  ]
+}

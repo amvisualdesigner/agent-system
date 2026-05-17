@@ -9,6 +9,7 @@ from app.planner.plan_generator import generate_plan
 from app.planner.task_classifier import classify_task
 from app.planner.skill_ir_planner import generate_skill_ir
 from app.contracts.plan_request import PlanRequest
+from app.contracts.skill_registry import PER_CONTRACT_THRESHOLDS
 from app.utils.workspace import list_workspace_files
 from app.runtime.context import build_context
 from app.utils.state import write_state
@@ -53,7 +54,7 @@ def agent_plan(req: PlanRequest):
 
     if FEATURE_FLAGS["skill_ir_output"]:
         skill_ir = generate_skill_ir(req.task, classification.mode)
-        ok, reason = skill_ir.should_execute()
+        ok, reason = skill_ir.should_execute(per_contract_thresholds=PER_CONTRACT_THRESHOLDS)
 
         if not ok:
             return {

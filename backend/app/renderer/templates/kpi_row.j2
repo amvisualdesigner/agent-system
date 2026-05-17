@@ -1,4 +1,5 @@
 import React from 'react';
+import { Card } from '@/components/ui/Card';
 
 interface KpiRowProps {
   metrics: string[];
@@ -8,9 +9,11 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
   return (
     <div className="kpi-row">
       {% for metric in metrics %}
-      <div className="kpi-card">
-        <span className="kpi-label">{__METRIC__}</span>
-      </div>
+      <Card key={metric}>
+        <div className="kpi-card">
+          <span className="kpi-label">{__METRIC__}</span>
+        </div>
+      </Card>
       {% endfor %}
     </div>
   );

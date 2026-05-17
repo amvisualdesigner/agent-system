@@ -12,11 +12,13 @@ _DOMAIN_KEYWORDS = {
     "sales", "revenue", "dashboard", "kpi", "metric", "metrics", "analytics",
     "chart", "growth", "retention", "churn", "timeseries",
     "performance", "business", "report", "overview",
+    "table", "tabular", "grid", "columns", "rows", "data",
 }
 
 SKILL_IR_SYSTEM = (
     "You are a SkillIR Planner. Choose between these contracts:\n"
     '- "dashboard.sales_overview": business metrics dashboard\n'
+    '- "analytics.table": data table with columns and rows\n'
     '- "noop": no contract matches the task\n\n'
     "Return ONLY valid JSON: {\"contract_id\": \"str\", \"version\": 1, \"params\": {}, \"confidence\": 0.0}\n"
     "No markdown, no explanations, no extra text."
@@ -45,12 +47,23 @@ def _fusion_conf(llm_conf: float, tok_score: float) -> float:
 def generate_skill_ir(task: str, task_mode: str) -> SkillIR:
     prompt = f"""Task: {task}
 
-STEP 1 — Decide relevance:
-Is this task about BUSINESS METRICS, SALES, DASHBOARD, KPI, or ANALYTICS?
-- YES → use contract_id="dashboard.sales_overview", version=1
-- NO → use contract_id="noop"
+STEP 1 — Decide relevance (check in this order):
 
-STEP 2 — Extract parameters (only for dashboard.sales_overview):
+1. Is this task about a TABLE, DATA TABLE, ANALYTICS TABLE, TABULAR DATA, or COLUMNS?
+   - YES → use contract_id="analytics.table", version=1
+
+2. Is this task about BUSINESS METRICS, SALES KPIs, DASHBOARD, or REVENUE?
+   - YES → use contract_id="dashboard.sales_overview", version=1
+
+3. Otherwise → use contract_id="noop"
+
+STEP 2 — Extract parameters (only for matching contract):
+
+For analytics.table:
+- "params" -> "columns": list of column names (e.g. ["Metric", "Value", "Change"])
+- "params" -> "table_data": optional list of rows, each row a list matching column order
+
+For dashboard.sales_overview:
 - "params" -> "metrics": list from ["revenue", "growth", "retention", "churn"]
 - "params" -> "timeseries_metric": one from ["revenue", "growth", "retention"] (optional, default "revenue")
 - Do NOT rename fields: use "metrics" not "kpi_metrics"

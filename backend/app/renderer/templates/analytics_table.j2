@@ -1,0 +1,21 @@
+import React from 'react';
+import { Card } from '@/components/ui/Card';
+
+interface AnalyticsTableProps {
+  columns: string[];
+}
+
+export const AnalyticsTable: React.FC<AnalyticsTableProps> = ({ columns }) => {
+  return (
+    <Card>
+      <table className="analytics-table">
+        <thead>
+          <tr>
+            __COLUMNS_THEAD__
+          </tr>
+        </thead>
+        __TABLE_BODY__
+      </table>
+    </Card>
+  );
+};

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "renderer_schema_version": "2026-05",
+  "domain": "forms",
+  "imports": [
+    "import React from 'react';",
+    "import { Card } from '@/components/ui/Card';"
+  ],
+  "components": [
+    "SettingsForm",
+    "UserProfileForm"
+  ],
+  "layouts": [],
+  "composition": []
+}

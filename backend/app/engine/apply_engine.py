@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
 from app.contract_resolver.resolver import resolve as resolve_contract
+from app.examples.retrieval import retrieve_examples
 from app.renderer.file_renderer import FileRenderer
 from app.renderer.validators import validate_fileops
 
@@ -77,8 +78,15 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
 
         from app.contracts.skill_registry import get_contract
         contract = get_contract(skill_ir.contract_id, skill_ir.version)
+
+        example_ctx = retrieve_examples(skill_ir.contract_id)
+        logger.info(
+            "example_context_loaded contract_id=%s components=%d imports=%d",
+            skill_ir.contract_id, len(example_ctx.components), len(example_ctx.imports),
+        )
+
         renderer = FileRenderer()
-        fileops = renderer.render(result.ast, contract.renderer)
+        fileops = renderer.render(result.ast, contract.renderer, example_context=example_ctx)
 
         ok, vreason = validate_fileops(fileops)
         if not ok:
