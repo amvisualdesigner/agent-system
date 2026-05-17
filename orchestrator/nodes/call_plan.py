@@ -47,7 +47,10 @@ async def call_plan_node(state: AgentState) -> dict:
 
     logger.info("[run_id=%s] call_plan ok latency=%dms", run_id, latency)
 
+    planner_meta = result.get("planner_meta")
     output = {"backend_run_id": result.get("run_id"), "plan": result.get("plan")}
+    if planner_meta:
+        output["planner_meta"] = planner_meta
     trace_entry = {"node": "call_plan", "input": input_data, "output": output, "latency_ms": latency}
     trace = (state.get("trace") or []) + [trace_entry]
 
@@ -66,6 +69,7 @@ async def call_plan_node(state: AgentState) -> dict:
         return {
             "backend_run_id": result.get("run_id"),
             "plan": result.get("plan"),
+            "planner_meta": planner_meta,
             "error": reason,
             "trace": trace[-50:],
             "phase": "error",
@@ -75,6 +79,7 @@ async def call_plan_node(state: AgentState) -> dict:
     return {
         "backend_run_id": result.get("run_id"),
         "plan": result.get("plan"),
+        "planner_meta": planner_meta,
         "trace": trace[-50:],
         "phase": phase,
     }

@@ -39,6 +39,7 @@ async def run_graph(run_id: str, task: str):
         "phase": "planning",
         "cancelled": False,
         "backend_run_id": None,
+        "planner_meta": None,
         "_next_node": None,
     }
 

@@ -8,7 +8,7 @@ import httpx
 from app.utils.state import write_state
 from app.contracts.plan_request import PlanRequest
 from app.config.settings import settings
-from app.semantic_engine import load_semantic_entries, retrieve, compile_context, is_semantic_task
+from app.semantic_engine import load_semantic_entries, retrieve, compile_context
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +42,35 @@ File execution:
 }
 """
 
-def build_prompt(task: str, workspace_files: list | None = None, semantic_context: str | None = None) -> str:
+def build_prompt(task: str, workspace_files: list | None = None, semantic_context: str | None = None, task_mode: str = "generic") -> str:
     if workspace_files is None:
         workspace_files = []
     context = "\n".join(workspace_files) if workspace_files else ""
-    hint = ""
-    if semantic_context:
-        hint = (
-            "\n- Semantic context is present as hints only, never binding. "
-            "You decide the action type based on the task."
-        )
+
+    semantic_block = semantic_context or "No semantic skills available."
+
+    if task_mode == "semantic_skill":
+        mode_instructions = f"""
+TASK MODE: semantic_skill
+
+This task matches a semantic category (dashboard, analytics, KPI, chart, etc.).
+If a relevant semantic skill exists in the context below, prefer "use_skill".
+If no suitable skill exists, fallback to normal file operations.
+
+Semantic context:
+{semantic_block}
+"""
+    else:
+        mode_instructions = f"""
+TASK MODE: generic
+
+General file operation task.
+Create, modify, or delete files directly.
+
+Semantic context:
+{semantic_block}
+"""
+
     return f"""
 You must output STRICT JSON only.
 
@@ -66,7 +85,6 @@ Rules:
 - Each scaffold operation has cost = 1. Total scaffold cost must be ≤ 3.
   Use intent "empty" for data/config files (cost = 0).
 - If you cannot comply, return: {{"error": "invalid_plan"}}
-{hint}
 
 Violation of these rules makes the output invalid.
 
@@ -75,11 +93,10 @@ Your task is to generate a semantic modification plan for a repository.
 You DO NOT execute changes.
 You ONLY describe intended modifications.
 
+{mode_instructions}
+
 Schema:
 {schema}
-
-# Semantic System Context
-{semantic_context}
 
 Task:
 {task}
@@ -231,11 +248,11 @@ def build_semantic_context(task: str) -> str:
     return compile_context(matches)
 
 
-def generate_plan(req: PlanRequest, workspace_files):
+def generate_plan(req: PlanRequest, workspace_files, task_mode: str = "generic"):
 
     semantic_context = build_semantic_context(req.task)
 
-    prompt = build_prompt(req.task, workspace_files, semantic_context)
+    prompt = build_prompt(req.task, workspace_files, semantic_context, task_mode)
 
     llm_result = call_llm(prompt)
 

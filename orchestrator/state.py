@@ -20,4 +20,5 @@ class AgentState(TypedDict):
     phase: str
     cancelled: bool
     backend_run_id: Optional[str]
+    planner_meta: Optional[Dict[str, Any]]
     _next_node: Optional[str]

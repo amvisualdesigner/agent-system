@@ -59,6 +59,7 @@ async def return_result_node(state: AgentState) -> dict:
         "files": result.files,
         "trace": state.get("trace"),
         "error": result.error,
+        "planner_meta": state.get("planner_meta"),
     }
     try:
         save_snapshot(run_id, snapshot)
