@@ -55,6 +55,7 @@ El sistema prioriza:
 - **Simplicidad sobre complejidad** — no introducir infraestructura hasta que sea estrictamente necesaria
 - **Auditabilidad sobre autonomia** — cada paso debe poder inspeccionarse, no ejecutarse ciegamente
 - **Determinismo sobre improvisacion** — una vez aceptado un plan, la ejecucion debe ser reproducible
+- **Sin escape hatch generico** — si no hay contrato que cubra la tarea, el sistema rechaza en vez de improvisar con scaffold, templates genericos o fallback. "No se hacer eso" es mejor que "hago algo que no te pediste"
 - **Aislamiento sobre conveniencia** — cada run en su worktree, sin efectos laterales entre ejecuciones
 - **Degradacion graceful sobre magia** — si algo falla, que falle visiblemente y con la mayor cantidad de estado posible
 - **Small models + strong runtime sobre large models + weak runtime** — preferimos un modelo modesto con un sistema robusto a un modelo poderoso sin guardrails
@@ -207,16 +208,21 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 POST /run {"task": "..."}
   │
   ▼
-call_plan ──> POST /agent/plan ──> plan con acciones
+call_plan ──> POST /agent/plan ──> SkillIR {contract_id, params, confidence}
+  │                                 └─ Scoring fusion recalibra confianza
+  │                                 └─ Si contract_id=null o conf < 0.5 → noop
   │
   ▼
-validate_plan ──> sanity guard (acciones > 0, file_path no vacio)
+validate_plan ──> sanity guard (SkillIR valido? contract existe?)
   │                  │                     │
   │               valido              invalido (retry <= 1)
   │                  │                     │
   ▼                  ▼                     ▼
-call_apply ──> POST /agent/apply + GET /runs/{id}
-  │               (con retry 3 intentos para get_run)
+call_apply ──> POST /agent/apply ──> Contract Resolution (validator → defaults → AST)
+  │               │                    Render estructural (for loops, __VAR__ placeholders)
+  │               │                    Executor dumb (create/modify/delete en worktree)
+  │               │                    Git worktree + diff + commit
+  │               └─ GET /runs/{id} (con retry 3 intentos)
   ▼
 return_result ──> snapshot a disco + SSE result event
 ```
@@ -284,44 +290,139 @@ result      / return_result   phase=completed
 
 ---
 
-## Contrato del Planner 🔵 IMPLEMENTED
+## Skill Contract Pipeline 🔵 IMPLEMENTED
 
-El contrato entre el LLM y el sistema es el plan estructurado JSON. Este es el ABI interno.
+La planificacion y ejecucion siguen un pipeline deterministico en 4 capas. El LLM solo produce un selector de contrato; todo lo demas es determinista.
 
-### Esquema
+### Pipeline
+
+```
+Task (lenguaje natural)
+  │
+  ▼
+┌──────────────────────────────────────────────────────┐
+│  1. SkillIR (LLM)                                    │
+│     Elige: contract_id + version + params + confidence│
+│     Opciones: "dashboard.sales_overview" o "noop"    │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  2. Scoring Fusion (post-LLM calibration)            │
+│     final = 0.7 * llm_conf + 0.3 * token_overlap    │
+│     Domain prior: si no hay keyword, llm_conf × 0.5  │
+│     threshold 0.5 → noop si no alcanza               │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  3. Contract Resolution (determinista)               │
+│     Validate params → Apply defaults → Build AST     │
+│     (validator.py → defaults.py → ast_builder.py)    │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  4. Render + Execute (determinista)                  │
+│     Renderer: structural expansion (for loops only)  │
+│     Executor: dumb create/modify/delete on filesystem│
+└──────────────────────────────────────────────────────┘
+```
+
+### SkillIR — El unico output del LLM
+
+El sistema usa un **prompt de dos etapas** para guiar al LLM:
+
+```
+STEP 1 — Decide relevance:
+Is this task about BUSINESS METRICS, SALES, DASHBOARD, KPI, or ANALYTICS?
+- YES → contract_id="dashboard.sales_overview"
+- NO → contract_id="noop"
+
+STEP 2 — Extract parameters (only for dashboard.sales_overview):
+- metrics: list from [revenue, growth, retention, churn]
+- timeseries_metric: from [revenue, growth, retention] (default revenue)
+```
+
+Esto fuerza al LLM a decidir relevancia **antes** de extraer parametros, reduciendo falsos positivos en modelos pequenos.
+
+El LLM produce exclusivamente un objeto `SkillIR`:
 
 ```json
 {
-  "actions": [
-    {
-      "type": "create",
-      "file_path": "ruta/relativa/al/repo/archivo.ext",
-      "description": "que hace esta accion",
-      "content": "contenido del archivo para create/modify"
-    }
-  ]
+  "contract_id": "dashboard.sales_overview",
+  "version": 1,
+  "params": {
+    "metrics": ["revenue", "growth"],
+    "timeseries_metric": "revenue"
+  },
+  "confidence": 0.85
 }
 ```
 
-### Campos
+Campos:
 
-| Campo | Tipo | Obligatorio | Descripcion |
-|-------|------|-------------|-------------|
-| `type` | string | si | Tipo de operacion |
-| `file_path` | string | si | Ruta relativa al repo |
-| `description` | string | no | Explicacion de la accion |
-| `content` | string | no | Contenido (create/modify) |
+| Campo | Tipo | Descripcion |
+|-------|------|-------------|
+| `contract_id` | string o null | `"dashboard.sales_overview"` o `"noop"` |
+| `version` | int | Version del contrato (siempre 1) |
+| `params` | dict | Parametros del contrato segun su input_schema |
+| `confidence` | float | Confianza cruda del LLM (0.0-1.0) |
 
-### Tipos de accion validos
+El LLM no produce `actions`, `file_paths`, ni contenido de archivos. Eso es responsabilidad del pipeline deterministico.
 
-| Tipo | Descripcion | Requiere content |
-|------|-------------|------------------|
-| `create` | Crear archivo nuevo | si |
-| `modify` | Modificar archivo existente | si |
-| `delete` | Eliminar archivo | no |
+### Scoring Fusion (post-LLM)
 
-### Invariantes
+El LLM propone, las reglas calibran. El sistema nunca usa la confianza del LLM directamente:
 
+```
+llm_conf = parsed.confidence
+if llm_conf < 0.01: llm_conf = 0.1          # suelo minimo
+if not domain_keywords_in_task: llm_conf *= 0.5  # domain prior penalty
+tok_score = task_tokens & domain_keywords / total_tokens
+final = min(0.7 * llm_conf + 0.3 * tok_score, 0.95)  # fusion con techo
+# threshold 0.5 → si no alcanza, noop
+```
+
+Esto evita tanto overconfidence del LLM como falsos negativos por keywords rigidas.
+
+### Template Rendering
+
+El renderer usa **solo** dos mecanismos, ambos deterministicos:
+
+1. **`{% for item in list %}`**: iteracion estructural sobre arrays. Prohibido `{% if %}`, ternarios, expresiones, filtros, bucles anidados (assert en runtime).
+2. **`__VAR__` placeholders**: cada variable del AST se serializa con `json.dumps()` y se sustituye en el template. El template ya contiene las llaves `{}` del JSX.
+
+Ejemplo — template `dashboard_page.j2`:
+```
+<KpiRow metrics={__METRICS__} />
+<Timeseries metric={__METRIC__} />
+```
+Contexto: `{"metrics": ["revenue", "growth"], "metric": "revenue"}`
+Resultado renderizado:
+```
+<KpiRow metrics={["revenue", "growth"]} />
+<Timeseries metric={"revenue"} />
+```
+
+El `json.dumps()` garantiza que strings, arrays y numeros se serialicen correctamente dentro de expresiones JSX.
+
+### NOOP Contract
+
+Cuando la tarea no corresponde a ningun contrato disponible, el LLM elige `contract_id="noop"`. Esto le da un **espacio de decision real** — no es un `null` abstracto, es una opcion concreta en el registry. El pipeline lo convierte en `contract_id: null` → no ejecucion.
+
+### Contract Registry
+
+Contrato actual disponible:
+
+| contract_id | version | input_schema | output |
+|-------------|---------|--------------|--------|
+| `dashboard.sales_overview` | 1 | `metrics: list[str]` (enum), `timeseries_metric: str` (opcional, default revenue) | 3 archivos: SalesOverview.tsx, KpiRow.tsx, Timeseries.tsx |
+| `noop` | 1 | `{}` | Ninguno |
+
+### Invariantes de seguridad
+
+- El contrato define input_schema, AST template, y renderer config — el LLM solo elige contrato y llena params
 - `file_path` debe ser relativo (no absoluto)
 - `file_path` no debe contener `..`, `.git`, `node_modules`, `dist`, `build`, `.env`
 - Extensiones permitidas: `.ts`, `.js`, `.py`, `.md`, `.json`, `.yaml`, `.yml`, `.txt`, `.html`, `.css`
@@ -509,7 +610,7 @@ Contenido del snapshot:
   "status": "ok",
   "created_at": "ISO8601",
   "updated_at": "ISO8601",
-  "plan": { "actions": [...] },
+  "plan": { "skill_ir": {...}, "actions": [] },
   "execution": { "status": "ok", "workspace": "...", "operations": [...] },
   "diff": "diff --git a/...",
   "files": ["path/to/file"],
@@ -631,7 +732,7 @@ curl -s -X POST http://localhost:8000/agent/plan \
 # Ejecutar (con run_id del plan)
 curl -s -X POST http://localhost:8000/agent/apply \
   -H "Content-Type: application/json" \
-  -d '{"run_id":"...","plan":{"actions":[...]},"dry_run":false}'
+  -d '{"run_id":"...","plan":{"skill_ir":{...},"actions":[]},"dry_run":false}'
 
 # Consultar run
 curl -s http://localhost:8000/runs/{backend_run_id}
@@ -723,10 +824,12 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   │   ├── api/               # Endpoints
   │   │   ├── engine/            # Logica de apply
   │   │   ├── executor/          # Worktree, patch
-  │   │   ├── planner/           # Compilacion de plan
+  │   │   ├── planner/           # Generacion SkillIR + scoring fusion
   │   │   ├── policy/            # Seguridad y validacion
-  │   │   ├── config/            # Settings
-  │   │   └── contracts/         # Modelos Pydantic
+  │   │   ├── config/            # Settings + feature flags
+  │   │   ├── contracts/         # SkillIR + SkillContract registry
+  │   │   ├── contract_resolver/ # Validate → defaults → AST builder
+  │   │   └── renderer/          # Render estructural de templates
   │   └── mcp-server/            # MCP bridge (legacy)
   │
   ├── orchestrator/              # LangGraph orquestador
@@ -788,8 +891,11 @@ Limitaciones conocidas:
 - **Refactors grandes no confiables**: tareas que abarcan multiples archivos tienden a ser inconsistentes
 - **Alucinacion de paths**: puede inventar rutas que no existen
 - **Sin conocimiento del repositorio**: no entiende la estructura actual del proyecto sin contexto explicito
+- **Single-skill collapse**: con solo 1-2 contratos disponibles, el modelo tiende a forzar match aunque la tarea sea irrelevante (mitigado via: NOOP contract como opcion real + scoring fusion layer que recalibra confianza + domain prior penalty)
 
 Esto no es un bug — es una **restriccion de diseno consciente**. Preferimos un modelo pequeno, deterministico y predecible a uno grande, lento e impredecible. Para tareas complejas, el sistema puede ampliarse a modelos mas grandes via API conforme evolucione.
+
+La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas al LLM, sino rodearlo con capas deterministicas: registry validation, scoring fusion, AST builder, renderer estructural, executor dumb. El LLM nunca decide directamente que archivos crear ni que contenido escribir — solo selecciona un contrato y rellena parametros.
 
 ---
 
@@ -805,6 +911,15 @@ Esto no es un bug — es una **restriccion de diseno consciente**. Preferimos un
 - [x] Structured logging con correlation IDs
 - [x] Security model con path safety + extension whitelist
 - [x] Worktree isolation por run
+- [x] SkillIR pipeline: LLM produce solo selector de contrato (no actions, no file paths)
+- [x] Contract registry: `dashboard.sales_overview@1` + `noop` como opcion de rechazo
+- [x] NOOP contract: espacio de decision real para el LLM (mitiga single-skill collapse)
+- [x] Scoring fusion: `0.7 * llm_conf + 0.3 * token_overlap` con domain prior penalty
+- [x] Contract resolution determinista: validator.py → defaults.py → ast_builder.py
+- [x] Renderer estructural: solo `{% for %}`, `{% if %}` prohibido, `__VAR__` placeholders + `json.dumps()`
+- [x] Executor dumb: solo create/modify/delete sin logica de negocio
+- [x] Templates en filesystem (ya no en memoria)
+- [x] files de FASE 1: feature flags, tooling scripts (lint, diff, dump), CI gate, pre-commit hook
 
 ### Context & Retrieval
 
