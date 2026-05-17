@@ -1,110 +1,42 @@
----
-type: skill
-name: dashboard.sales_overview
-tags:
-  - dashboard
-  - analytics
-  - sales
-  - bi
-priority: 10
----
+# skill.dashboard.sales_overview
 
-# Sales Overview Dashboard Skill
+## Layer Type
+skill
 
-## Intent
-Create a full sales analytics dashboard with KPI metrics and revenue visualization.
+## Hierarchy
+component → pattern → layout → skill
 
----
+## Intent Signature
+Use when building a multi-metric SaaS analytics dashboard with KPI row, revenue timeseries, retention indicators, and executive metrics.
 
-## Composition Model
+## Purpose
+Semantic skill representing a complete sales analytics dashboard composition.
 
-This skill composes a complete BI page using semantic building blocks.
+## Contains
+- KPI row with revenue, growth, and retention metrics
+- revenue timeseries chart
+- retention indicators and cohort view
+- executive summary section
 
+## Composition
 ### Layout
-- AnalyticsGrid (root container)
+- layout.AnalyticsGrid
 
 ### Sections
+1. KPI row (top) — revenue, growth, retention, active users
+2. Revenue timeseries (full width) — monthly trend
+3. Retention and growth cards (2-column)
+4. Optional breakdown table (bottom)
 
-#### 1. KPI Row
-Use:
-- KpiCard
+## Related
+- component.KpiCard
+- component.TimeseriesChart
+- component.RevenuePanel
+- component.RetentionCard
+- layout.AnalyticsGrid
+- pattern.dashboard_page
+- contract.revenue_series
+- contract.kpi_metric
 
-Metrics:
-- revenue
-- growth
-- retention
-
-Layout rules:
-- horizontal row
-- max 3-4 KPIs
-- always first section
-
----
-
-#### 2. Revenue Timeseries
-Use:
-- dashboard.timeseries_panel
-
-Data:
-- metric: monthly_revenue
-- aggregation: monthly
-
-Layout rules:
-- full width row
-- second section
-- must include loading + empty state
-
----
-
-#### 3. Optional Insights (future extension)
-Reserved for:
-- anomaly detection
-- comparisons
-- alerts
-
----
-
-## Data Contracts
-
-### KPI Card
-- title: string
-- value: number
-- delta: number
-
-### Timeseries
-- x: datetime
-- y: number
-
----
-
-## Layout Contract
-
-Must use:
-- AnalyticsGrid
-
-Constraints:
-- max_columns: 4
-- responsive: true
-
----
-
-## Rendering Intent
-
-This skill does NOT define implementation.
-
-It defines:
-
-- structure
-- composition
-- ordering
-- constraints
-- semantic meaning
-
----
-
-## Anti-patterns
-
-- Do NOT generate raw JSX
-- Do NOT invent new components
-- Do NOT bypass AnalyticsGrid
-- Do NOT inline charts outside timeseries_panel
+## Keywords
+dashboard, analytics, sales, revenue, kpi, timeseries, metrics, business intelligence, executive, retention
