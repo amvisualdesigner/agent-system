@@ -53,9 +53,22 @@ def build_prompt(task: str, workspace_files: list | None = None, semantic_contex
         mode_instructions = f"""
 TASK MODE: semantic_skill
 
-This task matches a semantic category (dashboard, analytics, KPI, chart, etc.).
-If a relevant semantic skill exists in the context below, prefer "use_skill".
-If no suitable skill exists, fallback to normal file operations.
+PRIMARY ACTION SPACE — skills.
+
+In semantic_skill mode, all plans MUST be expressed as skills unless explicitly impossible.
+
+File operations are only allowed when:
+- no skill exists covering the intent
+- AND no composition of skills is possible
+
+Allowed:
+1. use_skill — PRIMARY action. Every plan step should be a skill.
+2. create — ONLY in data_contracts/ or architecture/, and ONLY when no skill can represent the intent.
+3. modify — ONLY in support of an existing skill's context.
+
+Forbidden:
+- Creating UI components, layouts, or patterns as files.
+- Falling back to file scaffolding when a skill intent exists.
 
 Semantic context:
 {semantic_block}
@@ -240,6 +253,10 @@ def call_llm(prompt: str) -> Dict[str, Any]:
 SEMANTIC_ENTRIES = load_semantic_entries(
     settings.SEMANTIC_DIR
 )
+
+
+def skills_exist() -> bool:
+    return any(e.type == "skill" for e in SEMANTIC_ENTRIES)
 
 
 def build_semantic_context(task: str) -> str:

@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.planner.plan_generator import generate_plan
 from app.planner.plan_validator import validate_plan, prune_scaffold
 from app.planner.task_classifier import classify_task
+from app.planner.semantic_validator import validate_semantic_plan
 from app.policy.policy import MAX_SCAFFOLD_OPS_PER_RUN
 from app.contracts.plan_request import PlanRequest
 from app.utils.workspace import list_workspace_files
@@ -25,6 +26,8 @@ def agent_plan(req: PlanRequest):
     classification = classify_task(req.task)
 
     plan = generate_plan(req, workspace_files, task_mode=classification.mode)
+
+    plan = validate_semantic_plan(plan, classification.mode, task=req.task)
 
     write_state(run_id, "plan")
 
