@@ -10,7 +10,7 @@ body {
   font-family: system-ui, -apple-system, sans-serif;
   background: #0f172a;
   color: #e2e8f0;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 20px;
 }
@@ -25,62 +25,324 @@ button {
   color: #0f172a; font-weight: 600; cursor: pointer; font-size: 1rem;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-#log {
-  margin-top: 1rem; background: #1e293b; border-radius: 8px; padding: 12px;
-  font-family: monospace; font-size: 0.85rem; max-height: 500px; overflow-y: auto;
+#meta {
+  display: flex; gap: 16px; margin-top: 8px; font-size: 0.8rem; color: #64748b;
+  min-height: 1.5em; flex-wrap: wrap;
 }
-.entry { padding: 4px 0; border-bottom: 1px solid #334155; }
-.entry:last-child { border-bottom: none; }
+#panels { margin-top: 12px; }
+.panel {
+  background: #1e293b; border-radius: 8px; margin-bottom: 8px; overflow: hidden;
+  border: 1px solid #334155;
+}
+.panel-header {
+  padding: 10px 14px; font-weight: 600; font-size: 0.9rem;
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  user-select: none;
+}
+.panel-header .arrow { transition: transform 0.15s; font-size: 0.7rem; }
+.panel-header.collapsed .arrow { transform: rotate(-90deg); }
+.panel-body { padding: 10px 14px 14px; border-top: 1px solid #334155; }
+.panel-body.hidden { display: none; }
 .badge {
-  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;
-  font-weight: 600; margin-right: 8px;
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 0.7rem; font-weight: 600;
 }
-.badge-planning { background: #818cf8; color: #1e1b4b; }
-.badge-executing { background: #f59e0b; color: #451a03; }
-.badge-completed { background: #22c55e; color: #052e16; }
+.badge-thinking { background: #6366f1; color: #e0e7ff; }
+.badge-done { background: #22c55e; color: #052e16; }
 .badge-error { background: #ef4444; color: #450a0a; }
-#result {
-  margin-top: 12px; background: #1e293b; border-radius: 8px; padding: 12px; display: none;
-}
-#result.show { display: block; }
-pre { background: #0f172a; padding: 8px; border-radius: 4px; margin-top: 4px; overflow-x: auto; white-space: pre-wrap; }
-ul { margin: 4px 0 0 20px; color: #94a3b8; }
-.run-id { color: #64748b; font-size: 0.75rem; margin-top: 4px; }
+.badge-skip { background: #64748b; color: #f1f5f9; }
+.badge-idle { background: #334155; color: #94a3b8; }
+
+.phase-planning { border-left: 3px solid #818cf8; }
+.phase-validating { border-left: 3px solid #f59e0b; }
+.phase-executing { border-left: 3px solid #f97316; }
+.phase-completed { border-left: 3px solid #22c55e; }
+.phase-error { border-left: 3px solid #ef4444; }
+
 .status-ok { color: #22c55e; font-weight: 600; }
 .status-error { color: #ef4444; font-weight: 600; }
+.status-rejected { color: #f59e0b; font-weight: 600; }
+.status-noop { color: #64748b; font-weight: 600; }
+
+pre {
+  background: #0f172a; padding: 8px 10px; border-radius: 4px;
+  margin-top: 6px; overflow-x: auto; white-space: pre-wrap;
+  font-size: 0.8rem; line-height: 1.4;
+}
+code { font-size: 0.8rem; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 16px; font-size: 0.85rem; }
+.kv dt { color: #94a3b8; }
+.kv dd { color: #e2e8f0; word-break: break-all; }
+.ops-list { list-style: none; margin-top: 6px; }
+.ops-list li {
+  padding: 6px 8px; border-radius: 4px; background: #0f172a; margin-bottom: 4px;
+  font-size: 0.82rem; cursor: pointer;
+}
+.ops-list li:hover { background: #1a2332; }
+.ops-list .op-action { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: 600; margin-right: 6px; }
+.op-create { background: #166534; color: #bbf7d0; }
+.op-modify { background: #92400e; color: #fde68a; }
+.op-delete { background: #991b1b; color: #fecaca; }
+.op-content { margin-top: 4px; font-size: 0.78rem; color: #94a3b8; display: none; }
+.op-content.show { display: block; }
+.diff-toggle { color: #38bdf8; cursor: pointer; font-size: 0.82rem; }
+.diff-toggle:hover { text-decoration: underline; }
+.file-list { margin: 4px 0 0 16px; color: #94a3b8; font-size: 0.82rem; }
+.tag {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 0.7rem; background: #334155; color: #94a3b8; margin-left: 4px;
+}
+.tag-match { background: #1e3a5f; color: #93c5fd; }
+.tag-reject { background: #3b1e1e; color: #fca5a5; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 <h1>Agent Runtime</h1>
 <form id="form">
-  <textarea id="task" rows="3" placeholder='Ej: "create a file called hello.txt with content HELLO"'></textarea>
+  <textarea id="task" rows="3" placeholder='Ej: "Create a sales dashboard showing revenue and growth metrics with timeseries"'></textarea>
   <div style="margin-top:8px;text-align:right">
     <button id="runBtn" type="submit">▶ Run</button>
   </div>
 </form>
-<div id="result"></div>
-<div id="runId" class="run-id"></div>
-<div id="log"><div style="color:#64748b">Escribe una tarea y presiona Run</div></div>
+<div id="meta"></div>
+<div id="panels"></div>
 
 <script>
 const ORCH = "http://127.0.0.1:9000";
 const form = document.getElementById("form");
 const task = document.getElementById("task");
 const runBtn = document.getElementById("runBtn");
-const logEl = document.getElementById("log");
-const resultEl = document.getElementById("result");
-const runIdEl = document.getElementById("runId");
+const panels = document.getElementById("panels");
+const meta = document.getElementById("meta");
 
+let runId = null;
+
+// ---- panel management ----
+function addPanel(id, title, phaseClass) {
+  const existing = document.getElementById(id);
+  if (existing) return existing;
+  const div = document.createElement("div");
+  div.id = id;
+  div.className = `panel ${phaseClass}`;
+  div.innerHTML = `
+    <div class="panel-header">
+      <span class="arrow">▼</span> ${title}
+      <span id="${id}-status" class="badge badge-thinking">en curso</span>
+    </div>
+    <div id="${id}-body" class="panel-body"></div>`;
+  div.querySelector(".panel-header").onclick = () => {
+    div.querySelector(".panel-header").classList.toggle("collapsed");
+    document.getElementById(id + "-body").classList.toggle("hidden");
+  };
+  panels.appendChild(div);
+  return div;
+}
+
+function setPanelStatus(id, badgeClass, text) {
+  const el = document.getElementById(id + "-status");
+  if (el) { el.className = `badge ${badgeClass}`; el.textContent = text; }
+}
+
+function bodyEl(id) {
+  return document.getElementById(id + "-body");
+}
+
+function esc(s) {
+  return (s == null ? "" : String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ---- SSE event handlers ----
+function onNodeStart(evt) {
+  if (evt.node === "call_plan") {
+    addPanel("panel-planning", "📋 Planning", "phase-planning");
+    bodyEl("panel-planning").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Thinking...</div>';
+  } else if (evt.node === "validate_plan") {
+    addPanel("panel-validation", "🔍 Validation", "phase-validating");
+    bodyEl("panel-validation").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Validating...</div>';
+  } else if (evt.node === "call_apply") {
+    addPanel("panel-execution", "⚡ Execution", "phase-executing");
+    bodyEl("panel-execution").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Executing...</div>';
+  }
+}
+
+function onToolCall(evt) {
+  if (evt.node === "call_plan") {
+    const b = bodyEl("panel-planning");
+    if (b) b.innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Calling LLM...</div>';
+  } else if (evt.node === "call_apply") {
+    const b = bodyEl("panel-execution");
+    if (b) b.innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Applying changes...</div>';
+  }
+}
+
+function onNodeEnd(evt) {
+  if (evt.node === "call_plan") {
+    setPanelStatus("panel-planning", "badge-done", "listo");
+    const d = evt.data || {};
+    const plan = d.plan || {};
+    const skillIr = plan.skill_ir || {};
+    const plannerMeta = d.planner_meta || {};
+    const contractId = skillIr.contract_id || "—";
+    const confidence = skillIr.confidence != null ? skillIr.confidence.toFixed(3) : "—";
+    const params = skillIr.params || {};
+    const version = skillIr.version || "—";
+
+    const isNoop = !contractId || contractId === "noop" || contractId === "None";
+
+    let html = '<dl class="kv">';
+    html += `<dt>Contract</dt><dd>${isNoop ? '<span class="tag tag-reject">noop</span> <span style="color:#64748b">no ejecucion</span>' : esc(contractId) + ' <span class="tag tag-match">v' + esc(version) + '</span>'}</dd>`;
+    html += `<dt>Confianza</dt><dd>${esc(confidence)} ${!isNoop && confidence < 0.5 ? '<span class="tag tag-reject">bajo umbral</span>' : ''}</dd>`;
+
+    if (!isNoop && Object.keys(params).length > 0) {
+      for (const [k, v] of Object.entries(params)) {
+        html += `<dt>${esc(k)}</dt><dd>${esc(JSON.stringify(v))}</dd>`;
+      }
+    }
+
+    if (plannerMeta.task_mode) {
+      html += `<dt>Modo</dt><dd>${esc(plannerMeta.task_mode)} <span class="tag">score: ${plannerMeta.semantic_score ?? "—"}</span></dd>`;
+    }
+    if (plannerMeta.matched_patterns?.length) {
+      html += `<dt>Patrones</dt><dd>${plannerMeta.matched_patterns.map(p => '<span class="tag">' + esc(p) + '</span>').join(" ")}</dd>`;
+    }
+    html += "</dl>";
+
+    if (isNoop) {
+      html += '<div style="margin-top:8px;color:#64748b;font-size:0.85rem">No hay contrato que cubra esta tarea. El sistema no ejecutara nada.</div>';
+    }
+
+    bodyEl("panel-planning").innerHTML = html;
+
+  } else if (evt.node === "validate_plan") {
+    const d = evt.data || {};
+    const valid = d.valid;
+    if (valid) {
+      setPanelStatus("panel-validation", "badge-done", "✓ valido");
+      bodyEl("panel-validation").innerHTML = '<div><span class="status-ok">✓ Plan valido</span></div>';
+    } else {
+      const reason = d.reason || d.decision || "invalido";
+      setPanelStatus("panel-validation", "badge-error", "✗ invalido");
+      bodyEl("panel-validation").innerHTML = `<div><span class="status-error">✗ Invalido</span> <span style="color:#94a3b8;font-size:0.85rem">${esc(reason)}</span></div>`;
+    }
+
+  } else if (evt.node === "call_apply") {
+    setPanelStatus("panel-execution", "badge-done", "listo");
+    const d = evt.data || {};
+    const status = d.execution_status || "ok";
+    const ops = d.operations || [];
+
+    let html = `<div>Status: <span class="status-${status}">${esc(status)}</span>`;
+    if (d.has_commit) html += ' <span class="tag">committed</span>';
+    html += "</div>";
+
+    if (ops.length > 0) {
+      html += `<div style="margin-top:8px"><strong>Operaciones (${ops.length})</strong></div>`;
+      html += '<ul class="ops-list">';
+      for (let i = 0; i < ops.length; i++) {
+        const op = ops[i];
+        const action = op.action || "?";
+        const path = op.path || op.file_path || "?";
+        const content = op.content || "";
+        const actionClass = action === "create" ? "op-create" : action === "modify" ? "op-modify" : action === "delete" ? "op-delete" : "";
+        const fileLabel = path.split("/").pop();
+        html += `<li onclick="toggleOp(${i})">
+          <span class="op-action ${actionClass}">${esc(action)}</span>
+          <span title="${esc(path)}">${esc(fileLabel)}</span>
+          <div id="op-content-${i}" class="op-content">
+            <span style="color:#64748b;font-size:0.75rem">${esc(path)}</span>
+            ${content ? '<pre>' + esc(content.slice(0, 600)) + '</pre>' : ''}
+          </div>
+        </li>`;
+      }
+      html += "</ul>";
+    }
+
+    if (d.files && d.files.length > 0) {
+      html += `<div style="margin-top:8px"><strong>Archivos:</strong><ul class="file-list">`;
+      d.files.forEach(f => { html += `<li>${esc(f)}</li>`; });
+      html += "</ul></div>";
+    }
+
+    bodyEl("panel-execution").innerHTML = html;
+  }
+}
+
+function toggleOp(i) {
+  const el = document.getElementById("op-content-" + i);
+  if (el) el.classList.toggle("show");
+}
+
+function onResult(evt) {
+  const d = evt.data || {};
+  const status = d.status || "ok";
+  const isError = evt.type === "error";
+
+  addPanel("panel-result", isError ? "❌ Error" : "✅ Resultado", isError ? "phase-error" : "phase-completed");
+  setPanelStatus("panel-result", isError ? "badge-error" : "badge-done", isError ? "error" : "completado");
+
+  const panel = document.getElementById("panel-result");
+  const header = panel.querySelector(".panel-header");
+  const link = document.createElement("a");
+  link.href = `${ORCH}/runs/${runId}`;
+  link.target = "_blank";
+  link.textContent = "📄 Snapshot";
+  link.style.cssText = "margin-left:auto;color:#38bdf8;font-size:0.82rem;text-decoration:none";
+  header.appendChild(link);
+
+  let html = "";
+  if (isError) {
+    const errMsg = evt.error || d.error || "unknown error";
+    html += `<div><span class="status-error">ERROR</span> ${esc(errMsg)}</div>`;
+  } else {
+    html += `<div>Status: <span class="status-${status}">${esc(status.toUpperCase())}</span></div>`;
+  }
+
+  if (d.files && d.files.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Archivos generados (${d.files.length})</strong><ul class="file-list">`;
+    d.files.forEach(f => { html += `<li>${esc(f)}</li>`; });
+    html += "</ul></div>";
+  }
+
+  if (d.diff) {
+    html += `<div style="margin-top:10px"><span class="diff-toggle" onclick="toggleDiff()">▶ Mostrar diff</span></div>`;
+    html += `<div id="diff-content" style="display:none"><pre>${esc(d.diff)}</pre></div>`;
+  }
+
+  bodyEl("panel-result").innerHTML = html;
+  document.getElementById("panel-result").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function toggleDiff() {
+  const el = document.getElementById("diff-content");
+  if (el) el.style.display = el.style.display === "none" ? "block" : "none";
+}
+
+// ---- SSE event router ----
+function handleSSE(evt) {
+  switch (evt.type) {
+    case "node_start": onNodeStart(evt); break;
+    case "tool_call": onToolCall(evt); break;
+    case "node_end": onNodeEnd(evt); break;
+    case "result":
+    case "error":
+      onResult(evt);
+      runBtn.disabled = false;
+      runBtn.textContent = "▶ Run";
+      break;
+  }
+}
+
+// ---- form submission ----
 form.onsubmit = async (e) => {
   e.preventDefault();
   if (!task.value.trim() || runBtn.disabled) return;
 
   runBtn.disabled = true;
   runBtn.textContent = "Ejecutando...";
-  resultEl.classList.remove("show");
-  resultEl.innerHTML = "";
-  runIdEl.textContent = "";
-  logEl.innerHTML = "";
+  panels.innerHTML = "";
+  meta.innerHTML = "";
 
   try {
     const resp = await fetch(`${ORCH}/run`, {
@@ -89,109 +351,46 @@ form.onsubmit = async (e) => {
       body: JSON.stringify({ task: task.value }),
     });
     const data = await resp.json();
-    runIdEl.textContent = `Run ID: ${data.run_id}`;
+    runId = data.run_id;
+    meta.innerHTML = `<span style="color:#64748b">Run ID:</span> <code>${esc(runId)}</code> <span style="color:#64748b">Task:</span> "${esc(task.value)}"` +
+      ` &nbsp;|&nbsp; <a href="${ORCH}/runs/${runId}" target="_blank" style="color:#38bdf8">📄 Snapshot</a>`;
 
-    const evtSource = new EventSource(`${ORCH}/stream/${data.run_id}`);
-
+    const evtSource = new EventSource(`${ORCH}/stream/${runId}`);
     evtSource.onmessage = (event) => {
-      const evt = JSON.parse(event.data);
-      appendEvent(evt);
-
-      if (evt.type === "result") {
-        showResult(evt.data);
-        showWorktree(data.run_id);
-        evtSource.close();
-        runBtn.disabled = false;
-        runBtn.textContent = "▶ Run";
-      }
-      if (evt.type === "error") {
-        showError(evt.error);
-        showWorktree(data.run_id);
-        evtSource.close();
-        runBtn.disabled = false;
-        runBtn.textContent = "▶ Run";
+      try {
+        const evt = JSON.parse(event.data);
+        handleSSE(evt);
+        if (evt.type === "result" || evt.type === "error") {
+          evtSource.close();
+          // fetch full snapshot for worktree info
+          fetchWorktree(runId);
+        }
+      } catch (err) {
+        console.error("SSE parse error", err);
       }
     };
-
     evtSource.onerror = () => {
       evtSource.close();
       runBtn.disabled = false;
       runBtn.textContent = "▶ Run";
     };
   } catch (err) {
-    appendEvent({ type: "error", phase: "error", error: String(err) });
+    panels.innerHTML = `<div class="panel phase-error"><div class="panel-header">❌ Error</div><div class="panel-body"><span class="status-error">ERROR</span> ${esc(String(err))}</div></div>`;
     runBtn.disabled = false;
     runBtn.textContent = "▶ Run";
   }
 };
 
-function appendEvent(evt) {
-  const div = document.createElement("div");
-  div.className = "entry";
-  if (evt.phase) {
-    const badge = document.createElement("span");
-    badge.className = `badge badge-${evt.phase}`;
-    badge.textContent = evt.phase;
-    div.appendChild(badge);
-  }
-  const strong = document.createElement("strong");
-  strong.textContent = evt.node || evt.type;
-  div.appendChild(strong);
-
-  if (evt.type === "tool_call" && evt.data?.tool) {
-    const span = document.createElement("span");
-    span.style.cssText = "color:#94a3b8;margin-left:8px";
-    span.textContent = evt.data.tool;
-    div.appendChild(span);
-  }
-  if (evt.data?.valid !== undefined) {
-    const span = document.createElement("span");
-    span.style.cssText = "color:#94a3b8;margin-left:8px";
-    span.textContent = evt.data.valid ? "✓ valido" : "✗ invalido";
-    div.appendChild(span);
-  }
-
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
-}
-
-function showResult(data) {
-  resultEl.classList.add("show");
-  let html = `<div><span class="status-${data.status}">${data.status.toUpperCase()}</span></div>`;
-
-  if (data.files?.length) {
-    html += '<div style="margin-top:8px"><strong>Archivos:</strong><ul>';
-    data.files.forEach(f => html += `<li>${f}</li>`);
-    html += "</ul></div>";
-  }
-  if (data.diff) {
-    html += '<div style="margin-top:8px"><strong>Diff:</strong><pre>' + escapeHtml(data.diff) + '</pre></div>';
-  }
-  if (data.plan?.actions) {
-    html += '<div style="margin-top:8px"><strong>Plan:</strong><pre>' + escapeHtml(JSON.stringify(data.plan, null, 2)) + '</pre></div>';
-  }
-  resultEl.innerHTML = html;
-}
-
-function showError(err) {
-  resultEl.classList.add("show");
-  resultEl.innerHTML = `<div><span class="status-error">ERROR</span> ${escapeHtml(err)}</div>`;
-}
-
-function showWorktree(runId) {
+function fetchWorktree(runId) {
   fetch(`${ORCH}/runs/${runId}`)
     .then(r => r.json())
     .then(snapshot => {
       const workspace = snapshot?.execution?.workspace;
       if (workspace) {
-        runIdEl.innerHTML = `Run ID: ${runId} &nbsp;|&nbsp; Worktree: <code>${escapeHtml(workspace)}</code>`;
+        meta.innerHTML += ` &nbsp;|&nbsp; <span style="color:#64748b">Worktree:</span> <code>${esc(workspace)}</code>`;
       }
     })
     .catch(() => {});
-}
-
-function escapeHtml(s) {
-  return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 </script>
 </body>
