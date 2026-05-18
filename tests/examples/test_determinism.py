@@ -5,6 +5,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 from app.renderer.file_renderer import FileRenderer
+from app.renderer.compiler import CompilerConfig
 from app.examples.models import ExampleContext
 from app.examples.catalog_loader import clear_cache
 from app.examples.retrieval import retrieve_examples
@@ -14,6 +15,7 @@ class TestDeterminism(unittest.TestCase):
     def setUp(self):
         clear_cache()
         self.renderer = FileRenderer()
+        self.compiler_config = CompilerConfig(mode="legacy")
 
     def test_same_ast_same_render_no_context(self):
         ast = {"nodes": [{"type": "KpiRow", "props": {"metrics": ["revenue", "growth"]}}]}
@@ -21,8 +23,8 @@ class TestDeterminism(unittest.TestCase):
             "base_path": "src/",
             "files": [{"path": "KpiRow.tsx", "template": "kpi_row.j2"}],
         }
-        r1 = self.renderer.render(ast, config)
-        r2 = self.renderer.render(ast, config)
+        r1 = self.renderer.render(ast, config, compiler_config=self.compiler_config)
+        r2 = self.renderer.render(ast, config, compiler_config=self.compiler_config)
         self.assertEqual(r1[0].content, r2[0].content)
 
     def test_same_ast_same_render_with_context(self):
@@ -37,8 +39,8 @@ class TestDeterminism(unittest.TestCase):
             "base_path": "src/",
             "files": [{"path": "KpiRow.tsx", "template": "kpi_row.j2"}],
         }
-        r1 = self.renderer.render(ast, config, example_context=ctx)
-        r2 = self.renderer.render(ast, config, example_context=ctx)
+        r1 = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
+        r2 = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         self.assertEqual(r1[0].content, r2[0].content)
 
     def test_same_contract_same_catalog_every_time(self):
@@ -62,8 +64,8 @@ class TestDeterminism(unittest.TestCase):
             "files": [{"path": "SalesOverview.tsx", "template": "dashboard_page.j2"}],
         }
         ctx = retrieve_examples("dashboard.sales_overview")
-        r1 = self.renderer.render(ast, config, example_context=ctx)
-        r2 = self.renderer.render(ast, config, example_context=ctx)
+        r1 = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
+        r2 = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         self.assertEqual(r1[0].content, r2[0].content)
 
     def test_fileops_structure_is_stable(self):
@@ -72,7 +74,7 @@ class TestDeterminism(unittest.TestCase):
             "base_path": "src/",
             "files": [{"path": "KpiRow.tsx", "template": "kpi_row.j2"}],
         }
-        fileops = self.renderer.render(ast, config)
+        fileops = self.renderer.render(ast, config, compiler_config=self.compiler_config)
         fop = fileops[0]
         self.assertEqual(fop.action, "create")
         self.assertTrue(fop.path.endswith(".tsx"))

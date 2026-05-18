@@ -17,6 +17,13 @@ from app.examples.retrieval import retrieve_examples
 from app.examples.shaping import apply_example_context
 from app.renderer.file_renderer import FileRenderer
 from app.renderer.symbol_graph import validate_symbol_graph
+from app.renderer.compiler import (
+    CompilerConfig,
+    CompilerMode,
+    validate_compiler_contract,
+    validate_compiler_ir,
+    capture_ir_snapshot,
+)
 from app.renderer.component_node import (
     build_component_tree,
     emit_tree,
@@ -72,8 +79,27 @@ def _write_artifacts(artifacts_dir: str, plan: dict, operations: list, results: 
         f.write(diff)
 
 
-def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
-    print(f"[apply] run_id = {run_id}")
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: CompilerMode = "strict"):
+    """Execute a plan against a workspace.
+
+    Pipeline order contract (immutable):
+      1. validate_compiler_contract (AST + config shape)
+      2. build_component_tree (tree construction)
+      3. resolve_imports (enrichment)
+      4. resolve_slots (enrichment)
+      5. validate_compiler_ir (IR state consistency)  ← last check before emission
+      6. emit_tree (FileOp production)
+      7. SymbolGraph (read-only post-check)
+      8. validate_fileops (FileOp constraints)
+
+    Args:
+        run_id: unique run identifier
+        plan: execution plan dict
+        context: execution context (workspace, artifacts)
+        dry_run: if True, skip git commit
+        compiler_mode: explicit CompilerMode (default "strict").
+            MUST be propagated verbatim — no implicit env fallback.
+    """
 
     guard_within(context.workspace, settings.RUNS_DIR)
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
@@ -143,10 +169,20 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
 
         shaped_ast = apply_example_context(normalized_ast, normalized_ctx)
 
+        # Phase 6: CompilerConfig — single mode authority, propagated verbatim.
+        # compiler_mode is an explicit parameter (default "strict"), NOT an env var.
+        compiler_config = CompilerConfig(mode=compiler_mode)
+        validate_compiler_contract(shaped_ast, contract.renderer, compiler_config)
+
         # Phase 4-5 pipeline: single tree, enrichment pass, slot validation, post-check
         root = build_component_tree(shaped_ast, contract.renderer, example_context=normalized_ctx)
         resolve_imports(root)
         resolve_slots(root)
+
+        # Phase 6: IR validation + optional snapshot
+        validate_compiler_ir(root, compiler_config)
+        # snapshot = capture_ir_snapshot(root)  # uncomment for debugging
+
         fileops = emit_tree(root)
 
         composition = getattr(normalized_ctx, "composition", None)

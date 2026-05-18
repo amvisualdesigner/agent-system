@@ -5,12 +5,14 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 from app.renderer.file_renderer import FileRenderer
+from app.renderer.compiler import CompilerConfig
 from app.examples.models import ExampleContext
 
 
 class TestRendererContext(unittest.TestCase):
     def setUp(self):
         self.renderer = FileRenderer()
+        self.compiler_config = CompilerConfig(mode="legacy")
 
     def test_render_without_context_produces_valid_output(self):
         ast = {"nodes": [{"type": "KpiRow", "props": {"metrics": ["revenue"]}}]}
@@ -20,7 +22,7 @@ class TestRendererContext(unittest.TestCase):
                 {"path": "Test.tsx", "template": "kpi_row.j2"},
             ],
         }
-        fileops = self.renderer.render(ast, config)
+        fileops = self.renderer.render(ast, config, compiler_config=self.compiler_config)
         self.assertEqual(len(fileops), 1)
         content = fileops[0].content
         self.assertIn("KpiRow", content)
@@ -40,7 +42,7 @@ class TestRendererContext(unittest.TestCase):
                 {"path": "Test.tsx", "template": "kpi_row.j2"},
             ],
         }
-        fileops = self.renderer.render(ast, config, example_context=ctx)
+        fileops = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         self.assertEqual(len(fileops), 1)
         content = fileops[0].content
         self.assertIn("KpiRow", content)
@@ -62,7 +64,7 @@ class TestRendererContext(unittest.TestCase):
                 {"path": "components/Timeseries.tsx", "template": "timeseries.j2"},
             ],
         }
-        fileops = self.renderer.render(ast, config, example_context=ctx)
+        fileops = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         self.assertEqual(len(fileops), 3)
 
         overview = [f for f in fileops if "SalesOverview" in f.path][0].content
@@ -83,7 +85,7 @@ class TestRendererContext(unittest.TestCase):
             "base_path": "src/",
             "files": [{"path": "KpiRow.tsx", "template": "kpi_row.j2"}],
         }
-        fileops = self.renderer.render(ast, config, example_context=ctx)
+        fileops = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         content = fileops[0].content
         self.assertIn("SpecialWidget", content)
 
@@ -103,7 +105,7 @@ class TestRendererContext(unittest.TestCase):
             "base_path": "src/",
             "files": [{"path": "SalesOverview.tsx", "template": "dashboard_page.j2"}],
         }
-        fileops = self.renderer.render(ast, config, example_context=ctx)
+        fileops = self.renderer.render(ast, config, example_context=ctx, compiler_config=self.compiler_config)
         content = fileops[0].content
         self.assertIn("<CustomLayout>", content)
         self.assertIn("</CustomLayout>", content)
