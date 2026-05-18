@@ -1,23 +1,9 @@
-__EXAMPLE_IMPORTS__
-import React from 'react';
-import { Card } from '@/components/ui/Card';
-import { DashboardLayout } from '@/components/layout/DashboardLayout';
-import { KpiRow } from './components/KpiRow';
-import { Timeseries } from './components/Timeseries';
+__RESOLVED_IMPORTS__
 
-interface SalesOverviewProps {
-  title?: string;
-}
-
-export const SalesOverview: React.FC<SalesOverviewProps> = ({ title }) => {
+export const __COMPONENT_NAME__: React.FC = () => {
   return (
     __LAYOUT_OPEN__
-      <Card>
-        <KpiRow metrics={__METRICS__} />
-      </Card>
-      <Card>
-        <Timeseries metric={__METRIC__} />
-      </Card>
+      __COMPOSITION__
     __LAYOUT_CLOSE__
   );
 };

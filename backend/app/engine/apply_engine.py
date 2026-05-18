@@ -16,7 +16,15 @@ from app.contract_resolver.resolver import resolve as resolve_contract
 from app.examples.retrieval import retrieve_examples
 from app.examples.shaping import apply_example_context
 from app.renderer.file_renderer import FileRenderer
+from app.renderer.symbol_graph import validate_symbol_graph
+from app.renderer.component_node import (
+    build_component_tree,
+    emit_tree,
+    resolve_imports,
+    _extract_component_name,
+)
 from app.renderer.validators import validate_fileops
+from app.engine.plan_normalizer import normalize_plan
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +94,68 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
             skill_ir.contract_id, len(example_ctx.components), len(example_ctx.imports),
         )
 
-        shaped_ast = apply_example_context(result.ast, example_ctx)
-        renderer = FileRenderer()
-        fileops = renderer.render(shaped_ast, contract.renderer, example_context=example_ctx)
+        # Normalize semantic component names BEFORE tree construction
+        files = contract.renderer.get("files", [])
+        component_registry = {_extract_component_name(f["path"]) for f in files}
+        normalized = normalize_plan(
+            {"actions": result.ast.get("nodes", [])},
+            component_registry,
+        )
+        normalized_ast = dict(result.ast)
+        normalized_ast["nodes"] = normalized["actions"]
+
+        # Filter catalog imports + composition to remove references to
+        # semantic-only components — single source of truth after normalization
+        valid_components = {
+            a.get("type") or a.get("component")
+            for a in normalized["actions"]
+        }
+        valid_components.update(component_registry)
+
+        from app.renderer.symbol_graph import _is_project_import
+        from app.renderer.component_node import _extract_imported_name
+        from dataclasses import replace
+
+        filtered_imports = list(example_ctx.imports)
+        normalized_node_names = {
+            n.get("type") for n in normalized_ast.get("nodes", [])
+        }
+        for i, imp in enumerate(filtered_imports):
+            if not _is_project_import(imp):
+                continue
+            name = _extract_imported_name(imp)
+            if name and name not in normalized_node_names and name not in component_registry:
+                filtered_imports[i] = None
+        filtered_imports = [i for i in filtered_imports if i is not None]
+
+        known_layouts = set(getattr(example_ctx, "layouts", []) or [])
+        filtered_composition = [
+            (p, c) for p, c in (getattr(example_ctx, "composition", []) or [])
+            if c in normalized_node_names or c in known_layouts
+        ]
+
+        normalized_ctx = replace(
+            example_ctx,
+            imports=filtered_imports,
+            composition=filtered_composition,
+        )
+
+        shaped_ast = apply_example_context(normalized_ast, normalized_ctx)
+
+        # Phase 4 pipeline: single tree, enrichment pass, post-check validation
+        root = build_component_tree(shaped_ast, contract.renderer, example_context=normalized_ctx)
+        resolve_imports(root)
+        fileops = emit_tree(root)
+
+        composition = getattr(normalized_ctx, "composition", None)
+        ok, sg_reason = validate_symbol_graph(
+            root, contract.renderer,
+            composition=composition,
+            known_layouts=known_layouts,
+        )
+        if not ok:
+            logger.warning("symbol_graph_rejected reason=%s", sg_reason)
+            return {"status": "rejected", "reason": sg_reason}
 
         ok, vreason = validate_fileops(fileops)
         if not ok:

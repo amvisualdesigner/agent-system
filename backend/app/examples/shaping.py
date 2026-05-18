@@ -1,18 +1,23 @@
 """Apply structural bias from ExampleContext into the AST.
 
 Pure function. Deterministic. No side effects.
-The shaped AST carries __layout__ and __example_imports__ hints
-that the renderer maps into template placeholders.
+The shaped AST carries structural hints (composition, layout)
+that the renderer maps into the component tree, NOT raw template strings.
+
+ExampleContext is a semantic prior, not a text macro system.
 """
 
 
 def apply_example_context(ast: dict, ctx) -> dict:
     if not ctx:
-        return ast
+        return dict(ast)
 
-    ast = dict(ast)
+    shaped = dict(ast)  # copy — never mutate the original
 
-    ast["__layout__"] = getattr(ctx, "layouts", [None])[0]
-    ast["__example_imports__"] = getattr(ctx, "imports", [])
+    shaped["__layout__"] = getattr(ctx, "layouts", [None])[0]
 
-    return ast
+    composition = getattr(ctx, "composition", [])
+    if composition:
+        shaped["__composition__"] = composition
+
+    return shaped
