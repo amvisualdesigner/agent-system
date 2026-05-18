@@ -1,7 +1,18 @@
 """ComponentNode: structured component tree with ownership boundaries.
 
-ComponentNode replaces the flat AST dict with a tree where each node
-owns its props, imports, and composition. No global context mutation.
+Part of the Semantic UI IR Compiler — a deterministic multi-phase
+pipeline that converts a Semantic UI AST into executable FileOps.
+
+Pipeline (strict order):
+  1. build_component_tree(ast, config, ctx)
+  2. resolve_imports(root)
+  3. resolve_slots(root)
+  4. emit_tree(root)
+  5. SymbolGraph(root) [read-only post-check]
+  6. validate_fileops(fileops)
+
+Each node owns its props, imports, and composition.
+No global context mutation.
 """
 
 from __future__ import annotations
@@ -637,7 +648,7 @@ def _apply_composition_ordering(
 def emit_file(node: ComponentNode) -> FileOp | None:
     """Emit a single ComponentNode into a FileOp.
 
-    Core primitive for Phase 4 file-scoped emission.
+    Core primitive for file-scoped emission (Semantic UI IR Compiler).
     Template is a backend serialization layer — NOT the source of truth.
     Returns None for pure composition nodes (no template).
 
@@ -650,9 +661,9 @@ def emit_file(node: ComponentNode) -> FileOp | None:
 
     if node.resolved_imports is None:
         raise RuntimeError(
-            f"emit_file: resolve_imports enrichment pass was not run. "
-            f"node.component={node.component} file_path={node.file_path} "
-            f"resolved_imports=None. Call resolve_imports(root) before emit_tree()."
+            f"MissingImportResolution: emit_file called without "
+            f"resolve_imports enrichment pass. "
+            f"node.component={node.component} file_path={node.file_path}"
         )
 
     template = _resolve_template(node.template)

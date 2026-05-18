@@ -1,10 +1,13 @@
 """File renderer: maps AST + renderer_config → FileOps.
 
+Part of the Semantic UI IR Compiler — deterministic multi-phase
+pipeline that converts a Semantic UI AST into executable FileOps.
+
 Structural expansion only — no business logic, no branching, no decisions.
 Templates use for loops and __VAR__ placeholders with JSON serialization.
 
-Internally builds a ComponentNode tree for ownership-scoped rendering.
-External API unchanged for backward compatibility.
+Multiphase pipeline:
+  build_component_tree → resolve_imports → resolve_slots → emit_tree
 """
 
 import logging
