@@ -10,7 +10,7 @@ External API unchanged for backward compatibility.
 import logging
 
 from app.renderer.base import Renderer, FileOp
-from app.renderer.component_node import build_component_tree, emit_tree, resolve_imports
+from app.renderer.component_node import build_component_tree, emit_tree, resolve_imports, resolve_slots
 
 logger = logging.getLogger(__name__)
 
@@ -27,4 +27,5 @@ class FileRenderer(Renderer):
         # with ONLY its own props — no global context mutation.
         root = build_component_tree(ast, renderer_config, example_context)
         resolve_imports(root)
+        resolve_slots(root)
         return emit_tree(root)

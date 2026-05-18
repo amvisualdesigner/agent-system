@@ -21,6 +21,7 @@ from app.renderer.component_node import (
     build_component_tree,
     emit_tree,
     resolve_imports,
+    resolve_slots,
     _extract_component_name,
 )
 from app.renderer.validators import validate_fileops
@@ -142,9 +143,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
 
         shaped_ast = apply_example_context(normalized_ast, normalized_ctx)
 
-        # Phase 4 pipeline: single tree, enrichment pass, post-check validation
+        # Phase 4-5 pipeline: single tree, enrichment pass, slot validation, post-check
         root = build_component_tree(shaped_ast, contract.renderer, example_context=normalized_ctx)
         resolve_imports(root)
+        resolve_slots(root)
         fileops = emit_tree(root)
 
         composition = getattr(normalized_ctx, "composition", None)

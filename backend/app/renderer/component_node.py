@@ -22,6 +22,14 @@ _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"
 
 
 @dataclass
+class SlotSpec:
+    name: str
+    allowed_types: list[str]
+    required: bool = False
+    allowed: str = "single"  # "single" | "multiple"
+
+
+@dataclass
 class ComponentNode:
     component: str
     file_path: str
@@ -32,6 +40,8 @@ class ComponentNode:
     parent: ComponentNode | None = None
     template: str | None = None
     layout: str | None = None
+    slots: list[SlotSpec] | None = None
+    slot_bindings: dict[str, ComponentNode | list[ComponentNode]] | None = None
 
     def add_child(self, child: ComponentNode) -> None:
         child.parent = self
@@ -128,6 +138,42 @@ def _render_composition(children: list[ComponentNode]) -> str:
     return "\n".join(parts)
 
 
+def _render_slot_composition(node: ComponentNode) -> str:
+    """Generate JSX reference tags grouped by slot declaration order.
+
+    Uses node.slot_bindings (pre-computed by resolve_slots).
+    Slot binding must have run before this function is called.
+    Output order = slot declaration order (node.slots).
+    Within a 'multiple' slot, children preserve insertion order.
+    """
+    parts: list[str] = []
+    for spec in node.slots or []:
+        binding = node.slot_bindings.get(spec.name) if node.slot_bindings else None
+        if binding is None:
+            if spec.required:
+                parts.append(f"{{/* slot: {spec.name} */}}")
+            continue
+        if isinstance(binding, list):
+            for child in binding:
+                if child.props:
+                    props_str = " ".join(
+                        f"{k}={json.dumps(v)}" for k, v in child.props.items()
+                    )
+                    parts.append(f"<{child.component} {props_str} />")
+                else:
+                    parts.append(f"<{child.component} />")
+        else:
+            child = binding
+            if child.props:
+                props_str = " ".join(
+                    f"{k}={json.dumps(v)}" for k, v in child.props.items()
+                )
+                parts.append(f"<{child.component} {props_str} />")
+            else:
+                parts.append(f"<{child.component} />")
+    return "\n".join(parts)
+
+
 def _generate_child_imports(parent: ComponentNode) -> str:
     """Generate import statements for all children of a parent node.
 
@@ -198,6 +244,13 @@ def _build_node_context(node: ComponentNode) -> dict:
     Reads node.resolved_imports directly (pre-computed by the
     resolve_imports enrichment pass). No fallback to _resolve_imports
     — the enrichment pass MUST run before emission in the pipeline.
+
+    Invariant 2 (Phase 5): if node.slots is not None, composition
+    MUST use slot_bindings exclusively — NEVER node.children.
+
+    Invariant 3 (Phase 5): slot_bindings MUST NOT exist if slots
+    is None. If slot_bindings is set without slots, that is a
+    consistency violation and is treated as a bug.
     """
     context: dict = {}
 
@@ -208,7 +261,21 @@ def _build_node_context(node: ComponentNode) -> dict:
     context["COMPONENT_NAME"] = node.component
 
     if node.children:
-        context["COMPOSITION"] = _render_composition(node.children)
+        if node.slots is not None:
+            if node.slot_bindings is None:
+                raise RuntimeError(
+                    f"emit_file: node '{node.component}' has slots but no "
+                    f"slot_bindings. Call resolve_slots(root) before emit_tree()."
+                )
+            context["COMPOSITION"] = _render_slot_composition(node)
+        else:
+            if node.slot_bindings is not None:
+                raise RuntimeError(
+                    f"emit_file: node '{node.component}' has slot_bindings "
+                    f"but no slots. slot_bindings without slots is a "
+                    f"consistency violation."
+                )
+            context["COMPOSITION"] = _render_composition(node.children)
         context["RESOLVED_IMPORTS"] = node.resolved_imports or ""
     else:
         if node.imports:
@@ -391,6 +458,31 @@ def build_component_tree(
             pass
     _apply_composition_ordering(root, composition)
 
+    # Phase 5: extract slot specs from AST and store on
+    # the corresponding ComponentNode. Each AST node may
+    # carry a "slots" list defining what children the
+    # component accepts. This is data transport — the
+    # contract registry is the source of truth.
+    node_map: dict[str, ComponentNode] = {root.component: root}
+    for child in root.children:
+        node_map[child.component] = child
+    for ast_node in slots:
+        type_name = ast_node.get("type")
+        comp_node = node_map.get(type_name)
+        if comp_node is None:
+            continue
+        raw_slots = ast_node.get("slots")
+        if raw_slots and isinstance(raw_slots, list):
+            comp_node.slots = [
+                SlotSpec(
+                    name=s.get("name", s.get("type", "")),
+                    allowed_types=s.get("allowed_types", [s.get("type", "")]),
+                    required=s.get("required", False),
+                    allowed=s.get("allowed", "single"),
+                )
+                for s in raw_slots
+            ]
+
     return root
 
 
@@ -427,6 +519,88 @@ def resolve_imports(root: ComponentNode) -> None:
                 node.resolved_imports = deduped if deduped else ""
                 continue
         node.resolved_imports = "\n".join(resolved) if resolved else ""
+
+
+def resolve_slots(tree: ComponentNode) -> None:
+    """Validate and bind children to slots for every node in the tree.
+
+    Enrichment pass that runs AFTER resolve_imports and BEFORE
+    emit_tree. For each node with slot specs, validates children
+    against SlotSpec contracts and assigns slot_bindings
+    deterministically. Raises RuntimeError on any violation.
+
+    Binding rule (sequential greedy, Phase 5 contract):
+      for slot in slots (declaration order):
+          for child in unassigned_children (tree order):
+              if child.component ∈ slot.allowed_types:
+                  if slot.allowed == "single":  bind first match
+                  if slot.allowed == "multiple": bind all matches
+      any unassigned child → RuntimeError
+      required slot empty → RuntimeError
+
+    Pure pass — does NOT mutate node.children or node.slots.
+
+    Invariant: slot_bindings MUST NOT exist if slots is None.
+    If slots is None, slot_bindings is explicitly cleared to None
+    to prevent stale/inconsistent state.
+    """
+    for node in _collect_all_descendants(tree):
+        if node.slots is None:
+            node.slot_bindings = None
+            continue
+        _resolve_node_slots(node)
+
+
+def _resolve_node_slots(node: ComponentNode) -> None:
+    specs = node.slots  # list[SlotSpec], declaration order preserved
+    working_children = list(node.children)  # explicit copy, no mutation
+
+    assigned: set[int] = set()
+    bindings: dict[str, ComponentNode | list[ComponentNode]] = {}
+
+    for spec in specs:
+        if spec.allowed == "single":
+            found = False
+            for i, child in enumerate(working_children):
+                if i in assigned:
+                    continue
+                if child.component in spec.allowed_types:
+                    bindings[spec.name] = child
+                    assigned.add(i)
+                    found = True
+                    break
+            if not found and spec.required:
+                raise RuntimeError(
+                    f"Phase5SlotViolation: required slot '{spec.name}' "
+                    f"on component '{node.component}' has no matching child. "
+                    f"Allowed types: {spec.allowed_types}"
+                )
+        else:  # "multiple"
+            slot_children: list[ComponentNode] = []
+            for i, child in enumerate(working_children):
+                if i in assigned:
+                    continue
+                if child.component in spec.allowed_types:
+                    slot_children.append(child)
+                    assigned.add(i)
+            if not slot_children and spec.required:
+                raise RuntimeError(
+                    f"Phase5SlotViolation: required slot '{spec.name}' "
+                    f"on component '{node.component}' has no matching children. "
+                    f"Allowed types: {spec.allowed_types}"
+                )
+            bindings[spec.name] = slot_children
+
+    # Fail-fast: any unassigned child is a slot violation
+    for i, child in enumerate(working_children):
+        if i not in assigned:
+            raise RuntimeError(
+                f"Phase5SlotViolation: unassigned child '{child.component}' "
+                f"on component '{node.component}' does not match any slot's "
+                f"allowed_types"
+            )
+
+    node.slot_bindings = bindings
 
 
 def _apply_composition_ordering(
