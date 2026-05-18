@@ -7,7 +7,7 @@ logger = logging.getLogger("orchestrator.nodes.validate_plan")
 
 
 async def validate_plan_node(state: AgentState) -> dict:
-    assert state.get("run_id") is not None, "run_id must not be None"
+    assert state.get("run_id"), "run_id must be set and non-empty"
     run_id = state["run_id"]
     logger.info("node=validate_plan run_id=%s", run_id)
 

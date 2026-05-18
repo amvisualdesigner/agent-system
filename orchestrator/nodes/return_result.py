@@ -8,7 +8,7 @@ logger = logging.getLogger("orchestrator.nodes.return_result")
 
 
 async def return_result_node(state: AgentState) -> dict:
-    assert state.get("run_id") is not None, "run_id must not be None"
+    assert state.get("run_id"), "run_id must be set and non-empty"
     run_id = state["run_id"]
     logger.info("node=return_result run_id=%s", run_id)
 

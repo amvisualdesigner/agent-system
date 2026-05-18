@@ -1,3 +1,4 @@
+__EXAMPLE_IMPORTS__
 import React from 'react';
 import { Card } from '@/components/ui/Card';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
@@ -10,13 +11,13 @@ interface SalesOverviewProps {
 
 export const SalesOverview: React.FC<SalesOverviewProps> = ({ title }) => {
   return (
-    <DashboardLayout>
+    __LAYOUT_OPEN__
       <Card>
         <KpiRow metrics={__METRICS__} />
       </Card>
       <Card>
         <Timeseries metric={__METRIC__} />
       </Card>
-    </DashboardLayout>
+    __LAYOUT_CLOSE__
   );
 };

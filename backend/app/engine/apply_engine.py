@@ -14,6 +14,7 @@ from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
 from app.contract_resolver.resolver import resolve as resolve_contract
 from app.examples.retrieval import retrieve_examples
+from app.examples.shaping import apply_example_context
 from app.renderer.file_renderer import FileRenderer
 from app.renderer.validators import validate_fileops
 
@@ -85,8 +86,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False):
             skill_ir.contract_id, len(example_ctx.components), len(example_ctx.imports),
         )
 
+        shaped_ast = apply_example_context(result.ast, example_ctx)
         renderer = FileRenderer()
-        fileops = renderer.render(result.ast, contract.renderer, example_context=example_ctx)
+        fileops = renderer.render(shaped_ast, contract.renderer, example_context=example_ctx)
 
         ok, vreason = validate_fileops(fileops)
         if not ok:

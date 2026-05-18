@@ -13,7 +13,7 @@ RETRY_GETRUN_DELAY_MS = 500
 
 
 async def call_apply_node(state: AgentState) -> dict:
-    assert state.get("run_id") is not None, "run_id must not be None"
+    assert state.get("run_id"), "run_id must be set and non-empty"
     run_id = state["run_id"]
     logger.info("node=call_apply run_id=%s", run_id)
 

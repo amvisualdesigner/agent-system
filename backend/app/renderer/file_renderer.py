@@ -112,6 +112,9 @@ class FileRenderer(Renderer):
         renderer_config: dict,
         example_context: object | None = None,
     ) -> list[FileOp]:
+        # NOTE:
+        # Structural hints MUST come from shaped AST (__layout__, etc.)
+        # Rendering hints (imports, layout strings) still come from example_context
         fileops = []
         base_path = renderer_config.get("base_path", "")
 
@@ -151,8 +154,17 @@ class FileRenderer(Renderer):
             table_ctx = _build_table_context(ast)
             context.update(table_ctx)
 
+            # Deduplicate EXAMPLE_IMPORTS against template hardcoded imports
+            if context.get("EXAMPLE_IMPORTS"):
+                template_lines = set(template.splitlines())
+                extra = [
+                    line for line in context["EXAMPLE_IMPORTS"].split("\n")
+                    if line.strip() and line.strip() not in template_lines
+                ]
+                context["EXAMPLE_IMPORTS"] = "\n".join(extra) if extra else ""
+
             rendered = _render_for_loop(template, context)
-            rendered = _render_raw_placeholders(rendered, context, {"TABLE_BODY", "COLUMNS_THEAD"})
+            rendered = _render_raw_placeholders(rendered, context, {"TABLE_BODY", "COLUMNS_THEAD", "EXAMPLE_IMPORTS", "LAYOUT_OPEN", "LAYOUT_CLOSE"})
             rendered = _render_template(rendered, context)
             rendered = rendered.strip() + "\n"
 

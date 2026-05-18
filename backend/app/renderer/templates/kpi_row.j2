@@ -1,3 +1,4 @@
+__EXAMPLE_IMPORTS__
 import React from 'react';
 import { Card } from '@/components/ui/Card';
 
@@ -9,7 +10,7 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
   return (
     <div className="kpi-row">
       {% for metric in metrics %}
-      <Card key={metric}>
+      <Card key={__METRIC__}>
         <div className="kpi-card">
           <span className="kpi-label">{__METRIC__}</span>
         </div>

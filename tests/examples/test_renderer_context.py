@@ -71,9 +71,13 @@ class TestRendererContext(unittest.TestCase):
         self.assertIn("KpiRow", overview)
         self.assertIn("Timeseries", overview)
 
-    def test_render_with_context_includes_canonical_imports(self):
-        from app.examples.retrieval import retrieve_examples
-        ctx = retrieve_examples("dashboard.sales_overview")
+    def test_render_context_example_imports_in_output(self):
+        ctx = ExampleContext(
+            imports=["import { SpecialWidget } from './SpecialWidget'"],
+            components=["KpiRow"],
+            layouts=[],
+            composition=[],
+        )
         ast = {"nodes": [{"type": "KpiRow", "props": {"metrics": ["revenue"]}}]}
         config = {
             "base_path": "src/",
@@ -81,7 +85,28 @@ class TestRendererContext(unittest.TestCase):
         }
         fileops = self.renderer.render(ast, config, example_context=ctx)
         content = fileops[0].content
-        self.assertIn("import { Card } from '@/components/ui/Card'", content)
+        self.assertIn("SpecialWidget", content)
+
+    def test_render_context_layout_hints_in_output(self):
+        ctx = ExampleContext(
+            imports=[],
+            components=[],
+            layouts=["CustomLayout"],
+            composition=[],
+        )
+        ast = {
+            "nodes": [
+                {"type": "SalesOverview", "props": {"metrics": ["revenue"], "timeseries_metric": "revenue"}},
+            ],
+        }
+        config = {
+            "base_path": "src/",
+            "files": [{"path": "SalesOverview.tsx", "template": "dashboard_page.j2"}],
+        }
+        fileops = self.renderer.render(ast, config, example_context=ctx)
+        content = fileops[0].content
+        self.assertIn("<CustomLayout>", content)
+        self.assertIn("</CustomLayout>", content)
 
 
 if __name__ == "__main__":
