@@ -22,6 +22,8 @@ El sistema NO delega ejecucion critica al LLM:
 
 **Precision**: la ejecucion es determinista **una vez aceptado un plan valido**. La generacion del plan sigue siendo probabilistica porque depende del LLM. El sistema no intenta hacer deterministico lo que no puede ser; en su lugar, rodea el componente probabilistico con capas deterministicas de validacion y ejecucion.
 
+Desde Phase 2, el sistema evalua **cobertura de intencion real** — no solo "el contrato se ejecuto" sino "el contrato cubre lo que el usuario pidio". Si la cobertura es < 1.0, el pipeline rechaza con la lista de intents faltantes.
+
 Validacion, ejecucion, filesystem, Git, seguridad y persistencia son **deterministas y auditables**.
 
 ---
@@ -123,8 +125,16 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 └──────────────────┬─────────────────────────┘
                    ▼
 ┌────────────────────────────────────────────┐
+│    Intent Coverage Layer  🆕 Phase 2       │
+│  Gate 1: Task → Intent decomposition       │
+│  Gate 2: Coverage check (registry + LLM)   │
+│  Gate 3: GraphIR build with provenance     │
+│  Gate 4: Coverage revalidation (bijection) │
+└──────────────────┬─────────────────────────┘
+                   ▼
+┌────────────────────────────────────────────┐
 │          GraphIR Pipeline                  │
-│  SkillIR → IntentPlan → GraphIRBuilder     │
+│  IntentPlan → GraphIRBuilder                │
 │  → LayoutDerivationEngine → ReactBackend   │
 │  → FileOp[] → Executor                     │
 └──────────────────┬─────────────────────────┘
@@ -211,8 +221,10 @@ POST /run {"task": "..."}
   │
   ▼
 call_plan ──> POST /agent/plan ──> SkillIR {contract_id, params, confidence}
-  │                                 └─ Scoring fusion recalibra confianza
-  │                                 └─ Si contract_id=null o conf < 0.5 → noop
+  │               ├─ decompose_task(task) → list[Intent]  🆕
+  │               ├─ intents incluidos en plan            🆕
+  │               └─ Scoring fusion recalibra confianza
+  │               └─ Si contract_id=null o conf < 0.5 → noop
   │
   ▼
 validate_plan ──> sanity guard (SkillIR valido? contract existe?)
@@ -220,17 +232,18 @@ validate_plan ──> sanity guard (SkillIR valido? contract existe?)
   │               valido              invalido (retry <= 1)
   │                  │                     │
   ▼                  ▼                     ▼
-call_apply ──> POST /agent/apply ──> GraphIR Pipeline
-  │               │                    1. SkillIR → IntentPlan
-  │               │                    2. IntentPlan → GraphIRBuilder.build()
-  │               │                    3. GraphIR → LayoutDerivationEngine.derive()
-  │               │                    4. GraphIRValidator.validate()
-  │               │                    5. ReactBackend.render() → FileOp[]
-  │               │                    6. Executor dumb (create/modify/delete en worktree)
-  │               │                    Git worktree + diff + commit
+call_apply ──> POST /agent/apply ──> GraphIR Pipeline (Intent-first)
+  │               ├─ Gate 2: Coverage check (coverage < 1.0 → reject)
+  │               ├─ IntentPlan desde intents + contracts
+  │               ├─ Gate 3: GraphIRBuilder.build() con provenance (intent_id)
+  │               ├─ Gate 4: Coverage revalidation (bijection check)
+  │               ├─ ReactBackend.render() → FileOp[]
+  │               ├─ Executor dumb (create/modify/delete en worktree)
+  │               │  Git worktree + diff + commit
   │               └─ GET /runs/{id} (con retry 3 intentos)
   ▼
 return_result ──> snapshot a disco + SSE result event
+  └─ intent_fidelity real (coverage, matched, missing)
 ```
 
 ### Lifecycle del Run (State Machine) 🔵 IMPLEMENTED
@@ -298,16 +311,33 @@ result      / return_result   phase=completed
 
 ## GraphIR Pipeline 🔵 IMPLEMENTED
 
-El pipeline GraphIR reemplazo completamente el legacy AST/slot/template system. Es el unico camino de ejecucion.
+El pipeline GraphIR es el unico camino de ejecucion. Desde Phase 2 incluye **Intent Coverage Layer** (4 gates) que evalua cobertura de intencion real.
 
-### Pipeline
+### Pipeline (Intent-First)
 
 ```
 Task (lenguaje natural)
   │
   ▼
 ┌──────────────────────────────────────────────────────┐
-│  1. SkillIR (LLM)                                    │
+│  Gate 1: Intent Decomposition  🆕 Phase 2            │
+│     decompose_task(task) → list[Intent]              │
+│     Cada Intent tiene ID determinista (SHA256)       │
+│     Fuentes: keywords + LLM semantic fallback         │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  Gate 2: Intent Coverage Check  🆕 Phase 2           │
+│     Validator.check_coverage(intents, contracts)     │
+│     Dual-source: registry exact + LLM semantic       │
+│     Si coverage < 1.0 → rejected con lista faltante  │
+│     Si coverage = 1.0 → selecciona contrato(s)      │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  3. SkillIR (LLM)                                    │
 │     Elige: contract_id + version + params + confidence│
 │     Opciones: "dashboard.sales_overview",             │
 │               "analytics.table", "noop"              │
@@ -315,7 +345,7 @@ Task (lenguaje natural)
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  2. Scoring Fusion (post-LLM calibration)            │
+│  4. Scoring Fusion (post-LLM calibration)            │
 │     final = 0.7 * llm_conf + 0.3 * token_overlap    │
 │     Domain prior: si no hay keyword, llm_conf × 0.5  │
 │     threshold 0.5 (default) o por contrato           │
@@ -323,51 +353,53 @@ Task (lenguaje natural)
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  3. SkillIR → IntentPlan (determinista)              │
-│     _skill_ir_to_intent_plan():                       │
-│       - valida params contra input_schema del contrato│
-│       - aplica defaults                               │
-│       - crea IntentNode por cada slot del contrato    │
-│       - produce IntentPlan inmutable                  │
+│  5. IntentPlan (Intent-first)  🆕 Phase 2            │
+│     Ya no se construye desde contract → slots        │
+│     Se construye desde: intents + contract match      │
+│     Intent es la UNICA fuente de verdad               │
+│     IntentNode reemplazado por Intent (capability)    │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  4. GraphIR (determinista)                           │
-│                                                       │
+│  Gate 3: GraphIR Build (with provenance)  🆕 Phase 2 │
 │     GraphIRBuilder.build(plan):                       │
-│       - GraphIRDraft mutable (add_node, add_edge)    │
-│       - freeze() produce GraphIR inmutable            │
-│       - validacion: DAG, un root, edges existentes    │
+│       - Cada GraphIRNode.metadata lleva:             │
+│         intent_id, intent_capability, intent_source  │
+│       - Enlace directo: Intent.id → GraphIRNode.id   │
+│       - GraphIRDraft mutable → freeze() → GraphIR    │
 │                                                       │
 │     LayoutDerivationEngine.derive(graph):             │
 │       - EdgeRole → LayoutConstraint                   │
-│       - FULL_WIDTH, HALF_WIDTH, ROW, COLUMN, STACK    │
 │       - Sin type branching (solo role + metadata)     │
 │                                                       │
 │     GraphIRValidator.validate(graph, layout):         │
-│       - check_edge_role_purity                        │
-│       - find_root / is_dag / check_edges_exist        │
+│       - DAG, root, edges, check_edge_role_purity      │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  5. ReactBackend (determinista, stateless)            │
-│                                                       │
+│  Gate 4: Coverage Revalidation  🆕 Phase 2           │
+│     revalidate_coverage(graph, report, intents)      │
+│     Bijection: cada Intent.id → ≥1 GraphIRNode       │
+│     Si builder drop intent → HARD FAIL               │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  7. ReactBackend (determinista, stateless)            │
 │     backend.render(graph, layout, config):            │
 │       - Por cada nodo: type → ComponentGenerator      │
-│       - Page: layout wrapper + child composition      │
 │       - KpiRow: {metrics.map(...)} runtime            │
 │       - Timeseries: {metric} runtime prop              │
 │       - AnalyticsTable: {columns.map(...)} runtime    │
-│       - Props resueltas como runtime expressions      │
-│       - Sin templates .j2, sin AST dict legacy         │
+│       - Props como runtime expressions                │
 │     → list[FileOp]                                    │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  6. Executor (determinista, dumb)                    │
+│  8. Executor (determinista, dumb)                    │
 │     create/modify/delete en worktree Git             │
 │     diff + commit                                    │
 └──────────────────────────────────────────────────────┘
@@ -388,16 +420,54 @@ El corazon del pipeline es `graphir/models.py`:
 | `GraphIRDraft` | Estado mutable para construccion incremental |
 | `FileOp` | Output del renderer (action, path, content) |
 
-### IntentPlan — El puente LLM→GraphIR
+### Intent Model — Fuente unica de verdad
 
 `graphir/intent.py` define:
 
-- `IntentType`: PAGE, KPIGROUP, CHART, DATATABLE, FILTERPANEL, EMBED
-- `IntentExtensionRegistry`: registro dinamico de tipos adicionales
-- `IntentNode`: una intencion semantica (type, params)
-- `IntentPlan`: lista de intents + params validados
+- **`Intent`**: unidad semantica de intencion (id, capability, params, task_fragment, weight)
+  - `id`: SHA256 determinista de `task_fragment + capability + seed` — reproducible entre runs
+  - `capability`: taxonomia jerarquica (`display.kpi_row`, `display.timeseries`, `display.analytics_table`, `layout.page`, etc.)
+  - Flujo intacto por todo el pipeline: descomposicion → coverage → GraphIR → revalidacion
+- **`IntentPlan`**: lista de `Intent[]` + contratos seleccionados + `CoverageReport`
+  - Ya no se construye desde contract → slots. Ahora desde intents → contract match
+- **`IntentNode`**: DEPRECATED (reemplazado por `Intent` desde Phase 2)
+- **`IntentExtensionRegistry`**: registro dinamico (kept para compatibilidad)
 
-El LLM nunca produce GraphIR directamente. Produce SkillIR, que se convierte a IntentPlan, y luego a GraphIR. Todo determinista.
+### Intent Coverage Layer
+
+`graphir/intent_decomposition.py` y `graphir/intent_coverage.py`:
+
+- **`decompose_task(task)`**: convierte tarea → `list[Intent]` vía keywords + LLM fallback
+- **`IntentCoverageValidator`**:
+  - `check_coverage()`: Gate 2 — evalua cobertura intents vs contratos
+  - `revalidate()`: Gate 4 — bijection intent_id → GraphIRNode.id
+- **`CoverageReport`**: coverage, matched, missing, intent_to_nodes, gates_passed
+- **`build_capabilities_index()`**: indice inverso capability → (contract_id, slot_type) del registry
+
+Cada contrato declara que capabilities satisface en `ast_template.capabilities`:
+
+```python
+"capabilities": {
+    "KpiRow": "display.kpi_row",
+    "Timeseries": "display.timeseries",
+    "Page": "layout.page",
+}
+```
+
+### `intent_fidelity` real (ya no hardcoded)
+
+```
+Antes (Phase 1):  { requested_skill: true, executed_skill: true }
+Despues (Phase 2): {
+  coverage: 0.75,
+  matched_intents: ["display.kpi_row", "display.timeseries", "layout.page"],
+  missing_intents: [{"capability": "display.analytics_table", "reason": "no_contract"}],
+  uncovered_intents: [],
+  fallback_used: false,
+}
+```
+
+El LLM nunca produce GraphIR directamente. Produce SkillIR, que se valida contra intents descompuestos, se mide cobertura, y solo entonces se construye GraphIR. Todo determinista.
 
 ---
 
@@ -444,6 +514,7 @@ El sistema esta diseñado para fallar de forma **visible, rastreable y recuperab
 | LLM timeout | call_plan error -> validate_plan detecta -> return_result con error |
 | Plan invalido | validate_plan retry (max 1) -> si persiste, abort con error |
 | Backend caido | call_apply error -> node_end emitido con error -> return_result |
+| Intent coverage < 1.0 | Gate 2 rechaza pre-build con `missing_intents` lista → error reportado en `intent_fidelity` |
 | get_run falla | 3 retries -> warning -> run completo sin diff |
 | Snapshot corrupto | warning en log -> run no listable pero no bloquea el sistema |
 | Orchestrator crash | RunSnapshot persistido sobrevive -> GET /runs/{id} post-recovery |
@@ -819,18 +890,20 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   │   ├── policy/            # Seguridad y validacion de operaciones
   │   │   ├── config/            # Settings + feature flags
   │   │   ├── contracts/         # SkillIR model + SkillContract registry
-  │   │   ├── graphir/           # GraphIR pipeline core
-  │   │   │   ├── models.py      # GraphIRNode, GraphIREdge, EdgeRole, GraphIR, etc.
-  │   │   │   ├── intent.py      # IntentType, IntentExtensionRegistry, IntentPlan
-  │   │   │   ├── builder.py     # GraphIRBuilder: IntentPlan → GraphIRDraft → freeze()
-  │   │   │   ├── layout.py      # LayoutDerivationEngine: EdgeRole → LayoutConstraint
-  │   │   │   ├── validator.py   # GraphIRValidator: DAG, root, edges, role purity
-  │   │   │   ├── pipeline.py    # GraphIRPipeline: builder + layout + validate
-  │   │   │   ├── debug.py       # visualize() — introspection tool
-  │   │   │   ├── utils.py       # extract_component_name, validate_fileops
-  │   │   │   └── backends/      # Backend renderers
-  │   │   │       ├── base.py        # BackendRenderer ABC + BackendConfig
-  │   │   │       └── react_backend.py  # ReactBackend: 4 generators registrados
+│   │   ├── graphir/           # GraphIR pipeline core
+│   │   │   ├── models.py      # GraphIRNode, GraphIREdge, EdgeRole, GraphIR, etc.
+│   │   │   ├── intent.py      # Intent, IntentType, IntentPlan — Intent es fuente unica
+│   │   │   ├── intent_decomposition.py  # decompose_task() — task → list[Intent] 🆕
+│   │   │   ├── intent_coverage.py       # CoverageValidator, CoverageReport 🆕
+│   │   │   ├── builder.py     # GraphIRBuilder: IntentPlan → GraphIRDraft → freeze()
+│   │   │   ├── layout.py      # LayoutDerivationEngine: EdgeRole → LayoutConstraint
+│   │   │   ├── validator.py   # GraphIRValidator: DAG, root, edges, role purity
+│   │   │   ├── pipeline.py    # GraphIRPipeline: builder + layout + validate
+│   │   │   ├── debug.py       # visualize() — introspection tool
+│   │   │   ├── utils.py       # extract_component_name, validate_fileops
+│   │   │   └── backends/      # Backend renderers
+│   │   │       ├── base.py        # BackendRenderer ABC + BackendConfig
+│   │   │       └── react_backend.py  # ReactBackend: 4 generators registrados
   │   │   └── utils/             # state, run_id, path_guard
   │   └── mcp-server/            # MCP bridge
   │
@@ -857,7 +930,8 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   ├── tests/
   │   └── examples/
   │       ├── test_graphir.py          # 68 tests — Phase 0: modelos GraphIR
-  │       └── test_graphir_phase1.py   # 23 tests — builder, pipeline, renderer, e2e
+  │       ├── test_graphir_phase1.py   # 23 tests — builder, pipeline, renderer, e2e
+  │       └── test_graphir_phase2.py   # 34 tests — Intent, decomposition, coverage
   │
   ├── docker-compose.yml         # vLLM + backend + orchestrator + UI
   ├── scripts/                   # Utilidades
@@ -893,12 +967,13 @@ cd /opt/agent-system
 python3 -m pytest tests/ -v
 ```
 
-**91 tests** actuales:
+**125 tests** actuales:
 
 | Archivo | Tests | Que cubre |
 |---------|-------|-----------|
 | `test_graphir.py` | 68 | Modelos, EdgeRole, LayoutDerivationEngine, validator, debug, tipos, extensiones |
 | `test_graphir_phase1.py` | 23 | Builder, pipeline, ReactBackend (4 generators), E2E |
+| `test_graphir_phase2.py` | 34 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first |
 
 Sin dependencias externas, sin mock, sin LLM. Tests puramente deterministicos.
 
@@ -949,6 +1024,18 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] BackendRenderer ABC: interfaz estandar para backends de framework
 - [x] Eliminacion de legacy: contract_resolver/, renderer/ (templates, component_node, compiler, file_renderer, symbol_graph, migrate_ast_to_slots), examples/, plan_normalizer/
 - [x] 91 tests deterministicos
+- [x] **Phase 2: Intent Coverage Layer**
+- [x] `Intent` dataclass: modelo unico de intencion con ID SHA256 determinista
+- [x] `decompose_task()`: task → `list[Intent]` via keywords + LLM fallback
+- [x] `IntentCoverageValidator`: Gate 2 (pre-contract) + Gate 4 (post-GraphIR) coverage checks
+- [x] `CoverageReport`: coverage, matched, missing, intent_to_nodes, gates_passed
+- [x] Capability taxonomy: `display.*`, `layout.*`, `data.*`, `interaction.*`
+- [x] Contract capabilities: cada contrato declara capabilities en `ast_template.capabilities`
+- [x] Dual path: Intent-first con coverage + legacy `IntentNode` fallback en apply_engine
+- [x] Provenance en GraphIRNode.metadata: `intent_id`, `intent_capability`, `intent_source`
+- [x] `intent_fidelity` real: coverage + matched + missing + uncovered + fallback data
+- [x] Fix snapshot con `os.fsync` (reemplazo de tmp+rename que fallaba en overlay)
+- [x] 125 tests deterministicos
 
 ### Proximo
 
