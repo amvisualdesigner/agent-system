@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import tempfile
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
@@ -25,7 +24,6 @@ def _path(run_id: str) -> str:
 
 def save_snapshot(run_id: str, snapshot: dict) -> str:
     _ensure_dir()
-
     validate_run_id(run_id)
 
     snapshot["run_id"] = run_id
@@ -34,17 +32,10 @@ def save_snapshot(run_id: str, snapshot: dict) -> str:
         snapshot["created_at"] = snapshot["updated_at"]
 
     dst = _path(run_id)
-    fd, tmp = tempfile.mkstemp(dir=RUNS_DIR, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, default=str, ensure_ascii=False)
-            f.flush()
-            os.fsync(fd)
-        os.replace(tmp, dst)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2, default=str, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
 
     logger.info("[run_id=%s] snapshot saved to %s (%d bytes)", run_id, dst, os.path.getsize(dst))
     return dst

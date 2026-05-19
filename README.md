@@ -1,6 +1,6 @@
 # Agent System
 
-Sistema de agente de codigo que convierte tareas en lenguaje natural en operaciones Git aisladas mediante un orquestador LangGraph, backend FastAPI y LLM local.
+Sistema de agente de codigo que convierte tareas en lenguaje natural en operaciones Git aisladas mediante un orquestador LangGraph, backend FastAPI, LLM local y pipeline GraphIR.
 
 ---
 
@@ -112,7 +112,7 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
                    ▼
 ┌────────────────────────────────────────────┐
 │           Planning Layer                   │
-│  LLM (vLLM Qwen 3B) ──> plan estructurado  │
+│  LLM (vLLM Qwen 3B) ──> SkillIR           │
 │  call_plan node                            │
 └──────────────────┬─────────────────────────┘
                    ▼
@@ -123,9 +123,10 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 └──────────────────┬─────────────────────────┘
                    ▼
 ┌────────────────────────────────────────────┐
-│          Execution Layer                   │
-│  call_apply node ──> backend apply +       │
-│  Git worktree + diff + commit             │
+│          GraphIR Pipeline                  │
+│  SkillIR → IntentPlan → GraphIRBuilder     │
+│  → LayoutDerivationEngine → ReactBackend   │
+│  → FileOp[] → Executor                     │
 └──────────────────┬─────────────────────────┘
                    ▼
 ┌────────────────────────────────────────────┐
@@ -151,8 +152,8 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 │  HTML/JS     │                     │  LangGraph       │                       │  FastAPI     │
 │  Node.js     │ <── SSE stream ──── │  FastAPI :9000   │    GET /runs/{id}     │  :8000       │
 └──────────────┘                     │  4 nodes         │ <──────────────────── │              │
-                                     │  persistence     │                       │  Git worktree│
-                                     └──────────────────┘                       │  + artifacts │
+                                     │  persistence     │                       │  GraphIR     │
+                                     └──────────────────┘                       │  + Executor  │
                                                                                 └──────┬───────┘
                                                                                        │
                                                                               POST /v1/chat/completions
@@ -176,6 +177,7 @@ Toda ejecucion real (filesystem, Git, diff, commit) ocurre en el **Backend**. El
 
 **Backend** (`/opt/agent-system/backend/`)
 - FastAPI con endpoints para planificar (`/agent/plan`), ejecutar (`/agent/apply`) y consultar runs (`/runs/{id}`)
+- Pipeline GraphIR: SkillIR → IntentPlan → GraphIR → LayoutDerivationEngine → ReactBackend → FileOp[]
 - Crea worktrees Git aislados por run
 - Genera diff y artifacts en disco
 - NO debe modificarse manualmente
@@ -218,9 +220,13 @@ validate_plan ──> sanity guard (SkillIR valido? contract existe?)
   │               valido              invalido (retry <= 1)
   │                  │                     │
   ▼                  ▼                     ▼
-call_apply ──> POST /agent/apply ──> Contract Resolution (validator → defaults → AST)
-  │               │                    Render estructural (for loops, __VAR__ placeholders)
-  │               │                    Executor dumb (create/modify/delete en worktree)
+call_apply ──> POST /agent/apply ──> GraphIR Pipeline
+  │               │                    1. SkillIR → IntentPlan
+  │               │                    2. IntentPlan → GraphIRBuilder.build()
+  │               │                    3. GraphIR → LayoutDerivationEngine.derive()
+  │               │                    4. GraphIRValidator.validate()
+  │               │                    5. ReactBackend.render() → FileOp[]
+  │               │                    6. Executor dumb (create/modify/delete en worktree)
   │               │                    Git worktree + diff + commit
   │               └─ GET /runs/{id} (con retry 3 intentos)
   ▼
@@ -254,7 +260,7 @@ return_result ──> snapshot a disco + SSE result event
 | `planning` | `error` | fallo en call_plan o validate_plan |
 | `executing` | `completed` | apply exitoso + snapshot guardado |
 | `executing` | `error` | fallo en apply o get_run |
-| `*` | `cancelled` | kill switch activado
+| `*` | `cancelled` | kill switch activado |
 
 ### Nodos LangGraph
 
@@ -262,7 +268,7 @@ return_result ──> snapshot a disco + SSE result event
 |------|---------|
 | `call_plan` | LLM planning via backend |
 | `validate_plan` | Routing + sanity guard + retry |
-| `call_apply` | Ejecuta plan, obtiene diff/files |
+| `call_apply` | Ejecuta pipeline GraphIR, obtiene diff/files |
 | `return_result` | Persiste snapshot, emite resultado |
 
 ### Eventos SSE (9 por run)
@@ -279,7 +285,7 @@ node_end    / call_apply      phase=executing
 result      / return_result   phase=completed
 ```
 
-### Gestión de Errores 🔵 IMPLEMENTED
+### Gestion de Errores 🔵 IMPLEMENTED
 
 - `validate_plan`: retry max 1 si el plan no pasa sanity guard
 - `call_apply`: retry 3 intentos para `get_run` (500ms delay)
@@ -290,9 +296,9 @@ result      / return_result   phase=completed
 
 ---
 
-## Skill Contract Pipeline 🔵 IMPLEMENTED
+## GraphIR Pipeline 🔵 IMPLEMENTED
 
-La planificacion y ejecucion siguen un pipeline deterministico en 4 capas. El LLM solo produce un selector de contrato; todo lo demas es determinista.
+El pipeline GraphIR reemplazo completamente el legacy AST/slot/template system. Es el unico camino de ejecucion.
 
 ### Pipeline
 
@@ -317,115 +323,83 @@ Task (lenguaje natural)
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  3. Contract Resolution (determinista)               │
-│     Validate params → Apply defaults → Build AST     │
-│     (validator.py → defaults.py → ast_builder.py)    │
+│  3. SkillIR → IntentPlan (determinista)              │
+│     _skill_ir_to_intent_plan():                       │
+│       - valida params contra input_schema del contrato│
+│       - aplica defaults                               │
+│       - crea IntentNode por cada slot del contrato    │
+│       - produce IntentPlan inmutable                  │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  4. Example Retrieval (determinista)                 │
-│     contract_id → domain → catalog.json              │
-│     ExampleContext { imports, components, layouts }  │
-│     (offline catalog, no TSX parsing at runtime)     │
+│  4. GraphIR (determinista)                           │
+│                                                       │
+│     GraphIRBuilder.build(plan):                       │
+│       - GraphIRDraft mutable (add_node, add_edge)    │
+│       - freeze() produce GraphIR inmutable            │
+│       - validacion: DAG, un root, edges existentes    │
+│                                                       │
+│     LayoutDerivationEngine.derive(graph):             │
+│       - EdgeRole → LayoutConstraint                   │
+│       - FULL_WIDTH, HALF_WIDTH, ROW, COLUMN, STACK    │
+│       - Sin type branching (solo role + metadata)     │
+│                                                       │
+│     GraphIRValidator.validate(graph, layout):         │
+│       - check_edge_role_purity                        │
+│       - find_root / is_dag / check_edges_exist        │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  5. Render + Execute (determinista)                  │
-│     Renderer: structural expansion (for loops only)  │
-│     + raw HTML placeholders for tables               │
-│     Executor: dumb create/modify/delete on filesystem│
+│  5. ReactBackend (determinista, stateless)            │
+│                                                       │
+│     backend.render(graph, layout, config):            │
+│       - Por cada nodo: type → ComponentGenerator      │
+│       - Page: layout wrapper + child composition      │
+│       - KpiRow: {metrics.map(...)} runtime            │
+│       - Timeseries: {metric} runtime prop              │
+│       - AnalyticsTable: {columns.map(...)} runtime    │
+│       - Props resueltas como runtime expressions      │
+│       - Sin templates .j2, sin AST dict legacy         │
+│     → list[FileOp]                                    │
+└──────────────────┬───────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────┐
+│  6. Executor (determinista, dumb)                    │
+│     create/modify/delete en worktree Git             │
+│     diff + commit                                    │
 └──────────────────────────────────────────────────────┘
 ```
 
-### SkillIR — El unico output del LLM
+### GraphIR Core Models
 
-El sistema usa un **prompt de dos etapas** para guiar al LLM:
+El corazon del pipeline es `graphir/models.py`:
 
-```
-STEP 1 — Decide relevance (check in this order):
+| Componente | Descripcion |
+|---|---|
+| `GraphIRNode` | Nodo semantico inmutable (id, type, data, metadata) |
+| `GraphIREdge` | Arista dirigida (source, target, role) |
+| `EdgeRole` | CONTAINS / PRIMARY / SUPPORTING — solo semantica, sin posicion |
+| `GraphIRLayout` | Constraints espaciales derivadas (FULL_WIDTH, HALF_WIDTH, etc.) |
+| `LayoutConstraint` | FULL_WIDTH, HALF_WIDTH, THIRD_WIDTH, ROW, COLUMN, STACK, HIDDEN |
+| `GraphIR` | Grafo inmutable validado (nodes, edges, layout, params) |
+| `GraphIRDraft` | Estado mutable para construccion incremental |
+| `FileOp` | Output del renderer (action, path, content) |
 
-1. Is this task about a TABLE, DATA TABLE, ANALYTICS TABLE, TABULAR DATA, or COLUMNS?
-   - YES → contract_id="analytics.table"
+### IntentPlan — El puente LLM→GraphIR
 
-2. Is this task about BUSINESS METRICS, SALES KPIs, DASHBOARD, or REVENUE?
-   - YES → contract_id="dashboard.sales_overview"
+`graphir/intent.py` define:
 
-3. Otherwise → contract_id="noop"
+- `IntentType`: PAGE, KPIGROUP, CHART, DATATABLE, FILTERPANEL, EMBED
+- `IntentExtensionRegistry`: registro dinamico de tipos adicionales
+- `IntentNode`: una intencion semantica (type, params)
+- `IntentPlan`: lista de intents + params validados
 
-STEP 2 — Extract parameters (only for matching contract):
+El LLM nunca produce GraphIR directamente. Produce SkillIR, que se convierte a IntentPlan, y luego a GraphIR. Todo determinista.
 
-For analytics.table:
-- columns: list of column names
-
-For dashboard.sales_overview:
-- metrics: list from [revenue, growth, retention, churn]
-- timeseries_metric: from [revenue, growth, retention] (default revenue)
-```
-
-Esto fuerza al LLM a decidir relevancia **antes** de extraer parametros, reduciendo falsos positivos en modelos pequenos.
-
-El LLM produce exclusivamente un objeto `SkillIR`:
-
-```json
-{
-  "contract_id": "dashboard.sales_overview",
-  "version": 1,
-  "params": {
-    "metrics": ["revenue", "growth"],
-    "timeseries_metric": "revenue"
-  },
-  "confidence": 0.85
-}
-```
-
-Campos:
-
-| Campo | Tipo | Descripcion |
-|-------|------|-------------|
-| `contract_id` | string o null | `"dashboard.sales_overview"` o `"noop"` |
-| `version` | int | Version del contrato (siempre 1) |
-| `params` | dict | Parametros del contrato segun su input_schema |
-| `confidence` | float | Confianza cruda del LLM (0.0-1.0) |
-
-El LLM no produce `actions`, `file_paths`, ni contenido de archivos. Eso es responsabilidad del pipeline deterministico.
-
-### Scoring Fusion (post-LLM)
-
-El LLM propone, las reglas calibran. El sistema nunca usa la confianza del LLM directamente:
-
-```
-llm_conf = parsed.confidence
-if llm_conf < 0.01: llm_conf = 0.1          # suelo minimo
-if not domain_keywords_in_task: llm_conf *= 0.5  # domain prior penalty
-tok_score = task_tokens & domain_keywords / total_tokens
-final = min(0.7 * llm_conf + 0.3 * tok_score, 0.95)  # fusion con techo
-# threshold 0.5 → si no alcanza, noop
-```
-
-Esto evita tanto overconfidence del LLM como falsos negativos por keywords rigidas.
-
-### Template Rendering
-
-El renderer usa **solo** dos mecanismos, ambos deterministicos:
-
-1. **`{% for item in list %}`**: iteracion estructural sobre arrays. Prohibido `{% if %}`, ternarios, expresiones, filtros, bucles anidados (assert en runtime).
-2. **`__VAR__` placeholders**: cada variable del AST se serializa con `json.dumps()` y se sustituye en el template. El template ya contiene las llaves `{}` del JSX.
-
-Ejemplo — template `dashboard_page.j2`:
-```
-<KpiRow metrics={__METRICS__} />
-<Timeseries metric={__METRIC__} />
-```
-Contexto: `{"metrics": ["revenue", "growth"], "metric": "revenue"}`
-Resultado renderizado:
-```
-<KpiRow metrics={["revenue", "growth"]} />
-<Timeseries metric={"revenue"} />
-```
-
-El `json.dumps()` garantiza que strings, arrays y numeros se serialicen correctamente dentro de expresiones JSX.
+---
 
 ### NOOP Contract
 
@@ -433,20 +407,17 @@ Cuando la tarea no corresponde a ningun contrato disponible, el LLM elige `contr
 
 ### Contract Registry
 
-Contrato actual disponible:
-
 | contract_id | version | input_schema | output |
 |-------------|---------|--------------|--------|
-| `dashboard.sales_overview` | 1 | `metrics: list[str]` (enum), `timeseries_metric: str` (opcional, default revenue) | 3 archivos: SalesOverview.tsx, KpiRow.tsx, Timeseries.tsx |
-| `analytics.table` | 1 | `columns: list[str]` | 1 archivo: AnalyticsTable.tsx con Card wrapper + thead/tbody |
+| `dashboard.sales_overview` | 1 | `metrics: list[str]` (enum), `timeseries_metric: str` (opcional, default revenue) | 3 archivos: Page.tsx, KpiRow.tsx, Timeseries.tsx |
+| `analytics.table` | 1 | `columns: list[str]` | 1 archivo: AnalyticsTable.tsx con Card wrapper + columnas |
 | `noop` | 1 | `{}` | Ninguno |
 
-### Invariantes de seguridad
+### Seguridad en el pipeline
 
-- El contrato define input_schema, AST template, y renderer config — el LLM solo elige contrato y llena params
 - `file_path` debe ser relativo (no absoluto)
 - `file_path` no debe contener `..`, `.git`, `node_modules`, `dist`, `build`, `.env`
-- Extensiones permitidas: `.ts`, `.js`, `.py`, `.md`, `.json`, `.yaml`, `.yml`, `.txt`, `.html`, `.css`
+- Extensiones permitidas: `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.md`, `.json`, `.yaml`, `.yml`, `.html`, `.css`
 - Maximo 20 acciones por plan
 - Maximo 3 operaciones delete por plan
 - Maximo 200KB por archivo
@@ -570,9 +541,7 @@ Formato estructurado con `[run_id=...]` en cada linea:
 
 Componentes: `orchestrator.main`, `orchestrator.sse`, `orchestrator.store`, `orchestrator.backend_client`, `orchestrator.nodes.*`
 
-### Metricas clave
-
-El sistema deberia exponer:
+### Metricas clave pendientes
 
 | Metrica | Descripcion |
 |---------|-------------|
@@ -677,14 +646,14 @@ docker logs agent-orchestrator -f # Solo orchestrator
 docker logs agent-backend -f      # Solo backend
 ```
 
-### 3. Refrescar sistema (tras cambios en código)
+### 3. Refrescar sistema (tras cambios en codigo)
 
 ```bash
 cd /opt/agent-system
 docker compose up -d --build
 ```
 
-Esto reconstruye las imágenes que tienen cambios y reinicia solo los containers necesarios.
+Esto reconstruye las imagenes que tienen cambios y reinicia solo los containers necesarios.
 
 ### 4. Detener sistema
 
@@ -707,6 +676,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/  # UI
 ---
 
 ## API surface
+
 8000 → backend API
 7000 → vLLM inference
 9000 → orchestrator API
@@ -842,22 +812,27 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   ├── backend/                   # FastAPI (NO modificar)
   │   ├── main.py
   │   ├── app/
-  │   │   ├── api/               # Endpoints
-  │   │   ├── engine/            # Logica de apply
-  │   │   ├── executor/          # Worktree, patch
-  │   │   ├── planner/           # Generacion SkillIR + scoring fusion
-  │   │   ├── policy/            # Seguridad y validacion
+  │   │   ├── api/               # Endpoints REST
+  │   │   ├── engine/            # apply_engine — orquesta pipeline GraphIR
+  │   │   ├── executor/          # Worktree, patch, diff
+  │   │   ├── planner/           # SkillIR generator + scoring fusion
+  │   │   ├── policy/            # Seguridad y validacion de operaciones
   │   │   ├── config/            # Settings + feature flags
-  │   │   ├── contracts/         # SkillIR + SkillContract registry
-  │   │   ├── contract_resolver/ # Validate → defaults → AST builder
-  │   │   ├── renderer/          # Render estructural de templates
-  │   │   └── examples/          # Catalogo de ejemplos arquitectonicos
-  │   │       ├── catalog/       # JSONs offline (dashboard, tables, forms)
-  │   │       ├── react/         # .tsx canónicos de referencia
-  │   │       ├── models.py      # ExampleContext dataclass
-  │   │       ├── catalog_loader.py  # Carga + schema validation
-  │   │       └── retrieval.py   # contract_id → domain → ExampleContext
-  │   └── mcp-server/            # MCP bridge (legacy)
+  │   │   ├── contracts/         # SkillIR model + SkillContract registry
+  │   │   ├── graphir/           # GraphIR pipeline core
+  │   │   │   ├── models.py      # GraphIRNode, GraphIREdge, EdgeRole, GraphIR, etc.
+  │   │   │   ├── intent.py      # IntentType, IntentExtensionRegistry, IntentPlan
+  │   │   │   ├── builder.py     # GraphIRBuilder: IntentPlan → GraphIRDraft → freeze()
+  │   │   │   ├── layout.py      # LayoutDerivationEngine: EdgeRole → LayoutConstraint
+  │   │   │   ├── validator.py   # GraphIRValidator: DAG, root, edges, role purity
+  │   │   │   ├── pipeline.py    # GraphIRPipeline: builder + layout + validate
+  │   │   │   ├── debug.py       # visualize() — introspection tool
+  │   │   │   ├── utils.py       # extract_component_name, validate_fileops
+  │   │   │   └── backends/      # Backend renderers
+  │   │   │       ├── base.py        # BackendRenderer ABC + BackendConfig
+  │   │   │       └── react_backend.py  # ReactBackend: 4 generators registrados
+  │   │   └── utils/             # state, run_id, path_guard
+  │   └── mcp-server/            # MCP bridge
   │
   ├── orchestrator/              # LangGraph orquestador
   │   ├── main.py                # FastAPI entrypoint + endpoints
@@ -879,8 +854,14 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   ├── index.html             # Single-page app
   │   └── server.mjs             # Static file server
   │
-  ├── docker-compose.yml         # vLLM container
+  ├── tests/
+  │   └── examples/
+  │       ├── test_graphir.py          # 68 tests — Phase 0: modelos GraphIR
+  │       └── test_graphir_phase1.py   # 23 tests — builder, pipeline, renderer, e2e
+  │
+  ├── docker-compose.yml         # vLLM + backend + orchestrator + UI
   ├── scripts/                   # Utilidades
+  ├── tmp/                       # Documentos de migracion y planificacion
   └── docs/                      # Documentacion adicional
 ```
 
@@ -896,13 +877,30 @@ El backend clona/usa un repo Git en `REPO_ROOT` (`/opt/agent-repos/agent-test-re
 4. Hace `git add -A` y `git commit -m "agent:{run_id}"`
 5. Genera diff
 
-// TODO: crear un garbage
 Los worktrees persisten en disco. Para limpiar:
 
 ```bash
 curl -X POST http://localhost:8000/maintenance/cleanup
 git branch | grep -v "master" | xargs git branch -D (OJO, elimina todas las ramas excepto master)
 ```
+
+---
+
+## Testing 🔵 IMPLEMENTED
+
+```bash
+cd /opt/agent-system
+python3 -m pytest tests/ -v
+```
+
+**91 tests** actuales:
+
+| Archivo | Tests | Que cubre |
+|---------|-------|-----------|
+| `test_graphir.py` | 68 | Modelos, EdgeRole, LayoutDerivationEngine, validator, debug, tipos, extensiones |
+| `test_graphir_phase1.py` | 23 | Builder, pipeline, ReactBackend (4 generators), E2E |
+
+Sin dependencias externas, sin mock, sin LLM. Tests puramente deterministicos.
 
 ---
 
@@ -918,11 +916,11 @@ Limitaciones conocidas:
 - **Refactors grandes no confiables**: tareas que abarcan multiples archivos tienden a ser inconsistentes
 - **Alucinacion de paths**: puede inventar rutas que no existen
 - **Sin conocimiento del repositorio**: no entiende la estructura actual del proyecto sin contexto explicito
-- **Single-skill collapse**: con solo 1-2 contratos disponibles, el modelo tiende a forzar match aunque la tarea sea irrelevante (mitigado via: NOOP contract como opcion real + scoring fusion layer que recalibra confianza + domain prior penalty)
+- **Single-skill collapse**: con solo 2 contratos disponibles, el modelo tiende a forzar match aunque la tarea sea irrelevante (mitigado via: NOOP contract como opcion real + scoring fusion layer que recalibra confianza + domain prior penalty)
 
 Esto no es un bug — es una **restriccion de diseno consciente**. Preferimos un modelo pequeno, deterministico y predecible a uno grande, lento e impredecible. Para tareas complejas, el sistema puede ampliarse a modelos mas grandes via API conforme evolucione.
 
-La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas al LLM, sino rodearlo con capas deterministicas: registry validation, scoring fusion, AST builder, renderer estructural, executor dumb. El LLM nunca decide directamente que archivos crear ni que contenido escribir — solo selecciona un contrato y rellena parametros.
+La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas al LLM, sino rodearlo con capas deterministicas: registry validation, scoring fusion, GraphIR pipeline, ReactBackend, executor dumb. El LLM nunca decide directamente que archivos crear ni que contenido escribir — solo selecciona un contrato y rellena parametros.
 
 ---
 
@@ -939,45 +937,45 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] Security model con path safety + extension whitelist
 - [x] Worktree isolation por run
 - [x] SkillIR pipeline: LLM produce solo selector de contrato (no actions, no file paths)
-- [x] Contract registry: `dashboard.sales_overview@1` + `noop` como opcion de rechazo
+- [x] Contract registry: `dashboard.sales_overview@1` + `analytics.table@1` + `noop`
 - [x] NOOP contract: espacio de decision real para el LLM (mitiga single-skill collapse)
 - [x] Scoring fusion: `0.7 * llm_conf + 0.3 * token_overlap` con domain prior penalty
-- [x] Contract resolution determinista: validator.py → defaults.py → ast_builder.py
-- [x] Renderer estructural: solo `{% for %}`, `{% if %}` prohibido, `__VAR__` placeholders + `json.dumps()`
-- [x] Executor dumb: solo create/modify/delete sin logica de negocio
-- [x] Templates en filesystem (ya no en memoria)
-- [x] files de FASE 1: feature flags, tooling scripts (lint, diff, dump), CI gate, pre-commit hook
-- [x] **Architectural Gravity Layer**: sistema de ejemplos arquitectonicos canónicos
-  - [x] Examples .tsx reales: dashboard (5), forms (2), tables (1)
-  - [x] Script offline: `scripts/build_examples_catalog.py`
-  - [x] Catalog JSONs versionados: dashboard.json, forms.json, tables.json
-  - [x] ExampleContext dataclass + retrieval determinista (contract_id → domain)
-  - [x] Renderer extendido: acepta ExampleContext, precomputo de HTML para tablas
-  - [x] Integracion en apply_engine: retrieve + pass context
-  - [x] Schema version assertion + sha1 imports hash + metric stub
-  - [x] Contrato `analytics.table`: genera AnalyticsTable.tsx con Card + columnas
-  - [ ] Contrato `settings.form`: genera formularios SettingsForm + UserProfileForm
+- [x] GraphIR core: GraphIRNode, GraphIREdge, EdgeRole, GraphIR, GraphIRDraft
+- [x] GraphIRBuilder: IntentPlan → GraphIR via GraphIRDraft mutable + freeze()
+- [x] GraphIRValidator: DAG, root, edges, role purity
+- [x] LayoutDerivationEngine: EdgeRole → LayoutConstraint (sin type branching)
+- [x] ReactBackend: 4 generators (Page, KpiRow, Timeseries, AnalyticsTable)
+- [x] Runtime props: todos los generadores usan `{metric}`, `{metrics.map(...)}`, `{columns.map(...)}`
+- [x] BackendRenderer ABC: interfaz estandar para backends de framework
+- [x] Eliminacion de legacy: contract_resolver/, renderer/ (templates, component_node, compiler, file_renderer, symbol_graph, migrate_ast_to_slots), examples/, plan_normalizer/
+- [x] 91 tests deterministicos
+
+### Proximo
+
+- [ ] GraphIR Strict Mode: UI AST framework-agnostic (UIAST) entre GraphIR y backends
+- [ ] Validador no_string_ui: detecta `<`, `.map(`, `</` en strings Python
+- [ ] ReactBackend refactor: generators producen `UIComponent` en vez de strings
+- [ ] Contrato `settings.form`: formularios SettingsForm + UserProfileForm
 
 ### Context & Retrieval
 
 - [ ] `expand_prompt` node: enriquecer task con contexto del repo antes de planificar
-- [ ] Deterministic context selector: seleccion de archivos relevantes por path + AST + grep (no semantico, no ML)
+- [ ] Deterministic context selector: seleccion de archivos relevantes por path + AST + grep
 - [ ] Repository structure map: snapshot estatico de la estructura del proyecto
-- [ ] Import graph analysis: analisis estatico de dependencias entre archivos (input context only, no decision layer)
-- [ ] Deterministic truncation policy: recorte explícito de contexto para respetar ventana del modelo (no adaptive reasoning)
+- [ ] Import graph analysis: analisis estatico de dependencias entre archivos
+- [ ] Deterministic truncation policy: recorte explicito de contexto para respetar ventana del modelo
 
 ### Review & Safety
 
-- [ ] Human approval mode: paso opcional antes de apply (optional gating flag, no core runtime)
+- [ ] Human approval mode: paso opcional antes de apply
 - [ ] Dry-run mode: diff preview sin escritura en filesystem
 - [ ] Centralized policy engine con reglas declarativas
-- [ ] Rule-based risk scoring: heuristicas sobre operaciones, deletes, file count, diff size (no ML)
-- [ ] Policy audit logs: registro de todas las decisiones de policy
+- [ ] Rule-based risk scoring: heuristicas sobre operaciones, deletes, file count, diff size
 
 ### Workspace Awareness
 
 - [ ] Detectar archivos modificados previamente entre runs
-- [ ] Contexto incremental: saber que cambió desde el ultimo run
+- [ ] Contexto incremental: saber que cambio desde el ultimo run
 - [ ] Awareness de estado Git actual (branch, cambios sin commit)
 
 ### Quality
@@ -996,6 +994,6 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 
 ### Future Research
 
-- Redis pub/sub para SSE horizontal (cuando haya multi-instancia)
-- Automatic merge policies (experimental, disabled by default — requiere tests + rollback + sandboxing)
+- Redis pub/sub para SSE horizontal
+- Automatic merge policies (experimental, disabled by default)
 - Deterministic retry strategies (bounded, no auto-recovery)
