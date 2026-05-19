@@ -1,13 +1,25 @@
+"""Shared utilities for GraphIR modules."""
 import os
 
-from app.renderer.base import FileOp
+from app.graphir.models import FileOp
 
 ALLOWED_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".json", ".yaml", ".yml", ".html", ".css"}
 BLOCKED_PATTERNS = [".git", "node_modules", "dist", "build", ".env"]
 MAX_FILE_SIZE = 200_000
 
 
+def extract_component_name(file_path: str) -> str:
+    """Extract component name from a file path.
+
+    'components/KpiRow.tsx' → 'KpiRow'
+    'src/pages/dashboard/Page.tsx' → 'Page'
+    """
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    return stem
+
+
 def validate_fileops(fileops: list[FileOp]) -> tuple[bool, str]:
+    """Validate FileOp list for safety and completeness."""
     for i, op in enumerate(fileops):
         ext = os.path.splitext(op.path)[1]
         if ext not in ALLOWED_EXTENSIONS:

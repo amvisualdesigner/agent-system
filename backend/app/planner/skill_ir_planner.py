@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 
 from app.contracts.skill_ir import SkillIR
 from app.contracts.skill_registry import contract_exists

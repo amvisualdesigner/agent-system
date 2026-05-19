@@ -55,7 +55,7 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
         renderer={
             "base_path": "src/pages/dashboard/",
             "files": [
-                {"path": "SalesOverview.tsx", "template": "dashboard_page.j2"},
+                {"path": "Page.tsx", "template": "dashboard_page.j2"},
                 {"path": "components/KpiRow.tsx", "template": "kpi_row.j2"},
                 {"path": "components/Timeseries.tsx", "template": "timeseries.j2"},
             ],

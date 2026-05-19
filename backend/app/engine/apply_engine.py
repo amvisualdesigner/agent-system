@@ -1,40 +1,105 @@
+"""Apply engine — GraphIR-only pipeline.
+
+Executes a plan against a workspace using the GraphIR pipeline:
+  SkillIR → IntentPlan → GraphIRBuilder → GraphIR
+  → LayoutDerivationEngine → GraphIRLayout
+  → BackendRenderer → list[FileOp]
+
+No legacy AST path. No slot system. No feature flags.
+"""
 import os
 import json
 import subprocess
 import logging
 
-from app.executor.patch_executor import apply_operation
 from app.executor.patch_executor_dumb import apply_dumb as apply_dumb_op
 from app.policy.policy import validate_plan_policy, validate_operation
 from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
 from app.utils.path_guard import guard_within
 from app.config.settings import settings
-from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
-from app.contract_resolver.resolver import resolve as resolve_contract
-from app.examples.retrieval import retrieve_examples
-from app.examples.shaping import apply_example_context
-from app.renderer.file_renderer import FileRenderer
-from app.renderer.symbol_graph import validate_symbol_graph
-from app.renderer.compiler import (
-    CompilerConfig,
-    CompilerMode,
-    validate_compiler_contract,
-    validate_compiler_ir,
-    capture_ir_snapshot,
-)
-from app.renderer.component_node import (
-    build_component_tree,
-    emit_tree,
-    resolve_imports,
-    resolve_slots,
-    _extract_component_name,
-)
-from app.renderer.validators import validate_fileops
-from app.engine.plan_normalizer import normalize_plan
+from app.contracts.skill_registry import get_contract
+from app.graphir.intent import IntentPlan, IntentNode, IntentExtensionRegistry
+from app.graphir.builder import GraphIRBuilder
+from app.graphir.pipeline import GraphIRPipeline
+from app.graphir.validator import GraphIRValidator
+from app.graphir.backends import ReactBackend, BackendConfig
+from app.graphir.utils import validate_fileops
+from app.graphir.utils import extract_component_name
 
 logger = logging.getLogger(__name__)
+
+
+def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
+    """Convert a SkillIR into an IntentPlan.
+
+    Temporary adapter until the LLM produces IntentPlan directly.
+    Resolves the contract, validates params, and creates IntentNodes
+    from the contract's slot definitions.
+    """
+    contract = get_contract(skill_ir.contract_id, skill_ir.version)
+    if contract is None:
+        raise ValueError(f"Contract not found: {skill_ir.contract_id}@{skill_ir.version}")
+
+    schema = contract.input_schema
+    params = dict(skill_ir.params)
+
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    for field in required:
+        if field not in params:
+            raise ValueError(f"missing required field: {field}")
+
+    for field in params:
+        if field not in properties:
+            raise ValueError(f"unknown field: {field}")
+        prop = properties[field]
+        if "enum" in prop and params[field] not in prop["enum"]:
+            raise ValueError(
+                f"field '{field}': '{params[field]}' not in {prop['enum']}"
+            )
+
+    for field, prop in properties.items():
+        if field not in params and "default" in prop:
+            params[field] = prop["default"]
+
+    resolved_params = params
+
+    slots = contract.ast_template.get("slots", [])
+    intents: list[IntentNode] = []
+
+    file_count = len(contract.renderer.get("files", []))
+    if file_count > 0:
+        intents.append(IntentNode(type="PAGE", params={}))
+
+    for slot in slots:
+        intent_type = _resolve_intent_type(slot.get("type", ""))
+        props = _resolve_props(slot.get("props", {}), resolved_params)
+        intents.append(IntentNode(type=intent_type, params=props))
+
+    return IntentPlan(
+        contract_id=skill_ir.contract_id,
+        version=skill_ir.version,
+        confidence=skill_ir.confidence,
+        intents=intents,
+        params=resolved_params,
+    )
+
+
+def _resolve_intent_type(graphir_type: str) -> str:
+    """Map GraphIR type name back to IntentType name."""
+    from app.graphir.intent import IntentType, _INTENT_TO_GRAPHIR_TYPE
+    reverse = {v: k.name for k, v in _INTENT_TO_GRAPHIR_TYPE.items()}
+    return reverse.get(graphir_type, graphir_type)
+
+
+def _resolve_props(props_template: dict, params: dict) -> dict:
+    resolved = {}
+    for prop_name, param_key in props_template.items():
+        if param_key in params:
+            resolved[prop_name] = params[param_key]
+    return resolved
 
 
 def _dump_execution_snapshot(run_id: str, plan: dict, operations: list, results: list):
@@ -73,199 +138,89 @@ def _write_artifacts(artifacts_dir: str, plan: dict, operations: list, results: 
             "run_id": plan.get("run_id", ""),
             "status": "ok",
             "files_created": [r.get("path") for r in results if r.get("status") == "created"],
-            "execution_mode": "renderer",
+            "execution_mode": "graphir",
         }, f, indent=2)
     with open(f"{artifacts_dir}/diff.patch", "w") as f:
         f.write(diff)
 
 
-def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: CompilerMode = "strict"):
-    """Execute a plan against a workspace.
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
+    """Execute a plan against a workspace using the GraphIR pipeline.
 
-    Pipeline order contract (immutable):
-      1. validate_compiler_contract (AST + config shape)
-      2. build_component_tree (tree construction)
-      3. resolve_imports (enrichment)
-      4. resolve_slots (enrichment)
-      5. validate_compiler_ir (IR state consistency)  ← last check before emission
-      6. emit_tree (FileOp production)
-      7. SymbolGraph (read-only post-check)
-      8. validate_fileops (FileOp constraints)
-
-    Args:
-        run_id: unique run identifier
-        plan: execution plan dict
-        context: execution context (workspace, artifacts)
-        dry_run: if True, skip git commit
-        compiler_mode: explicit CompilerMode (default "strict").
-            MUST be propagated verbatim — no implicit env fallback.
+    Pipeline:
+      1. Convert SkillIR → IntentPlan (temporary adapter)
+      2. GraphIRPipeline: IntentPlan → (GraphIR, GraphIRLayout)
+      3. BackendRenderer: (GraphIR, GraphIRLayout, config) → FileOps
+      4. validate_fileops → apply → git commit
     """
-
     guard_within(context.workspace, settings.RUNS_DIR)
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
     os.makedirs(context.artifacts, exist_ok=True)
 
-    # RENDERER PATH (primary)
-    if FEATURE_FLAGS.get("renderer_active") and plan.get("skill_ir"):
-        skill_ir = SkillIR.from_dict(plan["skill_ir"])
-        result = resolve_contract(skill_ir)
-        if not result.ok:
-            return {"status": "rejected", "reason": result.reason}
+    skill_ir = plan.get("skill_ir")
+    if not skill_ir:
+        return {"status": "rejected", "reason": "no_skill_ir"}
 
-        from app.contracts.skill_registry import get_contract
-        contract = get_contract(skill_ir.contract_id, skill_ir.version)
+    skill_ir_obj = SkillIR.from_dict(skill_ir)
+    contract = get_contract(skill_ir_obj.contract_id, skill_ir_obj.version)
+    if contract is None:
+        return {"status": "rejected", "reason": f"contract_not_found:{skill_ir_obj.contract_id}"}
 
-        example_ctx = retrieve_examples(skill_ir.contract_id)
-        logger.info(
-            "example_context_loaded contract_id=%s components=%d imports=%d",
-            skill_ir.contract_id, len(example_ctx.components), len(example_ctx.imports),
-        )
+    # Step 1: SkillIR → IntentPlan
+    try:
+        intent_plan = _skill_ir_to_intent_plan(skill_ir_obj)
+    except ValueError as e:
+        return {"status": "rejected", "reason": str(e)}
 
-        # Normalize semantic component names BEFORE tree construction
-        files = contract.renderer.get("files", [])
-        component_registry = {_extract_component_name(f["path"]) for f in files}
-        normalized = normalize_plan(
-            {"actions": result.ast.get("nodes", [])},
-            component_registry,
-        )
-        normalized_ast = dict(result.ast)
-        normalized_ast["nodes"] = normalized["actions"]
+    # Step 2: GraphIR pipeline (build + layout + validate)
+    try:
+        graph, graph_layout = GraphIRPipeline.run(intent_plan)
+    except ValueError as e:
+        return {"status": "rejected", "reason": f"graphir:{e}"}
 
-        # Filter catalog imports + composition to remove references to
-        # semantic-only components — single source of truth after normalization
-        valid_components = {
-            a.get("type") or a.get("component")
-            for a in normalized["actions"]
-        }
-        valid_components.update(component_registry)
+    # Step 3: BackendRenderer (ReactBackend)
+    files = contract.renderer.get("files", [])
+    base_path = contract.renderer.get("base_path", "")
+    path_map = {}
+    for f in files:
+        comp = extract_component_name(f["path"])
+        if comp:
+            path_map[comp] = f["path"]
+    backend_config = BackendConfig(
+        output_base_path=base_path,
+        path_map=path_map,
+    )
+    backend = ReactBackend()
+    fileops = backend.render(graph, graph_layout, backend_config)
 
-        from app.renderer.symbol_graph import _is_project_import
-        from app.renderer.component_node import _extract_imported_name
-        from dataclasses import replace
-
-        filtered_imports = list(example_ctx.imports)
-        normalized_node_names = {
-            n.get("type") for n in normalized_ast.get("nodes", [])
-        }
-        for i, imp in enumerate(filtered_imports):
-            if not _is_project_import(imp):
-                continue
-            name = _extract_imported_name(imp)
-            if name and name not in normalized_node_names and name not in component_registry:
-                filtered_imports[i] = None
-        filtered_imports = [i for i in filtered_imports if i is not None]
-
-        known_layouts = set(getattr(example_ctx, "layouts", []) or [])
-        filtered_composition = [
-            (p, c) for p, c in (getattr(example_ctx, "composition", []) or [])
-            if c in normalized_node_names or c in known_layouts
-        ]
-
-        normalized_ctx = replace(
-            example_ctx,
-            imports=filtered_imports,
-            composition=filtered_composition,
-        )
-
-        shaped_ast = apply_example_context(normalized_ast, normalized_ctx)
-
-        # Phase 6: CompilerConfig — single mode authority, propagated verbatim.
-        # compiler_mode is an explicit parameter (default "strict"), NOT an env var.
-        compiler_config = CompilerConfig(mode=compiler_mode)
-        validate_compiler_contract(shaped_ast, contract.renderer, compiler_config)
-
-        # Phase 4-5 pipeline: single tree, enrichment pass, slot validation, post-check
-        root = build_component_tree(shaped_ast, contract.renderer, example_context=normalized_ctx)
-        resolve_imports(root)
-        resolve_slots(root)
-
-        # Phase 6: IR validation + optional snapshot
-        validate_compiler_ir(root, compiler_config)
-        # snapshot = capture_ir_snapshot(root)  # uncomment for debugging
-
-        fileops = emit_tree(root)
-
-        composition = getattr(normalized_ctx, "composition", None)
-        ok, sg_reason = validate_symbol_graph(
-            root, contract.renderer,
-            composition=composition,
-            known_layouts=known_layouts,
-        )
-        if not ok:
-            logger.warning("symbol_graph_rejected reason=%s", sg_reason)
-            return {"status": "rejected", "reason": sg_reason}
-
-        ok, vreason = validate_fileops(fileops)
-        if not ok:
-            return {"status": "rejected", "reason": vreason}
-
-        results = []
-        for fop in fileops:
-            result = apply_dumb_op(fop, context.workspace)
-            results.append(result)
-
-        logger.info("apply: contract_id=%s version=%d params=%s fileops_count=%d",
-                    skill_ir.contract_id, skill_ir.version, skill_ir.params, len(fileops))
-
-        diff, err = _run_git_flow(context.workspace, run_id, dry_run)
-        if err:
-            return {"status": "rejected", "reason": "git_commit_failed", "error": err}
-
-        _write_artifacts(context.artifacts, plan, [fop.to_dict() for fop in fileops], results, diff or "")
-        write_state(run_id, "apply")
-
-        return {
-            "status": "ok",
-            "run_id": run_id,
-            "dry_run": dry_run,
-            "operations": [fop.to_dict() for fop in fileops],
-            "execution": results,
-            "workspace": context.workspace,
-            "execution_mode": "renderer",
-            "intent_fidelity": {"requested_skill": True, "executed_skill": True, "fallback_used": False},
-        }
-
-    # LEGACY PATH (frozen, transitional)
-    ok, reason = validate_plan_policy(plan)
+    ok, vreason = validate_fileops(fileops)
     if not ok:
-        return {"status": "rejected", "reason": reason}
-
-    operations = []
-    for action in plan.get("actions", []):
-        op = {
-            "action": action.get("type", ""),
-            "target": action.get("target", "file"),
-            "path": action.get("file_path", ""),
-            "name": action.get("name", ""),
-            "params": action.get("params", {}),
-            "diff": action.get("content", ""),
-            "intent": action.get("intent", ""),
-        }
-        operations.append(op)
+        return {"status": "rejected", "reason": vreason}
 
     results = []
-    for i, op in enumerate(operations):
-        ok, reason = validate_operation(op)
-        if not ok:
-            results.append({"status": "skipped", "reason": reason})
-            continue
-        result = apply_operation(op, context.workspace)
+    for fop in fileops:
+        result = apply_dumb_op(fop, context.workspace)
         results.append(result)
+
+    logger.info(
+        "apply: contract_id=%s version=%d params=%s fileops_count=%d",
+        skill_ir_obj.contract_id, skill_ir_obj.version, skill_ir_obj.params, len(fileops),
+    )
 
     diff, err = _run_git_flow(context.workspace, run_id, dry_run)
     if err:
         return {"status": "rejected", "reason": "git_commit_failed", "error": err}
 
-    _dump_execution_snapshot(run_id, plan, operations, results)
-    _write_artifacts(context.artifacts, plan, operations, results, diff or "")
+    _write_artifacts(context.artifacts, plan, [fop.to_dict() for fop in fileops], results, diff or "")
     write_state(run_id, "apply")
 
     return {
         "status": "ok",
         "run_id": run_id,
         "dry_run": dry_run,
-        "operations": operations,
+        "operations": [fop.to_dict() for fop in fileops],
         "execution": results,
         "workspace": context.workspace,
-        "execution_mode": "legacy",
+        "execution_mode": "graphir",
+        "intent_fidelity": {"requested_skill": True, "executed_skill": True, "fallback_used": False},
     }
