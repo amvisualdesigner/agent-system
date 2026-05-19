@@ -106,7 +106,17 @@ class ReactBackend(BackendRenderer):
     def _render_props_jsx(data: dict) -> str:
         if not data:
             return ""
-        return " ".join(f"{k}={json.dumps(v)}" for k, v in data.items())
+        parts = []
+        for k, v in data.items():
+            if isinstance(v, str):
+                parts.append(f'{k}="{v}"')
+            elif isinstance(v, bool):
+                parts.append(f"{k}={str(v).lower()}")
+            elif v is None:
+                continue
+            else:
+                parts.append(f"{k}={{{json.dumps(v)}}}")
+        return " ".join(parts)
 
     @staticmethod
     def _inject_composition(content: str, composition: str) -> str:
@@ -156,14 +166,14 @@ def _generate_kpi_row(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
-    metrics = node.data.get("metrics", [])
-    cards = "\n".join(
-        f'      <Card key="{m}">'
-        f'\n        <div className="kpi-card">'
-        f'\n          <span className="kpi-label">{m}</span>'
-        f"\n        </div>"
-        f"\n      </Card>"
-        for m in metrics
+    map_block = (
+        '{metrics.map((m) => (\n'
+        '      <Card key={m}>\n'
+        '        <div className="kpi-card">\n'
+        '          <span className="kpi-label">{m}</span>\n'
+        '        </div>\n'
+        '      </Card>\n'
+        '    ))}'
     )
 
     lines = [
@@ -177,7 +187,7 @@ def _generate_kpi_row(
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ metrics }}) => {{",
         "  return (",
         '    <div className="kpi-row">',
-        cards,
+        map_block,
         "    </div>",
         "  );",
         "};",
@@ -192,8 +202,6 @@ def _generate_timeseries(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
-    metric = node.data.get("metric", "—")
-
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -206,7 +214,7 @@ def _generate_timeseries(
         "  return (",
         "    <Card>",
         '      <div className="timeseries-chart">',
-        f"        <h3>{metric} over time</h3>",
+        '        <h3>{metric} over time</h3>',
         "      </div>",
         "    </Card>",
         "  );",
@@ -222,42 +230,31 @@ def _generate_analytics_table(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
-    columns = node.data.get("columns", [])
-    thead = "".join(f"<th>{c}</th>" for c in columns)
-
-    table_data = node.data.get("table_data", [])
-    if table_data:
-        rows = []
-        for row in table_data:
-            if isinstance(row, dict):
-                cells = "".join(f"<td>{json.dumps(row.get(c, ''))}</td>" for c in columns)
-            elif isinstance(row, (list, tuple)):
-                cells = "".join(f"<td>{json.dumps(cell)}</td>" for cell in row)
-            else:
-                cells = ""
-            rows.append(f"<tr>{cells}</tr>")
-    else:
-        rows = ["<tr>" + "".join("<td>—</td>" for _ in columns) + "</tr>"] * 3
-    tbody = "<tbody>\n" + "\n".join(rows) + "\n</tbody>"
-
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
         "",
         f"interface {node.type}Props {{",
         "  columns: string[];",
+        "  rows: Record<string, any>[];",
         "}",
         "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ columns }}) => {{",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ columns, rows = [] }}) => {{",
         "  return (",
         "    <Card>",
         '      <table className="analytics-table">',
         "        <thead>",
         "          <tr>",
-        f"            {thead}",
+        '            {columns.map(c => <th key={c}>{c}</th>)}',
         "          </tr>",
         "        </thead>",
-        f"        {tbody}",
+        "        <tbody>",
+        '          {rows.map((row, i) => (',
+        "            <tr key={i}>",
+        '              {columns.map(c => <td key={c}>{row[c] ?? "\u2014"}</td>)}',
+        "            </tr>",
+        "          ))}",
+        "        </tbody>",
         "      </table>",
         "    </Card>",
         "  );",

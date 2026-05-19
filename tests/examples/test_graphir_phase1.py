@@ -249,8 +249,21 @@ class TestReactBackend(unittest.TestCase):
                                 path_map={"AnalyticsTable": "AnalyticsTable.tsx"})
         fileops = backend.render(graph, layout, config)
         self.assertEqual(len(fileops), 1)
-        self.assertIn("col1", fileops[0].content)
-        self.assertIn("col2", fileops[0].content)
+        self.assertIn("columns.map", fileops[0].content)
+        self.assertIn("columns: string[]", fileops[0].content)
+
+    def test_no_baked_values_in_runtime(self):
+        graph = self._build_graph()
+        layout = LayoutDerivationEngine.derive(graph)
+        backend, config = self._make_backend()
+        fileops = backend.render(graph, layout, config)
+        for fop in fileops:
+            if "Timeseries" in fop.path:
+                self.assertIn("{metric}", fop.content,
+                              "Timeseries debe usar {metric} runtime, no baked value")
+            if "KpiRow" in fop.path:
+                self.assertIn("{metrics.map", fop.content,
+                              "KpiRow debe usar {metrics.map(...)} runtime, no Python loop")
 
 
 class TestGraphIREndToEnd(unittest.TestCase):
@@ -292,8 +305,8 @@ class TestGraphIREndToEnd(unittest.TestCase):
                                 path_map={"AnalyticsTable": "AnalyticsTable.tsx"})
         fileops = backend.render(graph, layout, config)
         self.assertEqual(len(fileops), 1)
-        self.assertIn("col1", fileops[0].content)
-        self.assertIn("col2", fileops[0].content)
+        self.assertIn("columns.map", fileops[0].content)
+        self.assertIn("columns: string[]", fileops[0].content)
 
     def test_multiple_intents_produce_valid_dag(self):
         plan = IntentPlan(
