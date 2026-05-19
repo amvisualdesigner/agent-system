@@ -70,9 +70,16 @@ def agent_plan(req: PlanRequest):
                 },
             }
 
+        # Intent decomposition (optional — enables intent coverage checking)
+        from app.graphir.intent_decomposition import decompose_task
+        decomposed = decompose_task(req.task)
+        intents_data = [{"id": i.id, "capability": i.capability, "params": i.params} for i in decomposed]
+
         plan = {
             "skill_ir": skill_ir.to_dict(),
             "actions": [],
+            "task": req.task,
+            "intents": intents_data,
         }
 
         write_state(run_id, "plan")

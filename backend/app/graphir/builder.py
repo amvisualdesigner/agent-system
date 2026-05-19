@@ -3,20 +3,20 @@
 Converts semantic intent plans into validated, frozen GraphIR.
 The builder is the ONLY component that produces GraphIR from IntentPlan.
 
-Orphan resolution strategy: auto-attach (default).
-  - Orphans are attached to root with CONTAINS role.
-  - If no root exists (empty draft after adding), first intent is root.
-
-Edge roles are inferred from IntentNode type via IntentExtensionRegistry.
+Supports both Intent (new) and IntentNode (legacy/deprecated).
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 from app.graphir.intent import (
+    Intent,
     IntentExtensionRegistry,
     IntentNode,
     IntentPlan,
+    resolve_graphir_type_from_capability,
+    resolve_edge_role_from_capability,
 )
 from app.graphir.models import (
     EdgeRole,
@@ -52,7 +52,7 @@ class GraphIRBuilder:
           5. Freeze and return
 
         Args:
-            plan: Validated IntentPlan (call IntentPlan.validate first).
+            plan: Validated IntentPlan.
 
         Returns:
             Frozen GraphIR.
@@ -83,23 +83,36 @@ class GraphIRBuilder:
     def _add_intent_to_draft(
         cls,
         draft: GraphIRDraft,
-        intent: IntentNode,
+        intent: Intent | IntentNode,
         index: int,
         plan: IntentPlan,
     ) -> None:
-        graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
+        if isinstance(intent, Intent):
+            graphir_type = resolve_graphir_type_from_capability(intent.capability)
+            if graphir_type is None:
+                graphir_type = cls._legacy_resolve(intent)
+        else:
+            graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
+
         if graphir_type is None:
             raise ValueError(
                 f"GraphIRBuilder: cannot resolve graphir_type for "
-                f"intent '{intent.type}' at index {index}"
+                f"intent '{getattr(intent, 'capability', intent.type)}' at index {index}"
             )
 
         node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
+
+        metadata: dict[str, Any] = {"intent_type": intent.type if isinstance(intent, IntentNode) else ""}
+        if isinstance(intent, Intent):
+            metadata["intent_id"] = intent.id
+            metadata["intent_capability"] = intent.capability
+            metadata["intent_source"] = "contract"
+
         node = GraphIRNode(
             id=node_id,
             type=graphir_type,
             data=dict(intent.params),
-            metadata={"intent_type": intent.type},
+            metadata=metadata,
         )
         draft.add_node(node)
 
@@ -107,7 +120,11 @@ class GraphIRBuilder:
             draft.params = dict(plan.params)
             return
 
-        role_name = IntentExtensionRegistry.resolve_edge_role(intent.type)
+        if isinstance(intent, Intent):
+            role_name = resolve_edge_role_from_capability(intent.capability)
+        else:
+            role_name = IntentExtensionRegistry.resolve_edge_role(intent.type)
+
         if role_name is None:
             role = EdgeRole.CONTAINS
         else:
@@ -119,6 +136,23 @@ class GraphIRBuilder:
             target=node_id,
             role=role,
         ))
+
+    @classmethod
+    def _legacy_resolve(cls, intent: Intent) -> str | None:
+        """Fallback: try to resolve via IntentExtensionRegistry."""
+        # Map capability → IntentType name for legacy resolution
+        capability_to_type = {
+            "display.kpi_row": "KPIGROUP",
+            "display.timeseries": "CHART",
+            "display.analytics_table": "DATATABLE",
+            "display.filter_panel": "FILTERPANEL",
+            "embed.external": "EMBED",
+            "layout.page": "PAGE",
+        }
+        type_name = capability_to_type.get(intent.capability)
+        if type_name is None:
+            return None
+        return IntentExtensionRegistry.resolve_graphir_type(type_name)
 
     @staticmethod
     def _find_first_node_id(draft: GraphIRDraft) -> str:

@@ -1,30 +1,87 @@
-"""IntentPlan — semantic bridge between natural language and GraphIR.
+"""Intent — semantic intent model for the GraphIR pipeline.
 
-The AST is not eliminated. Its bridge function (natural language → structure)
-is absorbed into IntentPlan, which is the formal, typed, LLM-friendly
-semantic layer.
+Intent is the SINGLE source of truth for user intent through the entire pipeline:
+  - Created during Intent Decomposition (Gate 1)
+  - Consumed by Coverage Solve (Gate 2)
+  - Referenced by GraphIRNode.metadata (Gate 3)
+  - Revalidated in Coverage Revalidation (Gate 4)
 
-IntentPlan is produced by the LLM, consumed by the GraphIR builder,
-and discarded after GraphIR construction.
+IntentNode is preserved as a deprecated alias for backward compatibility
+during the migration. Do NOT use IntentNode in new code.
 """
 
 from __future__ import annotations
+
+import hashlib
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 
+# ── Capability taxonomy ────────────────────────────────────────────
+# Hierarchical prefixes: display.* / data.* / layout.* / interaction.*
+# This prevents registry explosion while keeping matching precise.
+
+CAPABILITY_DISPLAY_KPI     = "display.kpi_row"
+CAPABILITY_DISPLAY_TS      = "display.timeseries"
+CAPABILITY_DISPLAY_TABLE   = "display.analytics_table"
+CAPABILITY_DISPLAY_FILTER  = "display.filter_panel"
+CAPABILITY_EMBED           = "embed.external"
+CAPABILITY_DATA_EXPORT     = "data.export"
+CAPABILITY_DATA_DRILLDOWN  = "data.drilldown"
+CAPABILITY_LAYOUT_PAGE     = "layout.page"
+CAPABILITY_LAYOUT_CONTAINER = "layout.container"
+CAPABILITY_LAYOUT_GRID     = "layout.grid"
+CAPABILITY_INTERACTION_SEARCH = "interaction.search"
+CAPABILITY_INTERACTION_FORM   = "interaction.form"
+
+
+def make_intent_id(task_fragment: str, capability: str, seed: str = "") -> str:
+    """Deterministic intent ID from task + capability + optional seed.
+
+    Properties:
+      - Same inputs → same ID (reproducible across runs)
+      - Different task fragments → different IDs
+      - No dependency on ordering or LLM non-determinism
+    """
+    raw = f"{task_fragment}::{capability}::{seed}"
+    h = hashlib.sha256(raw.encode()).hexdigest()[:12]
+    return f"intent_{h}"
+
+
+@dataclass(frozen=True)
+class Intent:
+    """A single unit of user intent.
+
+    Flows UNCHANGED through the entire pipeline. Every component
+    references Intent.id — never duplicates identity.
+    """
+    id: str
+    capability: str
+    params: dict[str, Any] = field(default_factory=dict)
+    task_fragment: str = ""
+    weight: float = 1.0
+
+
+# ── Legacy IntentNode (deprecated) ─────────────────────────────────
+
+@dataclass(frozen=True)
+class IntentNode:
+    """DEPRECATED: Use Intent instead.
+
+    A single semantic intent from natural language.
+    'type' MUST be valid per IntentType + IntentExtensionRegistry.
+    """
+    type: str
+    params: dict[str, Any] = field(default_factory=dict)
+    description: str | None = None
+
+
+# ── IntentType enum (kept for backward compat) ─────────────────────
+
 class IntentType(Enum):
     """Core semantic intent types — canonical and strict.
-
-    These are the BUILT-IN types that the base system supports.
-    They are validated at parse time. If the LLM outputs a type
-    not in this enum AND not in IntentExtensionRegistry, it is
-    rejected.
-
-    The registry is extensible via IntentExtensionRegistry
-    so new types can be added without redeploying the core.
     """
     PAGE = "Page"
     KPIGROUP = "KPIGroup"
@@ -51,25 +108,26 @@ _INTENT_TO_EDGE_ROLE = {
     IntentType.EMBED: "CONTAINS",
 }
 
+_CAPABILITY_TO_GRAPHIR_TYPE = {
+    CAPABILITY_DISPLAY_KPI: "KpiRow",
+    CAPABILITY_DISPLAY_TS: "Timeseries",
+    CAPABILITY_DISPLAY_TABLE: "AnalyticsTable",
+    CAPABILITY_DISPLAY_FILTER: "FilterPanel",
+    CAPABILITY_EMBED: "Embed",
+    CAPABILITY_LAYOUT_PAGE: "Page",
+}
+
+_CAPABILITY_TO_EDGE_ROLE = {
+    CAPABILITY_DISPLAY_KPI: "PRIMARY",
+    CAPABILITY_DISPLAY_TS: "SUPPORTING",
+    CAPABILITY_DISPLAY_TABLE: "SUPPORTING",
+    CAPABILITY_DISPLAY_FILTER: "SUPPORTING",
+    CAPABILITY_EMBED: "CONTAINS",
+}
+
 
 class IntentExtensionRegistry:
-    """Dynamic registry for semantic intent types.
-
-    Allows registering new intent types at runtime without
-    modifying IntentType. Each extension defines:
-      - name: unique identifier
-      - graphir_type: the GraphIRNode.type it maps to
-      - edge_role: default EdgeRole name for edges targeting this type
-      - params_schema: optional dict for params validation
-
-    Registered extensions are validated alongside core IntentType
-    during IntentPlan validation.
-
-    This prevents:
-      - Redeploy requirement for every new component type
-      - LLM drift causing hard failures
-      - Forking IntentType for domain-specific concepts
-    """
+    """Dynamic registry for semantic intent types (kept for compat)."""
     _extensions: dict[str, dict] = {}
 
     @classmethod
@@ -118,58 +176,55 @@ class IntentExtensionRegistry:
         cls._extensions.clear()
 
 
-@dataclass(frozen=True)
-class IntentNode:
-    """A single semantic intent from natural language.
+# ── Capability resolvers (new — for Intent-based pipeline) ─────────
 
-    'type' MUST be valid per IntentType + IntentExtensionRegistry.
-    'params' contains business-level parameters ONLY.
-    No layout keys. No rendering keys. No framework references.
-    """
-    type: str
-    params: dict[str, Any] = field(default_factory=dict)
-    description: str | None = None
+def resolve_graphir_type_from_capability(capability: str) -> str | None:
+    """Map a capability string to the GraphIRNode.type it produces."""
+    return _CAPABILITY_TO_GRAPHIR_TYPE.get(capability)
 
+
+def resolve_edge_role_from_capability(capability: str) -> str | None:
+    """Map a capability string to its default EdgeRole name."""
+    return _CAPABILITY_TO_EDGE_ROLE.get(capability)
+
+
+# ── IntentPlan ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class IntentPlan:
-    """The ONLY bridge between natural language and GraphIR.
+    """The bridge between decomposed intents and GraphIR.
 
-    Produced by the LLM. Consumed by the GraphIR builder.
-    Discarded after GraphIR construction.
+    Intent is the single source of truth. IntentPlan holds the
+    decomposed intents AND the contracts selected to satisfy them.
 
-    RULES:
-    - NO layout decisions
-    - NO edges
-    - NO rendering details
-    - NO framework references (React, Qwik, etc.)
-    - ONLY semantic intent
+    Fields:
+      intents:      the decomposed user intents (source of truth)
+      contracts:    contracts selected to satisfy these intents
+      params:       aggregated params from all contracts
+      original_task: raw user input
+      coverage_report: set after coverage solve (may be None)
     """
-    contract_id: str | None
-    version: int
-    confidence: float
-    intents: list[IntentNode]
-    params: dict[str, Any]
+    intents: list[Intent]
+    contracts: list[Any] = field(default_factory=list)
+    params: dict[str, Any] = field(default_factory=dict)
+    original_task: str = ""
+    coverage_report: Any = None
 
     @classmethod
     def validate(cls, plan: "IntentPlan") -> None:
-        """Validate at construction boundary.
-
-        Rejects:
-          - unknown intent types (not in IntentType or IntentExtensionRegistry)
-        """
         if not plan.intents:
-            raise ValueError("IntentPlan must have at least one IntentNode")
-
+            raise ValueError("IntentPlan must have at least one Intent")
         for i, intent in enumerate(plan.intents):
-            if not IntentExtensionRegistry.is_valid(intent.type):
-                raise ValueError(
-                    f"IntentPlan.intents[{i}]: unknown intent type "
-                    f"'{intent.type}'. Must be in IntentType or "
-                    f"registered in IntentExtensionRegistry."
-                )
-
-        if plan.confidence < 0.0 or plan.confidence > 1.0:
-            raise ValueError(
-                f"IntentPlan.confidence must be in [0, 1], got {plan.confidence}"
-            )
+            if isinstance(intent, IntentNode):
+                if not IntentExtensionRegistry.is_valid(intent.type):
+                    raise ValueError(
+                        f"IntentPlan.intents[{i}]: unknown intent type "
+                        f"'{intent.type}'. Must be in IntentType or "
+                        f"registered in IntentExtensionRegistry."
+                    )
+            elif isinstance(intent, Intent):
+                if not resolve_graphir_type_from_capability(intent.capability):
+                    raise ValueError(
+                        f"IntentPlan.intents[{i}]: unknown capability "
+                        f"'{intent.capability}'."
+                    )

@@ -34,10 +34,12 @@ from app.graphir.models import (
     GraphIRDraft,
 )
 from app.graphir.intent import (
+    Intent,
     IntentType,
     IntentExtensionRegistry,
     IntentNode,
     IntentPlan,
+    make_intent_id,
 )
 from app.graphir.validator import GraphIRValidator
 from app.graphir.layout import LayoutDerivationEngine
@@ -416,20 +418,21 @@ class TestIntentPlan(unittest.TestCase):
 
     def test_valid_intent_plan(self):
         plan = IntentPlan(
-            contract_id="dashboard.sales_overview",
-            version=1,
-            confidence=0.9,
-            intents=[IntentNode(type="KPIGROUP", params={"metrics": ["revenue"]})],
+            intents=[Intent(
+                id=make_intent_id("test", "display.kpi_row"),
+                capability="display.kpi_row",
+                params={"metrics": ["revenue"]},
+            )],
             params={"metrics": ["revenue"]},
         )
         IntentPlan.validate(plan)  # should not raise
 
-    def test_rejects_unknown_type(self):
+    def test_rejects_unknown_capability(self):
         plan = IntentPlan(
-            contract_id=None,
-            version=1,
-            confidence=0.5,
-            intents=[IntentNode(type="RevenueChart")],
+            intents=[Intent(
+                id=make_intent_id("test", "display.revenue_chart"),
+                capability="display.revenue_chart",
+            )],
             params={},
         )
         with self.assertRaises(ValueError) as ctx:
@@ -438,9 +441,6 @@ class TestIntentPlan(unittest.TestCase):
 
     def test_rejects_empty_intents(self):
         plan = IntentPlan(
-            contract_id=None,
-            version=1,
-            confidence=0.5,
             intents=[],
             params={},
         )
@@ -448,31 +448,22 @@ class TestIntentPlan(unittest.TestCase):
             IntentPlan.validate(plan)
         self.assertIn("at least one", str(ctx.exception).lower())
 
-    def test_rejects_bad_confidence(self):
+    def test_legacy_intentnode_still_valid(self):
+        """Backward compat: IntentNode still works in IntentPlan."""
         plan = IntentPlan(
-            contract_id=None,
-            version=1,
-            confidence=2.0,
-            intents=[IntentNode(type="PAGE")],
+            intents=[IntentNode(type="KPIGROUP", params={"metrics": ["revenue"]})],
+            params={"metrics": ["revenue"]},
+        )
+        IntentPlan.validate(plan)  # should not raise
+
+    def test_legacy_intentnode_rejects_unknown(self):
+        plan = IntentPlan(
+            intents=[IntentNode(type="RevenueChart")],
             params={},
         )
         with self.assertRaises(ValueError) as ctx:
             IntentPlan.validate(plan)
-        self.assertIn("confidence", str(ctx.exception).lower())
-
-    def test_registered_extension_passes_validation(self):
-        IntentExtensionRegistry.register("CustomWidget", {
-            "graphir_type": "CustomWidget",
-            "edge_role": "SUPPORTING",
-        })
-        plan = IntentPlan(
-            contract_id=None,
-            version=1,
-            confidence=0.8,
-            intents=[IntentNode(type="CustomWidget", params={})],
-            params={},
-        )
-        IntentPlan.validate(plan)  # should not raise
+        self.assertIn("unknown", str(ctx.exception).lower())
 
 
 # ════════════════════════════════════════════════════════════

@@ -51,6 +51,11 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
                 {"type": "KpiRow", "props": {"metrics": "metrics"}},
                 {"type": "Timeseries", "props": {"metric": "timeseries_metric"}},
             ],
+            "capabilities": {
+                "KpiRow": "display.kpi_row",
+                "Timeseries": "display.timeseries",
+                "Page": "layout.page",
+            },
         },
         renderer={
             "base_path": "src/pages/dashboard/",
@@ -81,6 +86,9 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
             "slots": [
                 {"type": "AnalyticsTable", "props": {"columns": "columns", "table_data": "table_data"}},
             ],
+            "capabilities": {
+                "AnalyticsTable": "display.analytics_table",
+            },
         },
         renderer={
             "base_path": "src/pages/analytics/",

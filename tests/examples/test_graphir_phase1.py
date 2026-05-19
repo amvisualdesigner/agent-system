@@ -14,10 +14,12 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 from app.graphir.intent import (
+    Intent,
     IntentType,
     IntentExtensionRegistry,
     IntentNode,
     IntentPlan,
+    make_intent_id,
 )
 from app.graphir.models import (
     EdgeRole,
@@ -42,13 +44,12 @@ class TestGraphIRBuilder(unittest.TestCase):
 
     def _make_plan(self):
         return IntentPlan(
-            contract_id="dashboard.sales_overview",
-            version=1,
-            confidence=0.9,
             intents=[
-                IntentNode(type="PAGE", params={}),
-                IntentNode(type="KPIGROUP", params={"metrics": ["revenue", "growth"]}),
-                IntentNode(type="CHART", params={"metric": "revenue"}),
+                Intent(id=make_intent_id("page", "layout.page"), capability="layout.page", params={}),
+                Intent(id=make_intent_id("kpi", "display.kpi_row"), capability="display.kpi_row",
+                       params={"metrics": ["revenue", "growth"]}),
+                Intent(id=make_intent_id("ts", "display.timeseries"), capability="display.timeseries",
+                       params={"metric": "revenue"}),
             ],
             params={"metrics": ["revenue", "growth"]},
         )
@@ -86,21 +87,22 @@ class TestGraphIRBuilder(unittest.TestCase):
 
     def test_single_intent_produces_single_node(self):
         plan = IntentPlan(
-            contract_id="analytics.table",
-            version=1,
-            confidence=0.8,
-            intents=[IntentNode(type="DATATABLE", params={"columns": ["col1"]})],
+            intents=[Intent(
+                id=make_intent_id("table", "display.analytics_table"),
+                capability="display.analytics_table",
+                params={"columns": ["col1"]},
+            )],
             params={},
         )
         graph = GraphIRBuilder.build(plan)
         self.assertEqual(len(graph.nodes), 1)
 
-    def test_rejects_unknown_intent_type(self):
+    def test_rejects_unknown_capability(self):
         plan = IntentPlan(
-            contract_id="test",
-            version=1,
-            confidence=0.5,
-            intents=[IntentNode(type="NonExistentType", params={})],
+            intents=[Intent(
+                id=make_intent_id("test", "unknown.capability"),
+                capability="unknown.capability",
+            )],
             params={},
         )
         with self.assertRaises(ValueError):
@@ -120,13 +122,12 @@ class TestGraphIRPipeline(unittest.TestCase):
 
     def _make_plan(self):
         return IntentPlan(
-            contract_id="dashboard.sales_overview",
-            version=1,
-            confidence=0.9,
             intents=[
-                IntentNode(type="PAGE", params={}),
-                IntentNode(type="KPIGROUP", params={"metrics": ["revenue"]}),
-                IntentNode(type="CHART", params={"metric": "revenue"}),
+                Intent(id=make_intent_id("page", "layout.page"), capability="layout.page", params={}),
+                Intent(id=make_intent_id("kpi", "display.kpi_row"), capability="display.kpi_row",
+                       params={"metrics": ["revenue"]}),
+                Intent(id=make_intent_id("ts", "display.timeseries"), capability="display.timeseries",
+                       params={"metric": "revenue"}),
             ],
             params={"metrics": ["revenue"]},
         )
@@ -274,12 +275,10 @@ class TestGraphIREndToEnd(unittest.TestCase):
 
     def test_full_pipeline_to_fileops(self):
         plan = IntentPlan(
-            contract_id="dashboard.sales_overview",
-            version=1,
-            confidence=0.9,
             intents=[
-                IntentNode(type="PAGE", params={}),
-                IntentNode(type="KPIGROUP", params={"metrics": ["revenue"]}),
+                Intent(id=make_intent_id("page", "layout.page"), capability="layout.page", params={}),
+                Intent(id=make_intent_id("kpi", "display.kpi_row"), capability="display.kpi_row",
+                       params={"metrics": ["revenue"]}),
             ],
             params={"metrics": ["revenue"]},
         )
@@ -292,11 +291,11 @@ class TestGraphIREndToEnd(unittest.TestCase):
 
     def test_fileops_have_content(self):
         plan = IntentPlan(
-            contract_id="analytics.table",
-            version=1,
-            confidence=0.9,
-            intents=[IntentNode(type="DATATABLE",
-                                 params={"columns": ["col1", "col2"]})],
+            intents=[Intent(
+                id=make_intent_id("table", "display.analytics_table"),
+                capability="display.analytics_table",
+                params={"columns": ["col1", "col2"]},
+            )],
             params={},
         )
         graph, layout = GraphIRPipeline.run(plan)
@@ -310,15 +309,16 @@ class TestGraphIREndToEnd(unittest.TestCase):
 
     def test_multiple_intents_produce_valid_dag(self):
         plan = IntentPlan(
-            contract_id="dashboard.multi",
-            version=1,
-            confidence=0.8,
             intents=[
-                IntentNode(type="PAGE", params={}),
-                IntentNode(type="KPIGROUP", params={"metrics": ["a", "b"]}),
-                IntentNode(type="CHART", params={"metric": "a"}),
-                IntentNode(type="DATATABLE", params={"columns": ["x", "y"]}),
-                IntentNode(type="FILTERPANEL", params={"filters": ["date"]}),
+                Intent(id=make_intent_id("page", "layout.page"), capability="layout.page", params={}),
+                Intent(id=make_intent_id("kpi", "display.kpi_row"), capability="display.kpi_row",
+                       params={"metrics": ["a", "b"]}),
+                Intent(id=make_intent_id("ts", "display.timeseries"), capability="display.timeseries",
+                       params={"metric": "a"}),
+                Intent(id=make_intent_id("table", "display.analytics_table"), capability="display.analytics_table",
+                       params={"columns": ["x", "y"]}),
+                Intent(id=make_intent_id("filter", "display.filter_panel"), capability="display.filter_panel",
+                       params={"filters": ["date"]}),
             ],
             params={},
         )

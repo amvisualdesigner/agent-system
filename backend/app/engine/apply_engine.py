@@ -1,12 +1,12 @@
-"""Apply engine — GraphIR-only pipeline.
+"""Apply engine — GraphIR-only pipeline with intent coverage.
 
 Executes a plan against a workspace using the GraphIR pipeline:
-  SkillIR → IntentPlan → GraphIRBuilder → GraphIR
-  → LayoutDerivationEngine → GraphIRLayout
+  SkillIR → Intent Coverage Check → IntentPlan (Intent-based)
+  → GraphIRPipeline → GraphIRLayout
+  → GraphIR Coverage Revalidation
   → BackendRenderer → list[FileOp]
-
-No legacy AST path. No slot system. No feature flags.
 """
+
 import os
 import json
 import subprocess
@@ -20,7 +20,8 @@ from app.utils.path_guard import guard_within
 from app.config.settings import settings
 from app.contracts.skill_ir import SkillIR
 from app.contracts.skill_registry import get_contract
-from app.graphir.intent import IntentPlan, IntentNode, IntentExtensionRegistry
+from app.graphir.intent import Intent, IntentPlan, make_intent_id
+from app.graphir.intent_coverage import IntentCoverageValidator, IntentCoverageError
 from app.graphir.builder import GraphIRBuilder
 from app.graphir.pipeline import GraphIRPipeline
 from app.graphir.validator import GraphIRValidator
@@ -31,12 +32,26 @@ from app.graphir.utils import extract_component_name
 logger = logging.getLogger(__name__)
 
 
+def _build_intents_from_plan(plan: dict) -> list[Intent] | None:
+    """Extract Intent objects from the plan dict if present."""
+    raw = plan.get("intents") if isinstance(plan, dict) else None
+    if not raw:
+        return None
+    intents = []
+    for item in raw:
+        intents.append(Intent(
+            id=item.get("id", make_intent_id("", item.get("capability", ""))),
+            capability=item.get("capability", ""),
+            params=item.get("params", {}),
+            task_fragment=item.get("task_fragment", ""),
+        ))
+    return intents
+
+
 def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
-    """Convert a SkillIR into an IntentPlan.
+    """Convert a SkillIR into an IntentPlan (legacy path, IntentNode-based).
 
     Temporary adapter until the LLM produces IntentPlan directly.
-    Resolves the contract, validates params, and creates IntentNodes
-    from the contract's slot definitions.
     """
     contract = get_contract(skill_ir.contract_id, skill_ir.version)
     if contract is None:
@@ -67,6 +82,7 @@ def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
     resolved_params = params
 
     slots = contract.ast_template.get("slots", [])
+    from app.graphir.intent import IntentNode
     intents: list[IntentNode] = []
 
     file_count = len(contract.renderer.get("files", []))
@@ -79,11 +95,26 @@ def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
         intents.append(IntentNode(type=intent_type, params=props))
 
     return IntentPlan(
-        contract_id=skill_ir.contract_id,
-        version=skill_ir.version,
-        confidence=skill_ir.confidence,
         intents=intents,
         params=resolved_params,
+    )
+
+
+def _intents_to_intent_plan(intents: list[Intent], skill_ir: SkillIR) -> IntentPlan:
+    """Convert decomposed Intent objects into an IntentPlan (new path).
+
+    This is the intent-first path: intents → contract match.
+    """
+    contract = get_contract(skill_ir.contract_id, skill_ir.version)
+    if contract is None:
+        raise ValueError(f"Contract not found: {skill_ir.contract_id}@{skill_ir.version}")
+
+    params = dict(skill_ir.params)
+
+    return IntentPlan(
+        intents=intents,
+        contracts=[contract] if contract else [],
+        params=params,
     )
 
 
@@ -147,11 +178,14 @@ def _write_artifacts(artifacts_dir: str, plan: dict, operations: list, results: 
 def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
     """Execute a plan against a workspace using the GraphIR pipeline.
 
-    Pipeline:
-      1. Convert SkillIR → IntentPlan (temporary adapter)
-      2. GraphIRPipeline: IntentPlan → (GraphIR, GraphIRLayout)
-      3. BackendRenderer: (GraphIR, GraphIRLayout, config) → FileOps
-      4. validate_fileops → apply → git commit
+    Pipeline (intent-first path):
+      1. Extract intents from plan (if present)
+      2. Convert SkillIR → IntentPlan
+      3. Run coverage check (Gate 2)
+      4. GraphIRPipeline: IntentPlan → (GraphIR, GraphIRLayout)
+      5. Coverage revalidation (Gate 4)
+      6. BackendRenderer → FileOps
+      7. Apply → git commit
     """
     guard_within(context.workspace, settings.RUNS_DIR)
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
@@ -166,19 +200,69 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     if contract is None:
         return {"status": "rejected", "reason": f"contract_not_found:{skill_ir_obj.contract_id}"}
 
-    # Step 1: SkillIR → IntentPlan
-    try:
-        intent_plan = _skill_ir_to_intent_plan(skill_ir_obj)
-    except ValueError as e:
-        return {"status": "rejected", "reason": str(e)}
+    # ── Step 1: Check for decomposed intents (intent-first path) ──
+    intents = _build_intents_from_plan(plan)
+    coverage_report = None
 
-    # Step 2: GraphIR pipeline (build + layout + validate)
+    if intents:
+        # Intent-first path: build IntentPlan from decomposed intents
+        try:
+            intent_plan = _intents_to_intent_plan(intents, skill_ir_obj)
+        except ValueError as e:
+            return {"status": "rejected", "reason": str(e)}
+
+        # Gate 2: Intent Coverage Check
+        try:
+            validator = IntentCoverageValidator()
+            coverage_report = validator.check_coverage(
+                intents,
+                [contract] if contract else [],
+            )
+            if coverage_report.coverage < 1.0:
+                return {
+                    "status": "rejected",
+                    "reason": "intent_coverage_failure",
+                    "coverage": {
+                        "coverage": coverage_report.coverage,
+                        "missing_intents": [
+                            {"capability": m.capability, "reason": m.reason}
+                            for m in coverage_report.missing
+                        ],
+                    },
+                }
+            coverage_report = coverage_report.with_gate("coverage", True)
+        except Exception as e:
+            return {"status": "rejected", "reason": f"coverage_error:{e}"}
+    else:
+        # Legacy path: _skill_ir_to_intent_plan (IntentNode-based)
+        try:
+            intent_plan = _skill_ir_to_intent_plan(skill_ir_obj)
+        except ValueError as e:
+            return {"status": "rejected", "reason": str(e)}
+
+    # ── Step 2: GraphIR pipeline (build + layout + validate) ──
     try:
         graph, graph_layout = GraphIRPipeline.run(intent_plan)
     except ValueError as e:
         return {"status": "rejected", "reason": f"graphir:{e}"}
 
-    # Step 3: BackendRenderer (ReactBackend)
+    # ── Step 3: Gate 4 — Coverage revalidation (intent-first only) ──
+    if intents and coverage_report is not None:
+        try:
+            coverage_report = IntentCoverageValidator.revalidate(graph, coverage_report, intents)
+            if not coverage_report.is_complete:
+                return {
+                    "status": "rejected",
+                    "reason": "intent_revalidation_failure",
+                    "coverage": {
+                        "coverage": coverage_report.coverage,
+                        "uncovered_intents": coverage_report.uncovered_intents,
+                    },
+                }
+        except IntentCoverageError as e:
+            return {"status": "rejected", "reason": str(e)}
+
+    # ── Step 4: BackendRenderer (ReactBackend) ──
     files = contract.renderer.get("files", [])
     base_path = contract.renderer.get("base_path", "")
     path_map = {}
@@ -212,6 +296,30 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         return {"status": "rejected", "reason": "git_commit_failed", "error": err}
 
     _write_artifacts(context.artifacts, plan, [fop.to_dict() for fop in fileops], results, diff or "")
+
+    # ── Step 5: Build intent_fidelity ──
+    if coverage_report is not None:
+        intent_fidelity = {
+            "coverage": coverage_report.coverage,
+            "total_intents": coverage_report.total_intents,
+            "covered_intents": coverage_report.covered_intents,
+            "matched_intents": [m.capability for m in coverage_report.matched],
+            "missing_intents": [{"capability": m.capability, "reason": m.reason} for m in coverage_report.missing],
+            "uncovered_intents": coverage_report.uncovered_intents,
+            "fallback_used": coverage_report.fallback_used,
+        }
+    else:
+        # Legacy path — minimal fidelity info
+        intent_fidelity = {
+            "coverage": 1.0,
+            "total_intents": len(intent_plan.intents),
+            "covered_intents": len(intent_plan.intents),
+            "matched_intents": [getattr(i, 'capability', getattr(i, 'type', 'unknown')) for i in intent_plan.intents],
+            "missing_intents": [],
+            "uncovered_intents": [],
+            "fallback_used": False,
+        }
+
     write_state(run_id, "apply")
 
     return {
@@ -222,5 +330,5 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "execution": results,
         "workspace": context.workspace,
         "execution_mode": "graphir",
-        "intent_fidelity": {"requested_skill": True, "executed_skill": True, "fallback_used": False},
+        "intent_fidelity": intent_fidelity,
     }
