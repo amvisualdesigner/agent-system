@@ -18,11 +18,14 @@ from app.graphir.intent import (
     Intent,
     IntentPlan,
     IntentNode,
+    CapabilityDef,
     make_intent_id,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
     is_capability_metadata,
+    CAPABILITY_REGISTRY,
 )
+from app.graphir.param_extractor import ParamExtractor
 from app.graphir.intent_decomposition import decompose_task
 from app.graphir.intent_coverage import (
     CapabilityMatch,
@@ -825,6 +828,427 @@ class TestIntentSerializationPipeline(unittest.TestCase):
         # Must still produce valid confidence from task_fragments
         self.assertGreater(report.decomposition_confidence, 0.0,
                            "fallback recomputation should work with preserved fragments")
+
+
+# ════════════════════════════════════════════════════════════
+# 11. Param extraction (Intent Param Schema System)
+# ════════════════════════════════════════════════════════════
+
+class TestParamExtractor(unittest.TestCase):
+    """Test the ParamExtractor — rule-based structured param extraction."""
+
+    def setUp(self):
+        self.extractor = ParamExtractor()
+
+    def _make_intent(self, capability: str) -> Intent:
+        return Intent(id="test", capability=capability)
+
+    def _contract_for(self, capability: str) -> CapabilityDef | None:
+        return CAPABILITY_REGISTRY.get(capability)
+
+    # ── Metrics extraction ──
+
+    def test_extract_metrics_basic(self):
+        intent = self._make_intent("presentation.kpi_row")
+        contract = self._contract_for("presentation.kpi_row")
+        result = self.extractor.extract("show revenue and growth", intent, contract)
+        self.assertIn("metrics", result)
+        self.assertIn("revenue", result["metrics"])
+        self.assertIn("growth", result["metrics"])
+
+    def test_extract_metrics_empty(self):
+        intent = self._make_intent("presentation.kpi_row")
+        contract = self._contract_for("presentation.kpi_row")
+        result = self.extractor.extract("hello world", intent, contract)
+        self.assertEqual(result, {})
+
+    def test_extract_metrics_does_not_include_kpi(self):
+        """'kpi' is a capability keyword, not a business metric name."""
+        intent = self._make_intent("presentation.kpi_row")
+        contract = self._contract_for("presentation.kpi_row")
+        result = self.extractor.extract("show kpi", intent, contract)
+        if "metrics" in result:
+            self.assertNotIn("kpi", result["metrics"])
+
+    # ── Dimensions extraction ──
+
+    def test_extract_dimensions_by(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("revenue by region", intent, contract)
+        self.assertEqual(result.get("dimensions"), ["region"])
+
+    def test_extract_dimensions_multi_and(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("sales by region and product", intent, contract)
+        self.assertEqual(result.get("dimensions"), ["region", "product"])
+
+    def test_extract_dimensions_stops_at_transition_word(self):
+        """'by region showing revenue' should capture only 'region'."""
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("sales by region showing revenue", intent, contract)
+        self.assertEqual(result.get("dimensions"), ["region"])
+
+    def test_extract_dimensions_no_match(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("hello world", intent, contract)
+        self.assertNotIn("dimensions", result)
+
+    # ── Top K extraction ──
+
+    def test_extract_top_k(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("top 10 products", intent, contract)
+        self.assertEqual(result.get("top_k"), 10)
+
+    def test_extract_no_top_k(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("all products", intent, contract)
+        self.assertNotIn("top_k", result)
+
+    # ── Time granularity ──
+
+    def test_extract_time_granularity_monthly(self):
+        intent = self._make_intent("presentation.timeseries")
+        contract = self._contract_for("presentation.timeseries")
+        result = self.extractor.extract("monthly revenue", intent, contract)
+        self.assertEqual(result.get("time_granularity"), "monthly")
+
+    def test_extract_time_granularity_daily(self):
+        intent = self._make_intent("presentation.timeseries")
+        contract = self._contract_for("presentation.timeseries")
+        result = self.extractor.extract("daily sales trend", intent, contract)
+        self.assertEqual(result.get("time_granularity"), "daily")
+
+    # ── Columns extraction (deduplicated dimensions + metrics) ──
+
+    def test_extract_columns_deduplicates(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("revenue by revenue", intent, contract)
+        if "columns" in result:
+            self.assertEqual(len(result["columns"]), 1)
+
+    def test_extract_columns(self):
+        intent = self._make_intent("presentation.table")
+        contract = self._contract_for("presentation.table")
+        result = self.extractor.extract("sales by region showing revenue", intent, contract)
+        if "columns" in result:
+            self.assertIn("region", result["columns"])
+            self.assertIn("revenue", result["columns"])
+            self.assertIn("sales", result["columns"])
+
+    # ── No schema capabilities ──
+
+    def test_no_param_schema_returns_empty(self):
+        """Layout and style capabilities have no param_schema → empty result."""
+        intent = self._make_intent("layout.page")
+        contract = self._contract_for("layout.page")
+        result = self.extractor.extract("dashboard", intent, contract)
+        self.assertEqual(result, {})
+
+    # ── Group by extraction ──
+
+    def test_extract_group_by(self):
+        intent = self._make_intent("presentation.timeseries")
+        contract = self._contract_for("presentation.timeseries")
+        result = self.extractor.extract("revenue over time by product", intent, contract)
+        self.assertEqual(result.get("group_by"), ["product"])
+
+    # ── Domain capabilities ──
+
+    def test_extract_domain_sales(self):
+        intent = self._make_intent("domain.sales")
+        contract = self._contract_for("domain.sales")
+        result = self.extractor.extract("sales dashboard with revenue and growth by region", intent, contract)
+        self.assertIn("metrics", result)
+        self.assertIn("revenue", result["metrics"])
+        self.assertIn("growth", result["metrics"])
+        self.assertEqual(result.get("dimensions"), ["region"])
+
+
+class TestParamExtractorIntegration(unittest.TestCase):
+    """Param extraction integrated with decompose_task()."""
+
+    def test_enrich_params_kpi(self):
+        """KPI intent should get metrics from task."""
+        result = decompose_task("show revenue and growth")
+        kpi = [i for i in result.intents if i.capability == "presentation.kpi_row"]
+        if kpi:
+            self.assertIn("revenue", kpi[0].params.get("metrics", []))
+            self.assertIn("growth", kpi[0].params.get("metrics", []))
+
+    def test_enrich_params_table_with_dimensions(self):
+        """Table intent should get dimensions and metrics."""
+        result = decompose_task("sales table by region showing revenue")
+        table = [i for i in result.intents if i.capability == "presentation.table"]
+        if table:
+            self.assertIn("revenue", table[0].params.get("metrics", []))
+            self.assertEqual(table[0].params.get("dimensions"), ["region"])
+
+    def test_enrich_params_timeseries_with_time(self):
+        """Timeseries intent should get time_granularity."""
+        result = decompose_task("monthly revenue trend by product")
+        ts = [i for i in result.intents if i.capability == "presentation.timeseries"]
+        if ts:
+            self.assertEqual(ts[0].params.get("time_granularity"), "monthly")
+            self.assertEqual(ts[0].params.get("group_by"), ["product"])
+
+    def test_enrich_params_domain_sales(self):
+        """Domain.sales intent should get metrics and dimensions."""
+        result = decompose_task("sales dashboard with revenue and growth by region")
+        ds = [i for i in result.intents if i.capability == "domain.sales"]
+        if ds:
+            self.assertIn("revenue", ds[0].params.get("metrics", []))
+
+    def test_enrich_params_preserves_existing(self):
+        """Existing params (from keyword hints) should not be overwritten."""
+        result = decompose_task("revenue by region")
+        # All intents with params should preserve existing structure
+        for intent in result.intents:
+            self.assertIsInstance(intent.params, dict)
+
+    # ── Cross-intent leakage tests ──
+
+    def test_enrich_params_no_cross_kpi_to_table(self):
+        """KPI row should NOT get columns, dimensions, or top_k."""
+        result = decompose_task("sales dashboard with revenue and growth by region, top 10")
+        kpi = [i for i in result.intents if i.capability == "presentation.kpi_row"]
+        if kpi:
+            self.assertNotIn("columns", kpi[0].params)
+            self.assertNotIn("dimensions", kpi[0].params)
+            self.assertNotIn("top_k", kpi[0].params)
+
+    def test_enrich_params_no_cross_table_to_timeseries(self):
+        """Timeseries should NOT get columns or top_k (table-only fields)."""
+        result = decompose_task("sales dashboard with revenue and growth by region, top 10")
+        ts = [i for i in result.intents if i.capability == "presentation.timeseries"]
+        if ts:
+            self.assertNotIn("columns", ts[0].params)
+            self.assertNotIn("top_k", ts[0].params)
+
+    def test_enrich_params_kpi_only_metrics(self):
+        """KPI row should ONLY have metrics in its params."""
+        result = decompose_task("revenue and growth by region")
+        kpi = [i for i in result.intents if i.capability == "presentation.kpi_row"]
+        if kpi:
+            for key in kpi[0].params:
+                self.assertEqual(key, "metrics", f"KPI row got unexpected param: {key}")
+
+    def test_enrich_params_table_gets_top_k_but_kpi_does_not(self):
+        """top_k only appears in table/chart, NOT in kpi_row/timeseries."""
+        result = decompose_task("top 10 products by revenue")
+        for intent in result.intents:
+            if intent.capability in ("presentation.kpi_row", "presentation.timeseries"):
+                self.assertNotIn("top_k", intent.params,
+                                 f"{intent.capability} should not get top_k")
+
+
+class TestParamSchemaRegistry(unittest.TestCase):
+    """Every capability that needs param_schema has one defined."""
+
+    def test_presentation_caps_have_param_schema(self):
+        caps = ["presentation.kpi_row", "presentation.timeseries",
+                "presentation.table", "presentation.filter_panel",
+                "presentation.chart.bar", "presentation.metric_card",
+                "presentation.embed"]
+        for c in caps:
+            self.assertIsNotNone(CAPABILITY_REGISTRY[c].param_schema,
+                                 f"{c} missing param_schema")
+
+    def test_domain_caps_have_param_schema(self):
+        for c in ["domain.analytics", "domain.sales"]:
+            self.assertIsNotNone(CAPABILITY_REGISTRY[c].param_schema,
+                                 f"{c} missing param_schema")
+
+    def test_data_caps_have_param_schema(self):
+        for c in ["data.export", "data.drilldown"]:
+            self.assertIsNotNone(CAPABILITY_REGISTRY[c].param_schema,
+                                 f"{c} missing param_schema")
+
+    def test_interaction_caps_have_param_schema(self):
+        for c in ["interaction.search", "interaction.form"]:
+            self.assertIsNotNone(CAPABILITY_REGISTRY[c].param_schema,
+                                 f"{c} missing param_schema")
+
+    def test_layout_caps_no_param_schema(self):
+        for c in ["layout.page", "layout.grid", "layout.container"]:
+            self.assertIsNone(CAPABILITY_REGISTRY[c].param_schema,
+                              f"{c} should NOT have param_schema")
+
+    def test_style_caps_no_param_schema(self):
+        for c in ["style.theme.light", "style.theme.dark",
+                   "style.theme.enterprise", "style.card.elevated"]:
+            self.assertIsNone(CAPABILITY_REGISTRY[c].param_schema,
+                              f"{c} should NOT have param_schema")
+
+
+# ════════════════════════════════════════════════════════════
+# 12. Consumed token tracking (ParamExtractor ownership)
+# ════════════════════════════════════════════════════════════
+
+class TestConsumedTokens(unittest.TestCase):
+    """ParamExtractor tracks consumed tokens for structure layer ownership."""
+
+    def setUp(self):
+        from app.graphir.param_extractor import ParamExtractor
+        self.extractor = ParamExtractor()
+
+    def _contract(self, cap):
+        return CAPABILITY_REGISTRY[cap]
+
+    def test_consumed_metrics(self):
+        intent = Intent(id="t", capability="presentation.kpi_row")
+        self.extractor.extract("revenue and growth", intent, self._contract("presentation.kpi_row"))
+        self.assertIn("revenue", self.extractor.consumed_tokens)
+        self.assertIn("growth", self.extractor.consumed_tokens)
+
+    def test_consumed_top_k_uses_signal_token(self):
+        intent = Intent(id="t", capability="presentation.table")
+        self.extractor.extract("top 10 products", intent, self._contract("presentation.table"))
+        self.assertIn("top_rank_signal", self.extractor.consumed_tokens)
+        # "top" is also consumed to prevent structure layer reinterpretation
+        self.assertIn("top", self.extractor.consumed_tokens)
+
+    def test_consumed_dimensions(self):
+        intent = Intent(id="t", capability="presentation.table")
+        self.extractor.extract("revenue by region", intent, self._contract("presentation.table"))
+        self.assertIn("region", self.extractor.consumed_tokens)
+
+    def test_consumed_tokens_normalized(self):
+        intent = Intent(id="t", capability="presentation.kpi_row")
+        self.extractor.extract("Revenue and Growth", intent, self._contract("presentation.kpi_row"))
+        self.assertIn("revenue", self.extractor.consumed_tokens)
+        self.assertIn("growth", self.extractor.consumed_tokens)
+
+    def test_consumed_no_cross_contamination(self):
+        intent1 = Intent(id="a", capability="presentation.kpi_row")
+        intent2 = Intent(id="b", capability="presentation.table")
+        self.extractor.extract("revenue by region", intent1, self._contract("presentation.kpi_row"))
+        self.extractor.extract("top 10 revenue by region", intent2, self._contract("presentation.table"))
+        self.assertIn("top_rank_signal", self.extractor.consumed_tokens)
+        self.assertIn("top", self.extractor.consumed_tokens)
+        self.assertIn("region", self.extractor.consumed_tokens)
+
+
+# ════════════════════════════════════════════════════════════
+# 13. Structure annotation (intent_structure.py)
+# ════════════════════════════════════════════════════════════
+
+class TestStructureAnnotation(unittest.TestCase):
+    """Post-hoc structural enrichment for intents."""
+
+    def _kpi_intent(self) -> Intent:
+        return Intent(id="kpi", capability="presentation.kpi_row", task_fragment="kpi")
+
+    def _ts_intent(self) -> Intent:
+        return Intent(id="ts", capability="presentation.timeseries", task_fragment="timeseries")
+
+    def _table_intent(self) -> Intent:
+        return Intent(id="tbl", capability="presentation.table", task_fragment="table")
+
+    def _layout_intent(self) -> Intent:
+        return Intent(id="page", capability="layout.page", task_fragment="page")
+
+    # ── Layout roles ──
+
+    def test_kpi_layout_role_primary(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], [])
+        self.assertEqual(result[0].structure_context["layout_role"], "primary")
+
+    def test_ts_layout_role_primary(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._ts_intent()], [])
+        self.assertEqual(result[0].structure_context["layout_role"], "primary")
+
+    def test_table_layout_role_secondary(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._table_intent()], [])
+        self.assertEqual(result[0].structure_context["layout_role"], "secondary")
+
+    def test_layout_page_ignored(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._layout_intent()], [])
+        self.assertIsNone(result[0].structure_context)
+
+    # ── Position hints (UI conventions) ──
+
+    def test_kpi_position_above(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], [])
+        self.assertEqual(result[0].structure_context["position_hint"], "above")
+
+    def test_ts_position_inline(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._ts_intent()], [])
+        self.assertEqual(result[0].structure_context["position_hint"], "inline")
+
+    def test_table_position_below(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._table_intent()], [])
+        self.assertEqual(result[0].structure_context["position_hint"], "below")
+
+    # ── Modifiers (residual tokens only) ──
+
+    def test_modifier_top_from_unresolved(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], ["top"])
+        self.assertIn("top", result[0].structure_context.get("modifiers", []))
+
+    def test_modifier_top_consumed_not_reinterpreted(self):
+        """top consumed by ParamExtractor → structure should NOT see it."""
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._table_intent()], ["top"], consumed_tokens={"top_rank_signal", "top"})
+        self.assertNotIn("modifiers", result[0].structure_context)
+
+    def test_modifier_consumed_filtered_by_normalization(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], ["Top"], consumed_tokens={"top_rank_signal", "top"})
+        self.assertNotIn("modifiers", result[0].structure_context)
+
+    # ── Relations ──
+
+    def test_relation_kpi_to_timeseries(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent(), self._ts_intent()], [])
+        kpi = [i for i in result if i.capability == "presentation.kpi_row"][0]
+        self.assertIn("relation_hints", kpi.structure_context)
+        self.assertEqual(kpi.structure_context["relation_hints"][0]["type"], "feeds_into")
+
+    def test_relation_ts_to_table(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._ts_intent(), self._table_intent()], [])
+        ts = [i for i in result if i.capability == "presentation.timeseries"][0]
+        self.assertIn("relation_hints", ts.structure_context)
+        self.assertEqual(ts.structure_context["relation_hints"][0]["type"], "summarizes_into")
+
+    def test_no_relation_when_target_missing(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], [])
+        self.assertNotIn("relation_hints", result[0].structure_context)
+
+    # ── Noise ignored ──
+
+    def test_noise_tokens_ignored(self):
+        from app.graphir.intent_structure import annotate_structure
+        result = annotate_structure([self._kpi_intent()], ["products", "price", "tax"])
+        self.assertNotIn("modifiers", result[0].structure_context)
+
+    # ── Serialization roundtrip ──
+
+    def test_structure_context_serialization_roundtrip(self):
+        original = Intent(
+            id="r1", capability="presentation.kpi_row",
+            structure_context={"layout_role": "primary", "position_hint": "above"},
+        )
+        restored = Intent.from_dict(original.to_dict())
+        self.assertEqual(original.structure_context, restored.structure_context)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.graphir.intent import Intent, make_intent_id
+from app.graphir.intent import Intent, make_intent_id, CAPABILITY_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +294,52 @@ def decompose_task(task: str, use_llm: bool = False, use_embedding: bool | None 
         except Exception as e:
             logger.warning("Embedding enhancement failed (non-fatal): %s", e)
 
+    # Param extraction (enrich intents with structured params from task)
+    consumed_tokens: set[str] = set()
+    try:
+        result, consumed_tokens = _enrich_params(result)
+    except Exception as e:
+        logger.warning("Param extraction failed (non-fatal): %s", e)
+
+    # Structural annotation (post-hoc, uses residual tokens not consumed by params)
+    from app.graphir.intent_structure import annotate_structure
+    try:
+        result.intents = annotate_structure(result.intents, result.unresolved, consumed_tokens)
+    except Exception as e:
+        logger.warning("Structure annotation failed (non-fatal): %s", e)
+
     return result
+
+
+def _enrich_params(result: DecompositionResult) -> tuple[DecompositionResult, set[str]]:
+    """Enrich each intent's params based on its param_schema.
+
+    Uses ParamExtractor (rule-based) to extract metrics, dimensions,
+    top_k, etc. from the original task string.
+
+    Returns:
+        (updated DecompositionResult, consumed_tokens from ParamExtractor)
+    """
+    from app.graphir.param_extractor import ParamExtractor
+    extractor = ParamExtractor()
+    new_intents: list[Intent] = []
+    for intent in result.intents:
+        contract = CAPABILITY_REGISTRY.get(intent.capability)
+        if contract and contract.param_schema:
+            extracted = extractor.extract(result.original_task, intent, contract)
+            if extracted:
+                new_intents.append(Intent(
+                    id=intent.id,
+                    capability=intent.capability,
+                    params={**intent.params, **extracted},
+                    task_fragment=intent.task_fragment,
+                    weight=intent.weight,
+                    source=intent.source,
+                ))
+                continue
+        new_intents.append(intent)
+    result.intents = new_intents
+    return result, extractor.consumed_tokens
 
 
 def _llm_decompose(task: str) -> DecompositionResult:

@@ -46,6 +46,7 @@ class CapabilityDef:
     parent: str | None = None
     description: str = ""
     is_soft: bool = False
+    param_schema: dict | None = None
 
 
 CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
@@ -55,42 +56,71 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
         axes=CapabilityAxis(presentation="kpi_row"),
         category=CapabilityCategory.SEMANTIC,
         description="Row of KPI metric cards showing key numbers",
+        param_schema={
+            "metrics": {"type": "list[str]", "required": False},
+        },
     ),
     "presentation.timeseries": CapabilityDef(
         id="presentation.timeseries",
         axes=CapabilityAxis(presentation="timeseries"),
         category=CapabilityCategory.SEMANTIC,
         description="Time series chart showing trends over time",
+        param_schema={
+            "metrics": {"type": "list[str]", "required": False},
+            "time_granularity": {"type": "string", "required": False},
+            "group_by": {"type": "list[str]", "required": False},
+        },
     ),
     "presentation.table": CapabilityDef(
         id="presentation.table",
         axes=CapabilityAxis(presentation="table"),
         category=CapabilityCategory.SEMANTIC,
         description="Data table with columns and rows (domain-agnostic)",
+        param_schema={
+            "columns": {"type": "list[str]", "required": False},
+            "metrics": {"type": "list[str]", "required": False},
+            "dimensions": {"type": "list[str]", "required": False},
+            "top_k": {"type": "int", "required": False},
+        },
     ),
     "presentation.filter_panel": CapabilityDef(
         id="presentation.filter_panel",
         axes=CapabilityAxis(presentation="filter_panel"),
         category=CapabilityCategory.SEMANTIC,
         description="Filter panel for refining data displayed",
+        param_schema={
+            "filters": {"type": "list[str]", "required": False},
+        },
     ),
     "presentation.chart.bar": CapabilityDef(
         id="presentation.chart.bar",
         axes=CapabilityAxis(presentation="chart.bar"),
         category=CapabilityCategory.SEMANTIC,
         description="Bar chart for categorical comparison",
+        param_schema={
+            "metrics": {"type": "list[str]", "required": False},
+            "categories": {"type": "list[str]", "required": False},
+            "top_k": {"type": "int", "required": False},
+        },
     ),
     "presentation.metric_card": CapabilityDef(
         id="presentation.metric_card",
         axes=CapabilityAxis(presentation="metric_card"),
         category=CapabilityCategory.SEMANTIC,
         description="Single metric card with value and label",
+        param_schema={
+            "metric": {"type": "string", "required": False},
+        },
     ),
     "presentation.embed": CapabilityDef(
         id="presentation.embed",
         axes=CapabilityAxis(presentation="embed"),
         category=CapabilityCategory.SEMANTIC,
         description="Embedded external content (iframe/widget)",
+        param_schema={
+            "src": {"type": "string", "required": False},
+            "title": {"type": "string", "required": False},
+        },
     ),
     # ── Domain (semantic context, enriches presentation) ──
     "domain.analytics": CapabilityDef(
@@ -98,12 +128,20 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
         axes=CapabilityAxis(domain="analytics"),
         category=CapabilityCategory.SEMANTIC,
         description="Analytics domain context — KPIs, metrics, business data",
+        param_schema={
+            "metrics": {"type": "list[str]", "required": False},
+            "dimensions": {"type": "list[str]", "required": False},
+        },
     ),
     "domain.sales": CapabilityDef(
         id="domain.sales",
         axes=CapabilityAxis(domain="sales"),
         category=CapabilityCategory.SEMANTIC,
         description="Sales domain context — revenue, growth, deals",
+        param_schema={
+            "metrics": {"type": "list[str]", "required": False},
+            "dimensions": {"type": "list[str]", "required": False},
+        },
     ),
     # ── Data (actions on data) ──
     "data.export": CapabilityDef(
@@ -111,12 +149,18 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
         axes=CapabilityAxis(presentation="export"),
         category=CapabilityCategory.SEMANTIC,
         description="Export data to external format (CSV, PDF)",
+        param_schema={
+            "format": {"type": "string", "required": False},
+        },
     ),
     "data.drilldown": CapabilityDef(
         id="data.drilldown",
         axes=CapabilityAxis(domain="drilldown"),
         category=CapabilityCategory.SEMANTIC,
         description="Drill down into data details",
+        param_schema={
+            "target": {"type": "string", "required": False},
+        },
     ),
     # ── Interaction ──
     "interaction.search": CapabilityDef(
@@ -124,12 +168,18 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
         axes=CapabilityAxis(presentation="search"),
         category=CapabilityCategory.SEMANTIC,
         description="Search/lookup functionality",
+        param_schema={
+            "placeholder": {"type": "string", "required": False},
+        },
     ),
     "interaction.form": CapabilityDef(
         id="interaction.form",
         axes=CapabilityAxis(presentation="form"),
         category=CapabilityCategory.SEMANTIC,
         description="Form with input fields and submission",
+        param_schema={
+            "fields": {"type": "list[dict]", "required": False},
+        },
     ),
     # ── Layout (structural — soft) ──
     "layout.page": CapabilityDef(
@@ -290,6 +340,7 @@ class Intent:
     task_fragment: str = ""
     weight: float = 1.0
     source: str = "keyword"
+    structure_context: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -299,6 +350,7 @@ class Intent:
             "task_fragment": self.task_fragment,
             "weight": self.weight,
             "source": self.source,
+            "structure_context": self.structure_context,
         }
 
     @classmethod
@@ -310,6 +362,7 @@ class Intent:
             task_fragment=d.get("task_fragment", ""),
             weight=d.get("weight", 1.0),
             source=d.get("source", "keyword"),
+            structure_context=d.get("structure_context"),
         )
 
 
