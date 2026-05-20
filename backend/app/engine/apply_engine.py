@@ -151,14 +151,14 @@ def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | Non
     return diff, None
 
 
-def _write_artifacts(artifacts_dir: str, plan: dict, operations: list, results: list, diff: str):
+def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str):
     with open(f"{artifacts_dir}/plan.json", "w") as f:
         json.dump(plan, f, indent=2)
     with open(f"{artifacts_dir}/execution.json", "w") as f:
-        json.dump({"operations": operations, "results": results}, f, indent=2)
+        json.dump({"run_id": run_id, "operations": operations, "results": results}, f, indent=2)
     with open(f"{artifacts_dir}/summary.json", "w") as f:
         json.dump({
-            "run_id": plan.get("run_id", ""),
+            "run_id": run_id,
             "status": "ok",
             "files_created": [r.get("path") for r in results if r.get("status") == "created"],
             "execution_mode": "graphir",
@@ -300,7 +300,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     if err:
         return {"status": "rejected", "reason": "git_commit_failed", "error": err}
 
-    _write_artifacts(context.artifacts, plan, [fop.to_dict() for fop in fileops], results, diff or "")
+    _write_artifacts(context.artifacts, run_id, plan, [fop.to_dict() for fop in fileops], results, diff or "")
 
     # ── Step 5: Build intent_fidelity ──
     if coverage_report is not None:

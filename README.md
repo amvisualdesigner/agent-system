@@ -424,10 +424,14 @@ El corazon del pipeline es `graphir/models.py`:
 
 `graphir/intent.py` define:
 
-- **`Intent`**: unidad semantica de intencion (id, capability, params, task_fragment, weight)
+- **`Intent`**: unidad semantica de intencion (id, capability, params, task_fragment, weight, structure_context)
   - `id`: SHA256 determinista de `task_fragment + capability + seed` — reproducible entre runs
   - `capability`: taxonomia jerarquica (`display.kpi_row`, `display.timeseries`, `display.analytics_table`, `layout.page`, etc.)
+  - `structure_context`: anotacion post-hoc con layout_role, position_hint, modifiers, relation_hints
+  - `to_dict()` / `from_dict()`: serializacion completa que preserva task_fragment y structure_context
   - Flujo intacto por todo el pipeline: descomposicion → coverage → GraphIR → revalidacion
+- **`CapabilityDef.param_schema`**: schema declarativo de parametros extraibles por capability
+  - Habilita `ParamExtractor` para extraer metrics, dimensions, top_k, time_granularity, group_by, columns
 - **`IntentPlan`**: lista de `Intent[]` + contratos seleccionados + `CoverageReport`
   - Ya no se construye desde contract → slots. Ahora desde intents → contract match
 - **`IntentNode`**: DEPRECATED (reemplazado por `Intent` desde Phase 2)
@@ -453,6 +457,36 @@ Cada contrato declara que capabilities satisface en `ast_template.capabilities`:
     "Page": "layout.page",
 }
 ```
+
+### Param Extraction (rule-based, deterministic)
+
+`graphir/param_extractor.py` define `ParamExtractor` con 6 extractores:
+
+| Extractor | Parametro | Ejemplo |
+|-----------|-----------|---------|
+| `metrics` | `metrics: list[str]` | `"revenue and growth"` → `["revenue", "growth"]` |
+| `dimensions` | `dimensions: list[str]` | `"by region"` → `["region"]` |
+| `top_k` | `top_k: int` | `"top 10"` → `10` |
+| `time_granularity` | `time_granularity: str` | `"monthly"` → `"monthly"` |
+| `group_by` | `group_by: list[str]` | `"group by product"` → `["product"]` |
+| `columns` | `columns: list[str]` | `["revenue", "region"]` desde metrics+dimensions combinados |
+
+La extraccion respeta **intent-awareness** via `_CAPABILITY_PARAM_FOCUS`: cada capability solo extrae los campos de su `param_schema`. Ej: `kpi_row` solo extrae `metrics`, no `dimensions` ni `top_k`.
+
+**Token ownership**: ParamExtractor registra en `consumed_tokens` cada token que consume, para que la capa de estructura (post-params) no reinterprete lo ya usado. Los tokens se normalizan (`lower().strip()`) y se pasan como diferencia de conjuntos.
+
+### Structure Annotation (post-hoc, residual tokens)
+
+`graphir/intent_structure.py` define `annotate_structure(intents, unresolved, consumed_tokens)`:
+
+| Anotacion | Que hace | Ejemplo |
+|-----------|----------|---------|
+| `layout_role` | `primary` / `secondary` por capability | `kpi_row` → `"primary"`, `table` → `"secondary"` |
+| `position_hint` | Convencion UI (no texto) | `kpi_row` → `"above"`, `timeseries` → `"inline"`, `table` → `"below"` |
+| `modifiers` | Residual tokens en `_STRENGTHENERS` no consumidos | `"top"` → `["top"]` (si ParamExtractor no lo consumio) |
+| `relation_hints` | Relaciones entre capabilities co-presentes | KPI → timeseries: `feeds_into`, timeseries → table: `summarizes_into` |
+
+**Token ownership principle**: Structure solo ve `unresolved - consumed_tokens`. Si `ParamExtractor` consumio `"top"` para `top_k`, structure NO lo reinterpreta como modificador. Esto evita doble interpretacion.
 
 ### `intent_fidelity` real (ya no hardcoded)
 
@@ -892,9 +926,11 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   │   ├── contracts/         # SkillIR model + SkillContract registry
 │   │   ├── graphir/           # GraphIR pipeline core
 │   │   │   ├── models.py      # GraphIRNode, GraphIREdge, EdgeRole, GraphIR, etc.
-│   │   │   ├── intent.py      # Intent, IntentType, IntentPlan — Intent es fuente unica
+│   │   │   ├── intent.py      # Intent, IntentType, IntentPlan, CapabilityDef.param_schema — Intent es fuente unica
 │   │   │   ├── intent_decomposition.py  # decompose_task() — task → list[Intent] 🆕
 │   │   │   ├── intent_coverage.py       # CoverageValidator, CoverageReport 🆕
+│   │   │   ├── param_extractor.py       # ParamExtractor: 6 rule-based extractors, consumed_tokens 🆕
+│   │   │   ├── intent_structure.py      # annotate_structure(): layout_roles, position_hints, modifiers, relation_hints 🆕
 │   │   │   ├── builder.py     # GraphIRBuilder: IntentPlan → GraphIRDraft → freeze()
 │   │   │   ├── layout.py      # LayoutDerivationEngine: EdgeRole → LayoutConstraint
 │   │   │   ├── validator.py   # GraphIRValidator: DAG, root, edges, role purity
@@ -967,13 +1003,13 @@ cd /opt/agent-system
 python3 -m pytest tests/ -v
 ```
 
-**149 tests** actuales:
+**218 tests** actuales:
 
 | Archivo | Tests | Que cubre |
 |---------|-------|-----------|
 | `test_graphir.py` | 68 | Modelos, EdgeRole, LayoutDerivationEngine, validator, debug, tipos, extensiones |
 | `test_graphir_phase1.py` | 23 | Builder, pipeline, ReactBackend (4 generators), E2E |
-| `test_graphir_phase2.py` | 58 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first, Phase 1 ontology (soft intents, semantic_entropy, decomposition_confidence, capability registry) |
+| `test_graphir_phase2.py` | 127 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first, Phase 1 ontology (soft intents, semantic_entropy, decomposition_confidence, capability registry), serialization roundtrip, ParamExtractor (rule-based extractors, consumed tokens, intent-aware routing), CapabilityDef.param_schema registry, structure annotation (layout_roles, position_hints, modifiers, relation_hints, token ownership) |
 
 Sin dependencias externas, sin mock, sin LLM. Tests puramente deterministicos.
 
@@ -1036,6 +1072,11 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] `intent_fidelity` real: coverage + matched + missing + uncovered + fallback data
 - [x] Fix snapshot con `os.fsync` (reemplazo de tmp+rename que fallaba en overlay)
 - [x] 149 tests deterministicos
+- [x] CapabilityDef.param_schema: schema declarativo de parametros extraibles por capability
+- [x] ParamExtractor: 6 rule-based extractors con intent-awareness y token ownership
+- [x] Structure annotation: layout_roles, position_hints, modifiers, relation_hints
+- [x] Token ownership: ParamExtractor consume primero, Structure solo ve residuales
+- [x] 218 tests deterministicos
 
 ### Proximo
 
