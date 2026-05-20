@@ -264,9 +264,284 @@ def _generate_analytics_table(
     return "\n".join(lines)
 
 
+# ── Additional Component Generators ────────────────────────────────────
+
+
+def _generate_filter_panel(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React, { useState } from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  filters?: string[];",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ filters = [] }}) => {{",
+        "  const [active, setActive] = useState<string[]>([]);",
+        "  return (",
+        "    <Card>",
+        '      <div className="filter-panel">',
+        '        {filters.map(f => (',
+        '          <label key={f} className="filter-chip">',
+        "            <input",
+        '              type="checkbox"',
+        '              checked={active.includes(f)}',
+        "              onChange={() => setActive(prev =>",
+        "                prev.includes(f)",
+        "                  ? prev.filter(x => x !== f)",
+        "                  : [...prev, f]",
+        "              )}",
+        "            />",
+        "            {f}",
+        "          </label>",
+        "        ))}",
+        "      </div>",
+        "    </Card>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_bar_chart(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  categories?: string[];",
+        "  values?: number[];",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ categories = [], values = [] }}) => {{",
+        "  const max = Math.max(...values, 1);",
+        "  return (",
+        "    <Card>",
+        '      <div className="bar-chart">',
+        "        {categories.map((cat, i) => (",
+        "          <div key={cat} className=\"bar-item\">",
+        '            <span className="bar-label">{cat}</span>',
+        '            <div className="bar-track">',
+        '              <div className="bar-fill" style={{width: `${(values[i] ?? 0) / max * 100}%`}} />',
+        "            </div>",
+        "          </div>",
+        "        ))}",
+        "      </div>",
+        "    </Card>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_metric_card(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  value?: string | number;",
+        "  label?: string;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ value, label }}) => {{",
+        "  return (",
+        "    <Card>",
+        '      <div className="metric-card">',
+        '        {value !== undefined && <span className="metric-value">{value}</span>}',
+        '        {label && <span className="metric-label">{label}</span>}',
+        "      </div>",
+        "    </Card>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_embed(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React from 'react';",
+        "",
+        f"interface {node.type}Props {{",
+        "  src?: string;",
+        "  title?: string;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ src, title }}) => {{",
+        "  return (",
+        "    <div className=\"embed-container\">",
+        '      {src ? <iframe src={src} title={title ?? "embedded content"} /> : null}',
+        "    </div>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_search_bar(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React, { useState } from 'react';",
+        "",
+        f"interface {node.type}Props {{",
+        "  placeholder?: string;",
+        "  onSearch?: (query: string) => void;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ placeholder = 'Search...', onSearch }}) => {{",
+        "  const [query, setQuery] = useState('');",
+        "  return (",
+        '    <div className="search-bar">',
+        "      <input",
+        '        type="text"',
+        "        value={query}",
+        "        onChange={e => setQuery(e.target.value)}",
+        '        placeholder={placeholder}',
+        "      />",
+        "      <button onClick={() => onSearch?.(query)}>Search</button>",
+        "    </div>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_form(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React, { useState } from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  fields?: { label: string; key: string; type: string }[];",
+        "  onSubmit?: (data: Record<string, string>) => void;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ fields = [], onSubmit }}) => {{",
+        "  const [data, setData] = useState<Record<string, string>>({});",
+        "  return (",
+        "    <Card>",
+        '      <form className="form-component" onSubmit={e => { e.preventDefault(); onSubmit?.(data); }}>',
+        "        {fields.map(f => (",
+        "          <label key={f.key}>",
+        "            {f.label}",
+        "            <input",
+        "              type={f.type ?? 'text'}",
+        "              value={data[f.key] ?? ''}",
+        "              onChange={e => setData(prev => ({...prev, [f.key]: e.target.value}))}",
+        "            />",
+        "          </label>",
+        "        ))}",
+        '        <button type="submit">Submit</button>',
+        "      </form>",
+        "    </Card>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_export_button(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React from 'react';",
+        "",
+        f"interface {node.type}Props {{",
+        "  format?: string;",
+        "  onExport?: () => void;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ format = 'csv', onExport }}) => {{",
+        "  return (",
+        '    <div className="export-button">',
+        "      <button onClick={onExport}>Export as {format.toUpperCase()}</button>",
+        "    </div>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _generate_drilldown(
+    node: GraphIRNode,
+    constraints: list[LayoutConstraint],
+    backend: ReactBackend,
+    config: BackendConfig,
+) -> str:
+    lines = [
+        "import React from 'react';",
+        "",
+        f"interface {node.type}Props {{",
+        "  label?: string;",
+        "  target?: string;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ label = 'View details', target }}) => {{",
+        "  return (",
+        "    <a",
+        '      className="drilldown-link"',
+        "      href={target ?? '#'}",
+        '      onClick={e => { if (!target) e.preventDefault(); }}',
+        "    >",
+        "      {label} →",
+        "    </a>",
+        "  );",
+        "};",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 # ── Register built-in generators ───────────────────────────────────────
 
 ReactBackend.register("Page", _generate_page)
 ReactBackend.register("KpiRow", _generate_kpi_row)
 ReactBackend.register("Timeseries", _generate_timeseries)
 ReactBackend.register("AnalyticsTable", _generate_analytics_table)
+ReactBackend.register("FilterPanel", _generate_filter_panel)
+ReactBackend.register("BarChart", _generate_bar_chart)
+ReactBackend.register("MetricCard", _generate_metric_card)
+ReactBackend.register("Embed", _generate_embed)
+ReactBackend.register("SearchBar", _generate_search_bar)
+ReactBackend.register("Form", _generate_form)
+ReactBackend.register("ExportButton", _generate_export_button)
+ReactBackend.register("Drilldown", _generate_drilldown)

@@ -55,6 +55,28 @@ from app.graphir.validator import GraphIRValidator
 
 from app.graphir.layout import LayoutDerivationEngine
 
+from app.graphir.intent_embedding import (
+    EmbeddingIndex,
+    cosine_similarity,
+    compute_embedding,
+    rank_capabilities,
+    get_embedding_index,
+    reset_embedding_index,
+)
+
+from app.graphir.intent_governance import (
+    OrphanReport,
+    UnresolvedReport,
+    UnresolvedTracker,
+    CoOccurrenceReport,
+    CoOccurrenceTracker,
+    ContractCoverageReport,
+    ContractCoverageGapDetector,
+    EmbeddingFPTracker,
+    FPReport,
+    detect_orphans,
+)
+
 from app.graphir.debug import visualize
 
 from app.graphir.builder import GraphIRBuilder, build_from_plan
@@ -90,4 +112,20 @@ __all__ = [
     "build_from_plan",
     "GraphIRPipeline",
     "run_pipeline",
+    "EmbeddingIndex",
+    "cosine_similarity",
+    "compute_embedding",
+    "rank_capabilities",
+    "get_embedding_index",
+    "reset_embedding_index",
+    "OrphanReport",
+    "UnresolvedReport",
+    "UnresolvedTracker",
+    "CoOccurrenceReport",
+    "CoOccurrenceTracker",
+    "ContractCoverageReport",
+    "ContractCoverageGapDetector",
+    "EmbeddingFPTracker",
+    "FPReport",
+    "detect_orphans",
 ]

@@ -967,13 +967,13 @@ cd /opt/agent-system
 python3 -m pytest tests/ -v
 ```
 
-**125 tests** actuales:
+**149 tests** actuales:
 
 | Archivo | Tests | Que cubre |
 |---------|-------|-----------|
 | `test_graphir.py` | 68 | Modelos, EdgeRole, LayoutDerivationEngine, validator, debug, tipos, extensiones |
 | `test_graphir_phase1.py` | 23 | Builder, pipeline, ReactBackend (4 generators), E2E |
-| `test_graphir_phase2.py` | 34 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first |
+| `test_graphir_phase2.py` | 58 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first, Phase 1 ontology (soft intents, semantic_entropy, decomposition_confidence, capability registry) |
 
 Sin dependencias externas, sin mock, sin LLM. Tests puramente deterministicos.
 
@@ -1035,7 +1035,7 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] Provenance en GraphIRNode.metadata: `intent_id`, `intent_capability`, `intent_source`
 - [x] `intent_fidelity` real: coverage + matched + missing + uncovered + fallback data
 - [x] Fix snapshot con `os.fsync` (reemplazo de tmp+rename que fallaba en overlay)
-- [x] 125 tests deterministicos
+- [x] 149 tests deterministicos
 
 ### Proximo
 

@@ -15,6 +15,8 @@ from app.graphir.intent import (
     IntentExtensionRegistry,
     IntentNode,
     IntentPlan,
+    is_graphir_node_capability,
+    is_capability_metadata,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
 )
@@ -87,6 +89,22 @@ class GraphIRBuilder:
         index: int,
         plan: IntentPlan,
     ) -> None:
+        # ── Handle metadata-only intents (domain, style, layout.grid/container) ──
+        if isinstance(intent, Intent) and is_capability_metadata(intent.capability):
+            cap = intent.capability
+            if cap.startswith("domain."):
+                domains = draft.params.setdefault("domains", [])
+                domain_name = cap.split(".", 1)[1]
+                if domain_name not in domains:
+                    domains.append(domain_name)
+            elif cap.startswith("style."):
+                theme_key = cap.replace("style.", "").replace(".", "_")
+                draft.params.setdefault("style_hints", {})[theme_key] = True
+            elif cap.startswith("layout."):
+                layout_key = cap.replace("layout.", "")
+                draft.params.setdefault("layout_hints", {})[layout_key] = True
+            return
+
         if isinstance(intent, Intent):
             graphir_type = resolve_graphir_type_from_capability(intent.capability)
             if graphir_type is None:
@@ -95,9 +113,10 @@ class GraphIRBuilder:
             graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
 
         if graphir_type is None:
+            label = intent.capability if isinstance(intent, Intent) else intent.type
             raise ValueError(
                 f"GraphIRBuilder: cannot resolve graphir_type for "
-                f"intent '{getattr(intent, 'capability', intent.type)}' at index {index}"
+                f"intent '{label}' at index {index}"
             )
 
         node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
@@ -106,7 +125,7 @@ class GraphIRBuilder:
         if isinstance(intent, Intent):
             metadata["intent_id"] = intent.id
             metadata["intent_capability"] = intent.capability
-            metadata["intent_source"] = "contract"
+            metadata["intent_source"] = intent.source
 
         node = GraphIRNode(
             id=node_id,

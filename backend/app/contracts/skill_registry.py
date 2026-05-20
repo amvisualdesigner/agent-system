@@ -52,9 +52,10 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
                 {"type": "Timeseries", "props": {"metric": "timeseries_metric"}},
             ],
             "capabilities": {
-                "KpiRow": "display.kpi_row",
-                "Timeseries": "display.timeseries",
+                "KpiRow": "presentation.kpi_row",
+                "Timeseries": "presentation.timeseries",
                 "Page": "layout.page",
+                "Domain": "domain.sales",
             },
         },
         renderer={
@@ -87,13 +88,244 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
                 {"type": "AnalyticsTable", "props": {"columns": "columns", "table_data": "table_data"}},
             ],
             "capabilities": {
-                "AnalyticsTable": "display.analytics_table",
+                "AnalyticsTable": "presentation.table",
             },
         },
         renderer={
             "base_path": "src/pages/analytics/",
             "files": [
                 {"path": "AnalyticsTable.tsx", "template": "analytics_table.j2"},
+            ],
+        },
+    ),
+    ("analytics.filter", 1): SkillContract(
+        contract_id="analytics.filter",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "FilterPanel", "props": {"filters": "filters"}},
+            ],
+            "capabilities": {
+                "FilterPanel": "presentation.filter_panel",
+            },
+        },
+        renderer={
+            "base_path": "src/pages/analytics/",
+            "files": [
+                {"path": "components/FilterPanel.tsx", "template": "filter_panel.j2"},
+            ],
+        },
+    ),
+    ("analytics.chart_bar", 1): SkillContract(
+        contract_id="analytics.chart_bar",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": ["categories", "values"],
+            "properties": {
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "BarChart", "props": {"categories": "categories", "values": "values"}},
+            ],
+            "capabilities": {
+                "BarChart": "presentation.chart.bar",
+            },
+        },
+        renderer={
+            "base_path": "src/pages/analytics/",
+            "files": [
+                {"path": "components/BarChart.tsx", "template": "bar_chart.j2"},
+            ],
+        },
+    ),
+    ("analytics.metric_card", 1): SkillContract(
+        contract_id="analytics.metric_card",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "value": {"type": ["string", "number"]},
+                "label": {"type": "string"},
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "MetricCard", "props": {"value": "value", "label": "label"}},
+            ],
+            "capabilities": {
+                "MetricCard": "presentation.metric_card",
+            },
+        },
+        renderer={
+            "base_path": "src/pages/analytics/",
+            "files": [
+                {"path": "components/MetricCard.tsx", "template": "metric_card.j2"},
+            ],
+        },
+    ),
+    ("embed.external", 1): SkillContract(
+        contract_id="embed.external",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": ["src"],
+            "properties": {
+                "src": {"type": "string"},
+                "title": {"type": "string"},
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "Embed", "props": {"src": "src", "title": "title"}},
+            ],
+            "capabilities": {
+                "Embed": "presentation.embed",
+            },
+        },
+        renderer={
+            "base_path": "src/pages/embed/",
+            "files": [
+                {"path": "Embed.tsx", "template": "embed.j2"},
+            ],
+        },
+    ),
+    ("interaction.search", 1): SkillContract(
+        contract_id="interaction.search",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "placeholder": {"type": "string"},
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "SearchBar", "props": {"placeholder": "placeholder"}},
+            ],
+            "capabilities": {
+                "SearchBar": "interaction.search",
+            },
+        },
+        renderer={
+            "base_path": "src/components/",
+            "files": [
+                {"path": "SearchBar.tsx", "template": "search_bar.j2"},
+            ],
+        },
+    ),
+    ("interaction.form", 1): SkillContract(
+        contract_id="interaction.form",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "key": {"type": "string"},
+                            "type": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "Form", "props": {"fields": "fields"}},
+            ],
+            "capabilities": {
+                "Form": "interaction.form",
+            },
+        },
+        renderer={
+            "base_path": "src/components/",
+            "files": [
+                {"path": "Form.tsx", "template": "form.j2"},
+            ],
+        },
+    ),
+    ("data.export", 1): SkillContract(
+        contract_id="data.export",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "format": {"type": "string"},
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "ExportButton", "props": {"format": "format"}},
+            ],
+            "capabilities": {
+                "ExportButton": "data.export",
+            },
+        },
+        renderer={
+            "base_path": "src/components/",
+            "files": [
+                {"path": "ExportButton.tsx", "template": "export_button.j2"},
+            ],
+        },
+    ),
+    ("data.drilldown", 1): SkillContract(
+        contract_id="data.drilldown",
+        version=1,
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {
+                "label": {"type": "string"},
+                "target": {"type": "string"},
+            },
+        },
+        ast_template={
+            "layout": None,
+            "slots": [
+                {"type": "Drilldown", "props": {"label": "label", "target": "target"}},
+            ],
+            "capabilities": {
+                "Drilldown": "data.drilldown",
+            },
+        },
+        renderer={
+            "base_path": "src/components/",
+            "files": [
+                {"path": "Drilldown.tsx", "template": "drilldown.j2"},
             ],
         },
     ),

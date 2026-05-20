@@ -20,7 +20,7 @@ from app.utils.path_guard import guard_within
 from app.config.settings import settings
 from app.contracts.skill_ir import SkillIR
 from app.contracts.skill_registry import get_contract
-from app.graphir.intent import Intent, IntentPlan, make_intent_id
+from app.graphir.intent import Intent, IntentPlan, is_capability_metadata
 from app.graphir.intent_coverage import IntentCoverageValidator, IntentCoverageError
 from app.graphir.builder import GraphIRBuilder
 from app.graphir.pipeline import GraphIRPipeline
@@ -37,15 +37,7 @@ def _build_intents_from_plan(plan: dict) -> list[Intent] | None:
     raw = plan.get("intents") if isinstance(plan, dict) else None
     if not raw:
         return None
-    intents = []
-    for item in raw:
-        intents.append(Intent(
-            id=item.get("id", make_intent_id("", item.get("capability", ""))),
-            capability=item.get("capability", ""),
-            params=item.get("params", {}),
-            task_fragment=item.get("task_fragment", ""),
-        ))
-    return intents
+    return [Intent.from_dict(item) for item in raw]
 
 
 def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
@@ -204,6 +196,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     intents = _build_intents_from_plan(plan)
     coverage_report = None
 
+    # Extract decomposition metadata from plan (produced by agent_plan.py)
+    dec_info = plan.get("decomposition", {}) if isinstance(plan, dict) else {}
+
     if intents:
         # Intent-first path: build IntentPlan from decomposed intents
         try:
@@ -211,19 +206,29 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         except ValueError as e:
             return {"status": "rejected", "reason": str(e)}
 
-        # Gate 2: Intent Coverage Check
+        # Gate 2: Intent Coverage Check (uses ALL contracts, not just the selected one)
         try:
+            from app.contracts.skill_registry import SKILL_CONTRACTS
+            all_contracts = list(SKILL_CONTRACTS.values())
             validator = IntentCoverageValidator()
             coverage_report = validator.check_coverage(
                 intents,
-                [contract] if contract else [],
+                all_contracts,
+                task=plan.get("task", ""),
+                detected_intents=dec_info.get("detected"),
+                inferred_intents=dec_info.get("inferred"),
+                unresolved_fragments=dec_info.get("unresolved"),
+                decomposition_confidence=dec_info.get("decomposition_confidence"),
             )
-            if coverage_report.coverage < 1.0:
+            # Use hard_coverage for gate: soft intents (layout.*, style.*)
+            # never block the pipeline, they only degrade fidelity
+            if coverage_report.hard_coverage < 1.0:
                 return {
                     "status": "rejected",
                     "reason": "intent_coverage_failure",
                     "coverage": {
                         "coverage": coverage_report.coverage,
+                        "hard_coverage": coverage_report.hard_coverage,
                         "missing_intents": [
                             {"capability": m.capability, "reason": m.reason}
                             for m in coverage_report.missing
@@ -301,10 +306,20 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     if coverage_report is not None:
         intent_fidelity = {
             "coverage": coverage_report.coverage,
+            "hard_coverage": coverage_report.hard_coverage,
             "total_intents": coverage_report.total_intents,
             "covered_intents": coverage_report.covered_intents,
+            "decomposition_confidence": coverage_report.decomposition_confidence,
+            "semantic_entropy": coverage_report.semantic_entropy,
+            "detected_intents": coverage_report.detected_intents,
+            "inferred_intents": coverage_report.inferred_intents,
+            "unresolved_fragments": coverage_report.unresolved_fragments,
             "matched_intents": [m.capability for m in coverage_report.matched],
-            "missing_intents": [{"capability": m.capability, "reason": m.reason} for m in coverage_report.missing],
+            "missing_intents": [
+            {"capability": m.capability, "reason": m.reason}
+            for m in coverage_report.missing
+            if not is_capability_metadata(m.capability)
+        ],
             "uncovered_intents": coverage_report.uncovered_intents,
             "fallback_used": coverage_report.fallback_used,
         }
@@ -312,8 +327,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Legacy path — minimal fidelity info
         intent_fidelity = {
             "coverage": 1.0,
+            "hard_coverage": 1.0,
             "total_intents": len(intent_plan.intents),
             "covered_intents": len(intent_plan.intents),
+            "decomposition_confidence": 1.0,
+            "semantic_entropy": 0.0,
+            "detected_intents": [],
+            "inferred_intents": [],
+            "unresolved_fragments": [],
             "matched_intents": [getattr(i, 'capability', getattr(i, 'type', 'unknown')) for i in intent_plan.intents],
             "missing_intents": [],
             "uncovered_intents": [],

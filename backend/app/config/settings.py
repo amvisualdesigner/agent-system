@@ -46,5 +46,17 @@ class Settings:
     LLM_MODEL: str = optional_env("LLM_MODEL", "Qwen/Qwen2.5-Coder-3B-Instruct")
     LLM_API_KEY: str = optional_env("LLM_API_KEY", "")
 
+    # Embedding config
+    EMBEDDING_ENABLED: bool = optional_env("EMBEDDING_ENABLED", "false").lower() in ("true", "1", "yes")
+    EMBEDDING_BASE_URL: str = optional_env("EMBEDDING_BASE_URL", "")
+    EMBEDDING_MODEL: str = optional_env("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    EMBEDDING_TOP_K: int = optional_int("EMBEDDING_TOP_K", 3)
+    EMBEDDING_THRESHOLD: float = float(optional_env("EMBEDDING_THRESHOLD", "0.3"))
+    EMBEDDING_TIMEOUT: int = optional_int("EMBEDDING_TIMEOUT", 15)
+
+    @property
+    def resolved_embedding_base_url(self) -> str:
+        return self.EMBEDDING_BASE_URL or self.LLM_BASE_URL
+
 
 settings = Settings()
