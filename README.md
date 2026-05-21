@@ -387,13 +387,15 @@ Task (lenguaje natural)
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│  7. ReactBackend (determinista, stateless)            │
+│  7. Renderer (determinista, stateless)                │
+│     constraint_graph = True → ConstraintGraph cache   │
+│       Indexer → Matcher → CRL → Resolver →            │
+│       SPLITAnalyzer → ContentGenerator →              │
+│       StructuralDiffEngine → FileOpExecutor           │
+│                                                       │
+│     constraint_graph = False → ReactBackend (legacy)  │
 │     backend.render(graph, layout, config):            │
 │       - Por cada nodo: type → ComponentGenerator      │
-│       - KpiRow: {metrics.map(...)} runtime            │
-│       - Timeseries: {metric} runtime prop              │
-│       - AnalyticsTable: {columns.map(...)} runtime    │
-│       - Props como runtime expressions                │
 │     → list[FileOp]                                    │
 └──────────────────┬───────────────────────────────────┘
                    │
@@ -765,6 +767,7 @@ Esto reconstruye las imagenes que tienen cambios y reinicia solo los containers 
 ```bash
 cd /opt/agent-system
 docker compose down
+docker system prune -a
 ```
 
 Para detener todo y liberar puertos. Los datos persisten (worktrees, artifacts, snapshots).
@@ -926,17 +929,23 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   │   ├── contracts/         # SkillIR model + SkillContract registry
 │   │   ├── graphir/           # GraphIR pipeline core
 │   │   │   ├── models.py      # GraphIRNode, GraphIREdge, EdgeRole, GraphIR, etc.
-│   │   │   ├── intent.py      # Intent, IntentType, IntentPlan, CapabilityDef.param_schema — Intent es fuente unica
-│   │   │   ├── intent_decomposition.py  # decompose_task() — task → list[Intent] 🆕
-│   │   │   ├── intent_coverage.py       # CoverageValidator, CoverageReport 🆕
-│   │   │   ├── param_extractor.py       # ParamExtractor: 6 rule-based extractors, consumed_tokens 🆕
-│   │   │   ├── intent_structure.py      # annotate_structure(): layout_roles, position_hints, modifiers, relation_hints 🆕
+│   │   │   ├── intent.py      # Intent, IntentType, IntentPlan, CapabilityDef.param_schema
+│   │   │   ├── intent_decomposition.py  # decompose_task() — task → list[Intent]
+│   │   │   ├── intent_coverage.py       # CoverageValidator, CoverageReport
+│   │   │   ├── param_extractor.py       # ParamExtractor: 6 rule-based extractors
+│   │   │   ├── intent_structure.py      # annotate_structure(): layout_roles, position_hints, etc.
 │   │   │   ├── builder.py     # GraphIRBuilder: IntentPlan → GraphIRDraft → freeze()
 │   │   │   ├── layout.py      # LayoutDerivationEngine: EdgeRole → LayoutConstraint
 │   │   │   ├── validator.py   # GraphIRValidator: DAG, root, edges, role purity
 │   │   │   ├── pipeline.py    # GraphIRPipeline: builder + layout + validate
 │   │   │   ├── debug.py       # visualize() — introspection tool
 │   │   │   ├── utils.py       # extract_component_name, validate_fileops
+│   │   │   ├── constraint/    # Constraint Graph layer (Phases 0-5)
+│   │   │   │   ├── models.py, identity.py, matcher.py, resolver.py
+│   │   │   │   ├── memory.py, crl.py, split_analyzer.py
+│   │   │   │   ├── diff.py, generator.py, executor.py, renderer.py
+│   │   │   │   ├── indexer.py, boundary.py, context.py
+│   │   │   │   ├── validation.py, __init__.py, IDENTITY_SPEC.md
 │   │   │   └── backends/      # Backend renderers
 │   │   │       ├── base.py        # BackendRenderer ABC + BackendConfig
 │   │   │       └── react_backend.py  # ReactBackend: 4 generators registrados
@@ -964,10 +973,10 @@ sudo bash /opt/agent-system/scripts/backup_system.sh
   │   └── server.mjs             # Static file server
   │
   ├── tests/
-  │   └── examples/
-  │       ├── test_graphir.py          # 68 tests — Phase 0: modelos GraphIR
-  │       ├── test_graphir_phase1.py   # 23 tests — builder, pipeline, renderer, e2e
-  │       └── test_graphir_phase2.py   # 34 tests — Intent, decomposition, coverage
+  │   ├── unit/                  # Pure Core tests (zero IO)
+  │   ├── integration/           # State Layer tests (REPO_ROOT)
+  │   ├── legacy_contract/       # Baseline behavioral snapshot
+  │   └── helpers.py             # FakeWorkspace, build_sample_graph
   │
   ├── docker-compose.yml         # vLLM + backend + orchestrator + UI
   ├── scripts/                   # Utilidades
@@ -1000,16 +1009,16 @@ git branch | grep -v "master" | xargs git branch -D (OJO, elimina todas las rama
 
 ```bash
 cd /opt/agent-system
-python3 -m pytest tests/ -v
+REPO_ROOT=/tmp python3 -m pytest tests/unit/ tests/integration/ -v
 ```
 
-**218 tests** actuales:
+**486 tests**:
 
-| Archivo | Tests | Que cubre |
-|---------|-------|-----------|
-| `test_graphir.py` | 68 | Modelos, EdgeRole, LayoutDerivationEngine, validator, debug, tipos, extensiones |
-| `test_graphir_phase1.py` | 23 | Builder, pipeline, ReactBackend (4 generators), E2E |
-| `test_graphir_phase2.py` | 127 | Intent model, decomposition, coverage, revalidation, IntentPlan, E2E intent-first, Phase 1 ontology (soft intents, semantic_entropy, decomposition_confidence, capability registry), serialization roundtrip, ParamExtractor (rule-based extractors, consumed tokens, intent-aware routing), CapabilityDef.param_schema registry, structure annotation (layout_roles, position_hints, modifiers, relation_hints, token ownership) |
+| Suite | Tests | Que cubre |
+|-------|-------|-----------|
+| `tests/unit/` | 256 | GraphIR, Intent, decomposition, coverage, ParamExtractor, structure, Constraint Graph complete (identity, matcher, resolver, memory, CRL, SPLIT, diff, shadow, boundary) |
+| `tests/integration/` | 104 | Pipeline completo, memory persistence, CRL reconciliation, SPLIT redirect, line-range merge |
+| `tests/legacy_contract/` | 126 | Behavioral contract snapshot (baseline CREATE-only, requiere REPO_ROOT) |
 
 Sin dependencias externas, sin mock, sin LLM. Tests puramente deterministicos.
 
@@ -1077,12 +1086,31 @@ La estrategia del sistema para mitigar limitaciones del modelo no es pedirle mas
 - [x] Structure annotation: layout_roles, position_hints, modifiers, relation_hints
 - [x] Token ownership: ParamExtractor consume primero, Structure solo ve residuales
 - [x] 218 tests deterministicos
+- [x] **Phase 3: Conflict Resolution Layer** — CRL reconcilia memory vs filesystem (STALE_MAPPING, MISSING_TARGET, DUPLICATE_BINDING)
+- [x] **Phase 4: SPLITAnalyzer** — detecta archivos sobrecargados (≥N componentes) y genera SplitDirectives
+- [x] **Phase 5: Structural Diff Engine** — reemplazo quirúrgico por ComponentBoundary + FileOpExecutor con atomic write
+- [x] Shadow mode: `constraint_graph_shadow=True`, corre ambos pipelines, compara outputs
+- [x] 486 tests deterministicos
+
+### Feature Flags actuales
+
+```python
+FEATURE_FLAGS = {
+    "constraint_graph": False,            # Pipeline Constraint Graph completo
+    "constraint_graph_mvp": False,        # Modo heurístico (deprecated)
+    "constraint_graph_line_range": False, # Diff quirúrgico (Phase 5)
+    "constraint_graph_shadow": True,      # Shadow mode: run both, compare
+}
+```
+
+Rollout: shadow warnings ≈ 0 → `constraint_graph_line_range=True` → `constraint_graph=True` → cleanup legacy ReactBackend.
 
 ### Proximo
 
 - [ ] GraphIR Strict Mode: UI AST framework-agnostic (UIAST) entre GraphIR y backends
 - [ ] Validador no_string_ui: detecta `<`, `.map(`, `</` en strings Python
 - [ ] ReactBackend refactor: generators producen `UIComponent` en vez de strings
+- [ ] Eliminar legacy ReactBackend tras activación de constraint_graph
 - [ ] Contrato `settings.form`: formularios SettingsForm + UserProfileForm
 
 ### Context & Retrieval

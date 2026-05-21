@@ -4,7 +4,8 @@ Executes a plan against a workspace using the GraphIR pipeline:
   SkillIR → Intent Coverage Check → IntentPlan (Intent-based)
   → GraphIRPipeline → GraphIRLayout
   → GraphIR Coverage Revalidation
-  → BackendRenderer → list[FileOp]
+  → ConstraintGraph (if enabled) or BackendRenderer
+  → list[FileOp]
 """
 
 import os
@@ -18,6 +19,7 @@ from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
 from app.utils.path_guard import guard_within
 from app.config.settings import settings
+from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
 from app.contracts.skill_registry import get_contract
 from app.graphir.intent import Intent, IntentPlan, is_capability_metadata
@@ -28,6 +30,9 @@ from app.graphir.validator import GraphIRValidator
 from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops
 from app.graphir.utils import extract_component_name
+from app.graphir.boundary import enforce_graph_purity
+from app.graphir.constraint import ExecutionContext
+from app.graphir.constraint.validation import shadow_compare
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +172,63 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
         f.write(diff)
 
 
+def _run_constraint_pipeline(
+    graph, graph_layout, exec_ctx, backend_config,
+    *, shadow_mode: bool = False,
+) -> tuple[list, dict, dict, dict]:
+    """Run the full Constraint Graph pipeline.
+
+    When *shadow_mode* is True, all persistence is blocked
+    (memory.save, audit logs, metrics, caches, semantic state).
+
+    Returns:
+        (fileops, decisions, identities, split_plan)
+    """
+    from app.graphir.constraint.indexer import RepositoryIndexer
+    from app.graphir.constraint.matcher import IntentFileMatcher
+    from app.graphir.constraint.resolver import IdentityResolver
+    from app.graphir.constraint.renderer import RepositoryAwareRenderer
+    from app.graphir.constraint.memory import RepositorySemanticMemory
+    from app.graphir.constraint.crl import ConflictResolutionLayer
+    from app.graphir.constraint.split_analyzer import SPLITAnalyzer
+
+    indexer = RepositoryIndexer()
+    file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
+
+    memory = RepositorySemanticMemory(exec_ctx.memory_path)
+    raw_mapping = memory.load()
+
+    crl = ConflictResolutionLayer()
+    resolved_mapping, crl_conflicts = crl.resolve(raw_mapping, file_nodes)
+
+    matcher = IntentFileMatcher()
+    resolver = IdentityResolver(resolved_mapping=resolved_mapping)
+    renderer = RepositoryAwareRenderer()
+
+    identities, candidates = matcher.match(graph, file_nodes)
+    decisions = resolver.resolve(identities, candidates, file_nodes)
+
+    split_analyzer = SPLITAnalyzer()
+    split_plan = split_analyzer.analyze(
+        decisions, identities, file_nodes, crl_conflicts,
+    )
+
+    fileops = renderer.render(
+        graph, graph_layout, matcher,
+        file_nodes, component_nodes,
+        exec_ctx, backend_config,
+        resolver=resolver,
+        decisions=decisions,
+        split_plan=split_plan,
+    )
+
+    if not shadow_mode:
+        updated = memory.merge(decisions, identities, resolved_mapping)
+        memory.save(updated)
+
+    return fileops, decisions, identities, split_plan
+
+
 def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
     """Execute a plan against a workspace using the GraphIR pipeline.
 
@@ -176,12 +238,20 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
       3. Run coverage check (Gate 2)
       4. GraphIRPipeline: IntentPlan → (GraphIR, GraphIRLayout)
       5. Coverage revalidation (Gate 4)
-      6. BackendRenderer → FileOps
+      6. ConstraintGraph (if enabled) or BackendRenderer → FileOps
       7. Apply → git commit
     """
     guard_within(context.workspace, settings.RUNS_DIR)
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
     os.makedirs(context.artifacts, exist_ok=True)
+
+    # ── Build ExecutionContext ──
+    exec_ctx = ExecutionContext(
+        run_id=run_id,
+        workspace_root=context.workspace,
+        worktree_id=f"agent-{run_id[:8]}",
+        artifacts_dir=context.artifacts,
+    )
 
     skill_ir = plan.get("skill_ir")
     if not skill_ir:
@@ -251,6 +321,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     except ValueError as e:
         return {"status": "rejected", "reason": f"graphir:{e}"}
 
+    # ── Step 2a: GraphIR Purity Check ──
+    try:
+        enforce_graph_purity(graph)
+    except Exception as e:
+        return {"status": "rejected", "reason": f"purity_violation:{e}"}
+
     # ── Step 3: Gate 4 — Coverage revalidation (intent-first only) ──
     if intents and coverage_report is not None:
         try:
@@ -267,7 +343,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         except IntentCoverageError as e:
             return {"status": "rejected", "reason": str(e)}
 
-    # ── Step 4: BackendRenderer (ReactBackend) ──
+    # ── Step 4: ConstraintGraph or BackendRenderer ──
     files = contract.renderer.get("files", [])
     base_path = contract.renderer.get("base_path", "")
     path_map = {}
@@ -279,8 +355,84 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         output_base_path=base_path,
         path_map=path_map,
     )
-    backend = ReactBackend()
-    fileops = backend.render(graph, graph_layout, backend_config)
+
+    if FEATURE_FLAGS.get("constraint_graph", False):
+        # New ConstraintGraph pipeline (Phases 1+)
+        from app.graphir.constraint.indexer import RepositoryIndexer
+        from app.graphir.constraint.matcher import IntentFileMatcher
+        from app.graphir.constraint.resolver import IdentityResolver
+        from app.graphir.constraint.renderer import RepositoryAwareRenderer
+        from app.graphir.constraint.memory import RepositorySemanticMemory
+
+        indexer = RepositoryIndexer()
+        file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
+
+        # Phase 2: Load persistent semantic memory → feed resolver
+        memory = RepositorySemanticMemory(exec_ctx.memory_path)
+        raw_mapping = memory.load()
+
+        # Phase 3: Reconcile memory against current file state
+        from app.graphir.constraint.crl import ConflictResolutionLayer
+        crl = ConflictResolutionLayer()
+        resolved_mapping, crl_conflicts = crl.resolve(raw_mapping, file_nodes)
+
+        matcher = IntentFileMatcher()
+        resolver = IdentityResolver(resolved_mapping=resolved_mapping)
+        renderer = RepositoryAwareRenderer()
+
+        # Pre-compute decisions (needed for memory persistence)
+        identities, candidates = matcher.match(graph, file_nodes)
+        decisions = resolver.resolve(identities, candidates, file_nodes)
+
+        # Phase 4: Structural analysis — detect overloaded files
+        from app.graphir.constraint.split_analyzer import SPLITAnalyzer
+        split_analyzer = SPLITAnalyzer()
+        split_plan = split_analyzer.analyze(
+            decisions, identities, file_nodes, crl_conflicts,
+        )
+
+        fileops = renderer.render(
+            graph, graph_layout, matcher,
+            file_nodes, component_nodes,
+            exec_ctx, backend_config,
+            resolver=resolver,
+            decisions=decisions,
+            split_plan=split_plan,
+        )
+
+        # Phase 2: Persist new identity→file mappings
+        updated = memory.merge(decisions, identities, resolved_mapping)
+        memory.save(updated)
+    else:
+        # Legacy path: direct BackendRenderer (unchanged behavior)
+        backend = ReactBackend()
+        fileops = backend.render(graph, graph_layout, backend_config)
+
+    # ── Shadow mode: run constraint pipeline alongside legacy ──
+    # Only runs when constraint_graph=False (primary path is legacy).
+    # When constraint_graph=True, the constraint pipeline is already primary — no shadow needed.
+    if FEATURE_FLAGS.get("constraint_graph_shadow", True) and not FEATURE_FLAGS.get("constraint_graph", False):
+        prev_line_range = FEATURE_FLAGS.get("constraint_graph_line_range", False)
+        try:
+            FEATURE_FLAGS["constraint_graph_line_range"] = True
+
+            shadow_fileops, shadow_decisions, shadow_identities, shadow_split = (
+                _run_constraint_pipeline(
+                    graph, graph_layout, exec_ctx, backend_config,
+                    shadow_mode=True,
+                )
+            )
+
+            # Compare outputs (does NOT affect fileops)
+            shadow_compare(fileops, shadow_fileops, run_id)
+
+        except Exception as e:
+            logger.warning(
+                "SHADOW: constraint pipeline failed — %s (run=%s)",
+                e, run_id,
+            )
+        finally:
+            FEATURE_FLAGS["constraint_graph_line_range"] = prev_line_range
 
     ok, vreason = validate_fileops(fileops)
     if not ok:
