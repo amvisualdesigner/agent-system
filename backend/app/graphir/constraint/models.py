@@ -24,6 +24,7 @@ class Decision(str, Enum):
     UPDATE  = "modify"
     EXTEND  = "extend"
     SPLIT   = "split"
+    DELETE  = "delete"
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,34 @@ class FileOpDecision:
     confidence: float = 0.0
     rationale: str = ""
     must_not_modify_semantics: bool = True
+
+
+# ── MemoryRecord (used in Phase 6a memory upgrade) ────────────────
+
+@dataclass(frozen=True)
+class MemoryRecord:
+    """Persistent identity→file binding with component name.
+
+    Replaces bare dict[str, str] storage.
+    component_name is NEVER empty — enforced at construction and load time.
+    """
+    fingerprint: str
+    file_path: str
+    component_name: str
+
+
+# ── DeletionRecord (used in Phase 6a DELETE detection) ────────────
+
+@dataclass(frozen=True)
+class DeletionRecord:
+    """State-diff result: a component to remove.
+
+    Produced by detect_deletions() from the difference between
+    persisted memory and the current intent graph.
+    """
+    fingerprint: str
+    file_path: str
+    component_name: str
 
 
 # ── Conflict types (used in Phase 3 CRL) ──────────────────────────

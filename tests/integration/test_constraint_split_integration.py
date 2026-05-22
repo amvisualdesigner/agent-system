@@ -14,6 +14,7 @@ from app.graphir.backends import BackendConfig
 from app.graphir.constraint import (
     ExecutionContext,
 )
+from app.graphir.constraint.models import MemoryRecord
 from app.graphir.constraint.indexer import RepositoryIndexer
 from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
@@ -62,7 +63,13 @@ export const Chart = () => null;
             # Phase 2: resolved mapping forces KpiRow → Chart.tsx
             fp = identities["KpiRow"].fingerprint()
             resolver = IdentityResolver(
-                resolved_mapping={fp: "src/components/Chart.tsx"},
+                resolved_mapping={
+                    fp: MemoryRecord(
+                        fingerprint=fp,
+                        file_path="src/components/Chart.tsx",
+                        component_name="KpiRow",
+                    ),
+                },
             )
             decisions = resolver.resolve(identities, candidates, fn)
 
@@ -125,7 +132,13 @@ export const Chart = () => null;
 
             fp = identities["KpiRow"].fingerprint()
             resolver = IdentityResolver(
-                resolved_mapping={fp: "src/components/Chart.tsx"},
+                resolved_mapping={
+                    fp: MemoryRecord(
+                        fingerprint=fp,
+                        file_path="src/components/Chart.tsx",
+                        component_name="KpiRow",
+                    ),
+                },
             )
             decisions = resolver.resolve(identities, candidates, fn)
 

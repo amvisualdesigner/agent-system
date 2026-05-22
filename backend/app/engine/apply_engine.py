@@ -32,7 +32,7 @@ from app.graphir.utils import validate_fileops
 from app.graphir.utils import extract_component_name
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
-from app.graphir.constraint.validation import shadow_compare
+from app.graphir.constraint.validation import shadow_compare, shadow_compare_decisions
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +175,14 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
 def _run_constraint_pipeline(
     graph, graph_layout, exec_ctx, backend_config,
     *, shadow_mode: bool = False,
-) -> tuple[list, dict, dict, dict]:
+) -> tuple[list, dict, dict, dict, list]:
     """Run the full Constraint Graph pipeline.
 
     When *shadow_mode* is True, all persistence is blocked
     (memory.save, audit logs, metrics, caches, semantic state).
 
     Returns:
-        (fileops, decisions, identities, split_plan)
+        (fileops, decisions, identities, split_plan, deletions)
     """
     from app.graphir.constraint.indexer import RepositoryIndexer
     from app.graphir.constraint.matcher import IntentFileMatcher
@@ -191,15 +191,34 @@ def _run_constraint_pipeline(
     from app.graphir.constraint.memory import RepositorySemanticMemory
     from app.graphir.constraint.crl import ConflictResolutionLayer
     from app.graphir.constraint.split_analyzer import SPLITAnalyzer
+    from app.graphir.constraint.deletion import detect_deletions
+    from app.graphir.constraint.models import MemoryRecord
 
     indexer = RepositoryIndexer()
     file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
 
     memory = RepositorySemanticMemory(exec_ctx.memory_path)
-    raw_mapping = memory.load()
+    raw_memory = memory.load()
 
+    # CRL operates on dict[str, str]; adapt MemoryRecord → file_path
+    crl_input = {fp: rec.file_path for fp, rec in raw_memory.items()}
     crl = ConflictResolutionLayer()
-    resolved_mapping, crl_conflicts = crl.resolve(raw_mapping, file_nodes)
+    cleaned_paths, crl_conflicts = crl.resolve(crl_input, file_nodes)
+
+    # Rebuild MemoryRecord dict from cleaned paths
+    resolved_mapping: dict[str, MemoryRecord] = {}
+    for fp, file_path in cleaned_paths.items():
+        rec = raw_memory.get(fp)
+        if rec is None:
+            logger.warning(
+                "Memory corruption: fingerprint %s missing MemoryRecord — skipping", fp,
+            )
+            continue
+        resolved_mapping[fp] = MemoryRecord(
+            fingerprint=fp,
+            file_path=file_path,
+            component_name=rec.component_name,
+        )
 
     matcher = IntentFileMatcher()
     resolver = IdentityResolver(resolved_mapping=resolved_mapping)
@@ -213,6 +232,9 @@ def _run_constraint_pipeline(
         decisions, identities, file_nodes, crl_conflicts,
     )
 
+    # Phase 6a: DELETE detection via state difference
+    deletions = detect_deletions(resolved_mapping, identities, file_nodes)
+
     fileops = renderer.render(
         graph, graph_layout, matcher,
         file_nodes, component_nodes,
@@ -220,13 +242,18 @@ def _run_constraint_pipeline(
         resolver=resolver,
         decisions=decisions,
         split_plan=split_plan,
+        deletions=deletions,
     )
 
     if not shadow_mode:
-        updated = memory.merge(decisions, identities, resolved_mapping)
+        deleted_fps = {d.fingerprint for d in deletions}
+        updated = memory.merge(
+            decisions, identities, resolved_mapping,
+            deleted_fingerprints=deleted_fps,
+        )
         memory.save(updated)
 
-    return fileops, decisions, identities, split_plan
+    return fileops, decisions, identities, split_plan, deletions
 
 
 def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
@@ -363,18 +390,38 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         from app.graphir.constraint.resolver import IdentityResolver
         from app.graphir.constraint.renderer import RepositoryAwareRenderer
         from app.graphir.constraint.memory import RepositorySemanticMemory
+        from app.graphir.constraint.crl import ConflictResolutionLayer
+        from app.graphir.constraint.split_analyzer import SPLITAnalyzer
+        from app.graphir.constraint.deletion import detect_deletions
+        from app.graphir.constraint.models import MemoryRecord
 
         indexer = RepositoryIndexer()
         file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
 
         # Phase 2: Load persistent semantic memory → feed resolver
         memory = RepositorySemanticMemory(exec_ctx.memory_path)
-        raw_mapping = memory.load()
+        raw_memory = memory.load()
 
         # Phase 3: Reconcile memory against current file state
-        from app.graphir.constraint.crl import ConflictResolutionLayer
+        # CRL operates on dict[str, str]; adapt MemoryRecord → file_path
+        crl_input = {fp: rec.file_path for fp, rec in raw_memory.items()}
         crl = ConflictResolutionLayer()
-        resolved_mapping, crl_conflicts = crl.resolve(raw_mapping, file_nodes)
+        cleaned_paths, crl_conflicts = crl.resolve(crl_input, file_nodes)
+
+        # Rebuild MemoryRecord dict from cleaned paths
+        resolved_mapping: dict[str, MemoryRecord] = {}
+        for fp, file_path in cleaned_paths.items():
+            rec = raw_memory.get(fp)
+            if rec is None:
+                logger.warning(
+                    "Memory corruption: fingerprint %s missing MemoryRecord — skipping", fp,
+                )
+                continue
+            resolved_mapping[fp] = MemoryRecord(
+                fingerprint=fp,
+                file_path=file_path,
+                component_name=rec.component_name,
+            )
 
         matcher = IntentFileMatcher()
         resolver = IdentityResolver(resolved_mapping=resolved_mapping)
@@ -385,11 +432,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         decisions = resolver.resolve(identities, candidates, file_nodes)
 
         # Phase 4: Structural analysis — detect overloaded files
-        from app.graphir.constraint.split_analyzer import SPLITAnalyzer
         split_analyzer = SPLITAnalyzer()
         split_plan = split_analyzer.analyze(
             decisions, identities, file_nodes, crl_conflicts,
         )
+
+        # Phase 6a: DELETE detection via state difference
+        deletions = detect_deletions(resolved_mapping, identities, file_nodes)
 
         fileops = renderer.render(
             graph, graph_layout, matcher,
@@ -398,10 +447,15 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             resolver=resolver,
             decisions=decisions,
             split_plan=split_plan,
+            deletions=deletions,
         )
 
         # Phase 2: Persist new identity→file mappings
-        updated = memory.merge(decisions, identities, resolved_mapping)
+        deleted_fps = {d.fingerprint for d in deletions}
+        updated = memory.merge(
+            decisions, identities, resolved_mapping,
+            deleted_fingerprints=deleted_fps,
+        )
         memory.save(updated)
     else:
         # Legacy path: direct BackendRenderer (unchanged behavior)
@@ -416,14 +470,17 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         try:
             FEATURE_FLAGS["constraint_graph_line_range"] = True
 
-            shadow_fileops, shadow_decisions, shadow_identities, shadow_split = (
+            shadow_fileops, shadow_decisions, shadow_identities, shadow_split, shadow_deletions = (
                 _run_constraint_pipeline(
                     graph, graph_layout, exec_ctx, backend_config,
                     shadow_mode=True,
                 )
             )
 
-            # Compare outputs (does NOT affect fileops)
+            # Compare decisions pre-render (Phase 6a)
+            shadow_compare_decisions(decisions, shadow_decisions, run_id)
+
+            # Compare final FileOps (does NOT affect fileops)
             shadow_compare(fileops, shadow_fileops, run_id)
 
         except Exception as e:

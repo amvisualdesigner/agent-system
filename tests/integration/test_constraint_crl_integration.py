@@ -10,6 +10,7 @@ from app.graphir.constraint import (
     ExecutionContext,
     Decision,
 )
+from app.graphir.constraint.models import MemoryRecord
 from app.graphir.constraint.indexer import RepositoryIndexer
 from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
@@ -38,11 +39,17 @@ class TestCRLStaleMappingIntegration:
             ctx = ExecutionContext(run_id="crl-test", workspace_root=ws.root)
 
             memory = RepositorySemanticMemory(ctx.memory_path)
-            memory.save({KPI_ROW_FP: "src/components/KpiRow.tsx"})
+            memory.save({
+                KPI_ROW_FP: MemoryRecord(
+                    fingerprint=KPI_ROW_FP,
+                    file_path="src/components/KpiRow.tsx",
+                    component_name="KpiRow",
+                ),
+            })
 
             # Read back while workspace still active
-            raw = memory.load()
-            assert KPI_ROW_FP in raw
+            raw_memory = memory.load()
+            assert KPI_ROW_FP in raw_memory
 
         # Workspace is now gone — file and memory path no longer exist
         # CRL should still work with raw data captured before teardown
@@ -51,9 +58,21 @@ class TestCRLStaleMappingIntegration:
             indexer = RepositoryIndexer()
             fn2, cn2 = indexer.index(ws2.root)  # empty
 
-            # CRL reconciles captured raw mapping against current file_nodes
+            # CRL operates on dict[str, str]; adapt MemoryRecord → file_path
+            crl_input = {fp: rec.file_path for fp, rec in raw_memory.items()}
             crl = ConflictResolutionLayer()
-            cleaned, conflicts = crl.resolve(raw, fn2)
+            cleaned_paths, conflicts = crl.resolve(crl_input, fn2)
+
+            # Rebuild MemoryRecord dict (need component_name from original)
+            cleaned = {}
+            for fp, file_path in cleaned_paths.items():
+                rec = raw_memory.get(fp)
+                if rec is not None:
+                    cleaned[fp] = MemoryRecord(
+                        fingerprint=fp,
+                        file_path=file_path,
+                        component_name=rec.component_name,
+                    )
 
             assert KPI_ROW_FP not in cleaned
             assert len(conflicts) == 1
@@ -82,13 +101,31 @@ class TestCRLStaleMappingIntegration:
 
             # Write valid memory with CORRECT fingerprint
             memory = RepositorySemanticMemory(ctx.memory_path)
-            memory.save({KPI_ROW_FP: "src/components/KpiRow.tsx"})
+            memory.save({
+                KPI_ROW_FP: MemoryRecord(
+                    fingerprint=KPI_ROW_FP,
+                    file_path="src/components/KpiRow.tsx",
+                    component_name="KpiRow",
+                ),
+            })
 
-            raw = memory.load()
+            raw_memory = memory.load()
 
-            # CRL — file exists, mapping should survive
+            # CRL operates on dict[str, str]; adapt
+            crl_input = {fp: rec.file_path for fp, rec in raw_memory.items()}
             crl = ConflictResolutionLayer()
-            cleaned, conflicts = crl.resolve(raw, fn)
+            cleaned_paths, conflicts = crl.resolve(crl_input, fn)
+
+            # Rebuild MemoryRecord
+            cleaned = {}
+            for fp, file_path in cleaned_paths.items():
+                rec = raw_memory.get(fp)
+                if rec is not None:
+                    cleaned[fp] = MemoryRecord(
+                        fingerprint=fp,
+                        file_path=file_path,
+                        component_name=rec.component_name,
+                    )
 
             assert KPI_ROW_FP in cleaned
             assert len(conflicts) == 0

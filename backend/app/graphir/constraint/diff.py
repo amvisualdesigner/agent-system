@@ -233,6 +233,64 @@ class StructuralDiffEngine:
         )
 
     @staticmethod
+    def compute_delete_edit(
+        target_file_path: str,
+        existing_lines: list[str],
+        component_boundary: ComponentBoundary | None,
+        allow_full_delete: bool = False,
+    ) -> EditOperation | None:
+        """Produce EditOperation for structural DELETE.
+
+        Phase 6a: DELETE is boundary-safe removal.
+
+        - component_boundary is known → replace_range with empty content
+        - component_boundary is None AND allow_full_delete → delete_file
+        - component_boundary is None AND NOT allow_full_delete → None (skip)
+
+        Never returns replace_file. Never infers component count.
+        The allow_full_delete flag is set by the orchestrator from
+        indexed FileNode.component_names data.
+
+        Args:
+            target_file_path: Decision target file.
+            existing_lines: Lines of existing file content.
+            component_boundary: Boundary of the component to remove.
+            allow_full_delete: If True and no boundary, allows whole-file
+                deletion. Set by orchestrator when FileNode has ≤ 1 component.
+
+        Returns:
+            EditOperation for safe DELETE, or None if deletion cannot
+            be computed safely (caller should log and skip).
+        """
+        if component_boundary is not None:
+            ls, le = component_boundary.line_start, component_boundary.line_end
+            line_count = len(existing_lines)
+            if 1 <= ls <= le <= line_count:
+                return EditOperation(
+                    action="replace_range",
+                    source_file=target_file_path,
+                    range_start=ls,
+                    range_end=le,
+                    content="",
+                )
+            logger.warning(
+                "DELETE: invalid boundary for %s [%d, %d] vs %d lines",
+                target_file_path, ls, le, line_count,
+            )
+
+        if allow_full_delete:
+            return EditOperation(
+                action="delete_file",
+                source_file=target_file_path,
+            )
+
+        logger.warning(
+            "DELETE: unsafe — no boundary and allow_full_delete=False for %s",
+            target_file_path,
+        )
+        return None
+
+    @staticmethod
     def _append_after_last_boundary(
         generated_content: str,
         target_file_path: str,

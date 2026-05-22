@@ -49,6 +49,9 @@ class FileOpExecutor:
         if edit.action == "create":
             return [FileOp(action="create", path=edit.source_file, content=edit.content)]
 
+        if edit.action == "delete_file":
+            return [FileOp(action="delete", path=edit.source_file, content="")]
+
         if edit.action == "replace_file":
             return [FileOp(action="modify", path=edit.source_file, content=edit.content)]
 

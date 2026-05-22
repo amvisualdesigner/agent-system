@@ -8,7 +8,7 @@ import os
 import tempfile
 
 from app.graphir.constraint.memory import RepositorySemanticMemory
-from app.graphir.constraint.models import Decision, FileOpDecision
+from app.graphir.constraint.models import Decision, FileOpDecision, MemoryRecord
 from app.graphir.constraint.identity import CanonicalIdentity
 
 
@@ -60,7 +60,11 @@ class TestMemoryLoad:
         try:
             mem = RepositorySemanticMemory(path)
             loaded = mem.load()
-            assert loaded == data
+            assert len(loaded) == 2
+            assert loaded["fp1"].file_path == "src/A.tsx"
+            assert loaded["fp2"].file_path == "src/B.tsx"
+            # Old format entries get empty component_name (migrated)
+            assert loaded["fp1"].component_name == ""
         finally:
             os.unlink(path)
 
@@ -96,13 +100,17 @@ class TestMemorySave:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, ".opencode", "memory.json")
             mem = RepositorySemanticMemory(path)
-            data = {"fp:a": "src/A.tsx", "fp:b": "src/B.tsx"}
+            data = {
+                "fp:a": MemoryRecord(fingerprint="fp:a", file_path="src/A.tsx", component_name="A"),
+                "fp:b": MemoryRecord(fingerprint="fp:b", file_path="src/B.tsx", component_name="B"),
+            }
             mem.save(data)
 
             assert os.path.exists(path)
-            with open(path) as f:
-                loaded = json.load(f)
-            assert loaded == data
+            loaded = mem.load()
+            assert loaded["fp:a"].file_path == "src/A.tsx"
+            assert loaded["fp:a"].component_name == "A"
+            assert loaded["fp:b"].file_path == "src/B.tsx"
 
     def test_save_empty_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +127,9 @@ class TestMemorySave:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "a", "b", "memory.json")
             mem = RepositorySemanticMemory(path)
-            mem.save({"k": "v"})
+            mem.save({
+                "k": MemoryRecord(fingerprint="k", file_path="src/K.tsx", component_name="K"),
+            })
             assert os.path.exists(path)
 
 
@@ -133,7 +143,8 @@ class TestMemoryMerge:
 
         merged = RepositorySemanticMemory.merge(decisions, identities, {})
         fp = ident.fingerprint()
-        assert merged[fp] == "src/KpiRow.tsx"
+        assert merged[fp].file_path == "src/KpiRow.tsx"
+        assert merged[fp].component_name == "KpiRow"
 
     def test_merge_adds_extend_mapping(self):
         ident = _identity()
@@ -142,7 +153,7 @@ class TestMemoryMerge:
 
         merged = RepositorySemanticMemory.merge(decisions, identities, {})
         fp = ident.fingerprint()
-        assert merged[fp] == "src/KpiRow.tsx"
+        assert merged[fp].file_path == "src/KpiRow.tsx"
 
     def test_merge_skips_create(self):
         """CREATE decisions are NOT persisted (file doesn't exist yet)."""
@@ -163,14 +174,18 @@ class TestMemoryMerge:
 
     def test_merge_preserves_existing(self):
         ident = _identity()
-        existing = {"other_fp": "src/Other.tsx"}
+        existing = {
+            "other_fp": MemoryRecord(
+                fingerprint="other_fp", file_path="src/Other.tsx", component_name="Other",
+            ),
+        }
         decisions = {"n0": _decision(Decision.UPDATE, "src/KpiRow.tsx")}
         identities = {"n0": ident}
 
         merged = RepositorySemanticMemory.merge(decisions, identities, existing)
-        assert merged["other_fp"] == "src/Other.tsx"
+        assert merged["other_fp"].file_path == "src/Other.tsx"
         fp = ident.fingerprint()
-        assert merged[fp] == "src/KpiRow.tsx"
+        assert merged[fp].file_path == "src/KpiRow.tsx"
 
     def test_merge_handles_missing_identity(self):
         decisions = {"n0": _decision()}
@@ -178,15 +193,22 @@ class TestMemoryMerge:
         assert merged == {}
 
     def test_merge_handles_empty_inputs(self):
-        merged = RepositorySemanticMemory.merge({}, {}, {"existing": "src/E.tsx"})
-        assert merged == {"existing": "src/E.tsx"}
+        existing = {
+            "existing": MemoryRecord(
+                fingerprint="existing", file_path="src/E.tsx", component_name="E",
+            ),
+        }
+        merged = RepositorySemanticMemory.merge({}, {}, existing)
+        assert merged["existing"].file_path == "src/E.tsx"
 
     def test_merge_overwrites_same_fingerprint(self):
         ident = _identity()
         fp = ident.fingerprint()
-        existing = {fp: "src/Old.tsx"}
+        existing = {
+            fp: MemoryRecord(fingerprint=fp, file_path="src/Old.tsx", component_name="KpiRow"),
+        }
         decisions = {"n0": _decision(Decision.UPDATE, "src/New.tsx")}
         identities = {"n0": ident}
 
         merged = RepositorySemanticMemory.merge(decisions, identities, existing)
-        assert merged[fp] == "src/New.tsx"
+        assert merged[fp].file_path == "src/New.tsx"

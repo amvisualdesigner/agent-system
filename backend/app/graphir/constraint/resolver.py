@@ -10,6 +10,8 @@ Decision hierarchy (per IDENTITY_SPEC.md §4):
      → FOUND: UPDATE on mapped file (confidence 1.0)
   2. CanonicalIdentity.fingerprint() → check file_nodes[].canonical_ids
      → FOUND: UPDATE on pre-existing file (confidence 0.95)
+  2.5 Component name → check file_nodes[].component_names (Phase 6a)
+     → FOUND: UPDATE on containing file (confidence 0.85)
   3. Best candidate score → threshold comparison
      → score >= UPDATE_THRESHOLD: UPDATE
      → score >= EXTEND_THRESHOLD: EXTEND
@@ -18,13 +20,15 @@ Decision hierarchy (per IDENTITY_SPEC.md §4):
 Phase 2 hook: resolved_mapping is loaded from RepositorySemanticMemory
 and passed into the constructor. This is the only interface between
 semantic memory and the decision kernel.
+
+Phase 6a: resolved_mapping is dict[fingerprint, MemoryRecord].
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.graphir.constraint.models import Decision, FileOpDecision
+from app.graphir.constraint.models import Decision, FileOpDecision, MemoryRecord
 from app.graphir.constraint.identity import CanonicalIdentity
 
 logger = logging.getLogger(__name__)
@@ -34,14 +38,14 @@ class IdentityResolver:
     """Pure Core: resolves candidates into decisions per IDENTITY_SPEC rules.
 
     Args:
-        resolved_mapping: dict[fingerprint, file_path] from semantic memory
-            (Phase 2+). Empty in Phase 1 (all decisions via scoring).
+        resolved_mapping: dict[fingerprint, MemoryRecord] from semantic memory
+            (Phase 6a+). Empty in Phase 1 (all decisions via scoring).
     """
 
     UPDATE_THRESHOLD = 0.55
     EXTEND_THRESHOLD = 0.35
 
-    def __init__(self, resolved_mapping: dict[str, str] | None = None):
+    def __init__(self, resolved_mapping: dict[str, MemoryRecord] | None = None):
         self.resolved_mapping = resolved_mapping or {}
 
     def resolve(
@@ -83,7 +87,8 @@ class IdentityResolver:
 
         # ── Level 1: Check resolved mapping (from semantic memory) ──
         if fp in self.resolved_mapping:
-            target = self.resolved_mapping[fp]
+            rec = self.resolved_mapping[fp]
+            target = rec.file_path
             if target in file_nodes:
                 return FileOpDecision(
                     intent_id=identity.capability_id,
@@ -104,6 +109,21 @@ class IdentityResolver:
                     target_file=fn.path,
                     confidence=0.95,
                     rationale=f"Identity match in file index: {fp} → {fn.path}",
+                )
+
+        # ── Level 2.5 (Phase 6a): Existence-aware check ──
+        # Prevents duplicate CREATE when component_name exists in a file
+        # but canonical fingerprint didn't match via Levels 1 or 2.
+        component_name = identity.component_name
+        for fn in file_nodes.values():
+            if component_name in getattr(fn, "component_names", []):
+                return FileOpDecision(
+                    intent_id=identity.capability_id,
+                    graphir_node_id=node_id,
+                    decision=Decision.UPDATE,
+                    target_file=fn.path,
+                    confidence=0.85,
+                    rationale=f"Level 2.5: '{component_name}' exists in {fn.path}",
                 )
 
         # ── Level 3: Similarity fallback ──

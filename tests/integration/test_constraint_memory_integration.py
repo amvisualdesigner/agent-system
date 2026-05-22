@@ -16,6 +16,7 @@ from app.graphir.constraint import (
     ExecutionContext,
     Decision,
 )
+from app.graphir.constraint.models import MemoryRecord
 from app.graphir.constraint.indexer import RepositoryIndexer
 from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
@@ -64,7 +65,9 @@ class TestMemoryPersistence:
             assert len(saved) == 1
 
             fingerprint = list(saved.keys())[0]
-            assert "KpiRow" in saved[fingerprint]
+            # Phase 6a format: dict with file_path and component_name
+            assert "file_path" in saved[fingerprint]
+            assert "KpiRow" in saved[fingerprint]["file_path"]
 
             # ── Second run: load memory → Level 1 match ──
             matcher2 = IntentFileMatcher()
@@ -88,7 +91,13 @@ class TestMemoryPersistence:
 
             # Pre-write memory with a mapping for a DIFFERENT capability
             memory = RepositorySemanticMemory(ctx.memory_path)
-            memory.save({"other.fingerprint:generic:abc": "src/Existing.tsx"})
+            memory.save({
+                "other.fingerprint:generic:abc": MemoryRecord(
+                    fingerprint="other.fingerprint:generic:abc",
+                    file_path="src/Existing.tsx",
+                    component_name="Other",
+                ),
+            })
 
             # Now run a KpiRow intent (different fingerprint)
             graph, layout = build_sample_graph("kpi")

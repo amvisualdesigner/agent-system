@@ -18,7 +18,9 @@ import os
 
 from app.graphir.backends import ReactBackend
 from app.graphir.models import FileOp
-from app.graphir.constraint.models import Decision, RefactoringPlan, ComponentBoundary
+from app.graphir.constraint.models import (
+    Decision, RefactoringPlan, ComponentBoundary, DeletionRecord,
+)
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.diff import (
@@ -65,6 +67,7 @@ class RepositoryAwareRenderer:
         resolver: IdentityResolver | None = None,
         decisions: dict[str, FileOpDecision] | None = None,
         split_plan: RefactoringPlan | None = None,
+        deletions: list[DeletionRecord] | None = None,
     ) -> list[FileOp]:
         """Produce FileOps from GraphIR + matcher + resolver.
 
@@ -84,6 +87,8 @@ class RepositoryAwareRenderer:
             split_plan: RefactoringPlan from SPLITAnalyzer (Phase 4+).
                 When provided, decisions targeting overloaded files may
                 be redirected to new files instead.
+            deletions: list of DeletionRecord from detect_deletions (Phase 6a).
+                When provided, DELETE operations are computed structurally.
 
         Returns:
             list[FileOp] with actions matching decisions
@@ -184,6 +189,43 @@ class RepositoryAwareRenderer:
                     path=decision.target_file,
                     content=content,
                 ))
+
+        # ── Phase 6a: DELETE — renderer orchestrates only ──
+        # Renderer does NOT infer semantics, does NOT decide whole-file vs
+        # boundary delete. It asks StructuralDiffEngine and delegates to
+        # FileOpExecutor.
+        for del_rec in (deletions or []):
+            fn = file_nodes.get(del_rec.file_path)
+            if fn is None:
+                continue
+
+            component_count = len(getattr(fn, "component_names", []))
+            allow_full_delete = (component_count <= 1)
+
+            boundary = self._find_boundary(
+                getattr(fn, "component_boundaries", []),
+                del_rec.component_name,
+            )
+
+            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path)
+            existing_lines: list[str] = []
+            if os.path.exists(file_path):
+                with open(file_path) as f:
+                    existing_lines = f.read().split("\n")
+
+            edit = StructuralDiffEngine.compute_delete_edit(
+                del_rec.file_path, existing_lines, boundary,
+                allow_full_delete=allow_full_delete,
+            )
+            if edit is None:
+                logger.warning(
+                    "Skipping unsafe DELETE for %s::%s",
+                    del_rec.file_path, del_rec.component_name,
+                )
+                continue
+
+            executor = self._get_executor(exec_ctx.workspace_root)
+            fileops.extend(executor.execute(edit))
 
         return fileops
 

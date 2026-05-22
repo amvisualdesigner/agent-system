@@ -20,6 +20,8 @@ from app.graphir.constraint.context import ExecutionContext
 from app.graphir.constraint.models import (
     Decision,
     FileOpDecision,
+    MemoryRecord,
+    DeletionRecord,
     ConflictType,
     ResolutionStrategy,
     ConflictRecord,
@@ -46,12 +48,15 @@ from app.graphir.constraint.diff import (
 )
 from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.executor import FileOpExecutor
-from app.graphir.constraint.validation import shadow_compare
+from app.graphir.constraint.deletion import detect_deletions
+from app.graphir.constraint.validation import shadow_compare, shadow_compare_decisions
 
 __all__ = [
     "ExecutionContext",
     "Decision",
     "FileOpDecision",
+    "MemoryRecord",
+    "DeletionRecord",
     "ConflictType",
     "ResolutionStrategy",
     "ConflictRecord",
@@ -76,5 +81,7 @@ __all__ = [
     "ExtendStrategy",
     "ContentGenerator",
     "FileOpExecutor",
+    "detect_deletions",
     "shadow_compare",
+    "shadow_compare_decisions",
 ]

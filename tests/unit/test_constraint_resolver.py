@@ -5,7 +5,7 @@ the IDENTITY_SPEC rules (levels 1-3 of decision hierarchy).
 """
 
 from app.graphir.constraint.resolver import IdentityResolver
-from app.graphir.constraint.models import Decision, FileNode
+from app.graphir.constraint.models import Decision, FileNode, MemoryRecord
 from app.graphir.constraint.identity import CanonicalIdentity
 
 
@@ -107,7 +107,9 @@ class TestResolverLevel1:
 
     def test_resolved_mapping_overrides_scoring(self):
         fp = _identity().fingerprint()
-        resolver = IdentityResolver(resolved_mapping={fp: "src/Mapped.tsx"})
+        resolver = IdentityResolver(resolved_mapping={
+            fp: MemoryRecord(fingerprint=fp, file_path="src/Mapped.tsx", component_name="Chart"),
+        })
         ident = _identity()
         candidates = {
             "n0": [(0.90, _file("src/Unmapped.tsx"))],
@@ -123,7 +125,9 @@ class TestResolverLevel1:
 
     def test_resolved_mapping_ignored_if_file_missing(self):
         fp = _identity().fingerprint()
-        resolver = IdentityResolver(resolved_mapping={fp: "src/Gone.tsx"})
+        resolver = IdentityResolver(resolved_mapping={
+            fp: MemoryRecord(fingerprint=fp, file_path="src/Gone.tsx", component_name="Chart"),
+        })
         ident = _identity()
         candidates = {
             "n0": [(0.90, _file("src/Existing.tsx"))],
