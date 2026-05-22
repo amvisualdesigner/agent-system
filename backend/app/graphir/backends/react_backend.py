@@ -19,11 +19,24 @@ from typing import Any, Callable
 from app.graphir.models import GraphIR, GraphIRLayout, GraphIRNode, LayoutConstraint
 from app.graphir.backends.base import BackendRenderer, BackendConfig
 from app.graphir.models import FileOp
+from app.graphir.compiler import UIIRCompiler
+from app.graphir.ui_ir import UIComponentTree, UIComponentNode, UIGeneratorContext
 
 ComponentGenerator = Callable[
     [GraphIRNode, list[LayoutConstraint], "ReactBackend", BackendConfig],
     str,
 ]
+
+
+def _flatten_tree(root: UIComponentNode) -> list[UIComponentNode]:
+    """BFS flatten: root first, then children depth-first."""
+    result: list[UIComponentNode] = []
+    def walk(n: UIComponentNode) -> None:
+        result.append(n)
+        for c in n.children:
+            walk(c)
+    walk(root)
+    return result
 
 
 class ReactBackend(BackendRenderer):
@@ -54,32 +67,47 @@ class ReactBackend(BackendRenderer):
         layout: GraphIRLayout,
         config: BackendConfig,
     ) -> list[FileOp]:
+        """GraphIR → FileOps via UIIRCompiler + render_tree.
+
+        This is the entry point. Delegates compilation to UIIRCompiler
+        and rendering to render_tree. No direct access to graph.nodes.
+        """
+        tree = UIIRCompiler.compile(graph, layout)
+        return self.render_tree(tree, config)
+
+    def render_tree(
+        self,
+        tree: UIComponentTree,
+        config: BackendConfig,
+    ) -> list[FileOp]:
+        """UIComponentTree → FileOps. NO access to GraphIR.
+
+        Consumes only the compiled UI tree. Each node is wrapped in
+        UIGeneratorContext to interface with existing generators.
+        """
         fileops: list[FileOp] = []
-
-        children_by_source: dict[str, list[str]] = {}
-        for edge in graph.edges:
-            children_by_source.setdefault(edge.source, []).append(edge.target)
-
-        for node in graph.nodes.values():
-            generator = self._generators.get(node.type)
+        for uinode in _flatten_tree(tree.root):
+            generator = self._generators.get(uinode.component)
             if generator is None:
                 continue
 
-            node_constraints = layout.constraints.get(node.id, [])
-            content = generator(node, node_constraints, self, config)
-            file_path = self._resolve_file_path(node, config)
+            ctx = UIGeneratorContext(
+                id=uinode.id,
+                type=uinode.component,
+                data=dict(uinode.props),
+            )
+            content = generator(ctx, uinode.layout_hints, self, config)
 
-            # Inject child composition and imports for container nodes
-            child_ids = children_by_source.get(node.id, [])
-            if child_ids:
-                composition = self._render_composition(child_ids, graph, config)
+            if uinode.children:
+                composition = ReactBackend._render_children(uinode.children)
                 content = self._inject_composition(content, composition)
 
+            file_path = self._resolve_file_path(ctx, config)
             fileops.append(FileOp(action="create", path=file_path, content=content))
 
         return fileops
 
-    def _resolve_file_path(self, node: GraphIRNode, config: BackendConfig) -> str:
+    def _resolve_file_path(self, node: GraphIRNode | UIGeneratorContext, config: BackendConfig) -> str:
         if node.type in config.path_map:
             override = config.path_map[node.type]
             base = config.output_base_path.rstrip("/")
@@ -87,33 +115,44 @@ class ReactBackend(BackendRenderer):
         base = config.output_base_path.rstrip("/")
         return os.path.normpath(f"{base}/{node.type}{config.file_extension}")
 
-    def _render_composition(
-        self,
-        child_ids: list[str],
-        graph: GraphIR,
-        config: BackendConfig,
-    ) -> str:
+    @staticmethod
+    def _render_children(children: list[UIComponentNode]) -> str:
+        """UIComponentNode list → mounted JSX string.
+
+        Uses _emit() for props. Applies layout wrappers from layout_hints.
+        """
         parts: list[str] = []
-        for cid in child_ids:
-            child = graph.nodes.get(cid)
-            if child is None:
-                continue
-            props_str = self._render_props_jsx(child.data)
-            parts.append(f"<{child.type} {props_str} />" if props_str else f"<{child.type} />")
+        for child in children:
+            props_str = ReactBackend._emit(child.props)
+            child_tag = (
+                f"<{child.component} {props_str} />" if props_str
+                else f"<{child.component} />"
+            )
+            if child.layout_hints:
+                open_tag, close_tag = ReactBackend._layout_to_wrapper(child.layout_hints)
+                parts.append(f"{open_tag}\n        {child_tag}\n      {close_tag}")
+            else:
+                parts.append(child_tag)
         return "\n".join(parts)
 
     @staticmethod
-    def _render_props_jsx(data: dict) -> str:
-        if not data:
+    def _emit(props: dict[str, Any]) -> str:
+        """Framework-specific: dict → JSX attribute string.
+
+        TOTAL emission: every key in props maps to exactly one JSX attribute.
+        None emits as {null} via json.dumps. No silent skips. No filtering.
+
+        This is the LAST transformation in the pipeline.
+        The contract is UIComponentTree; _emit is just the last mile.
+        """
+        if not props:
             return ""
         parts = []
-        for k, v in data.items():
+        for k, v in props.items():
             if isinstance(v, str):
                 parts.append(f'{k}="{v}"')
             elif isinstance(v, bool):
                 parts.append(f"{k}={str(v).lower()}")
-            elif v is None:
-                continue
             else:
                 parts.append(f"{k}={{{json.dumps(v)}}}")
         return " ".join(parts)

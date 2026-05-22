@@ -6,11 +6,12 @@ The builder is the ONLY component that produces GraphIR from IntentPlan.
 Supports both Intent (new) and IntentNode (legacy/deprecated).
 
 Construction phases (in order):
-  1. Validate IntentPlan
-  2. Node materialization — register nodes or apply metadata (pure inventory, no edges)
-  3. Root election — select container root using semantic policy (layout.page > legacy fallback)
-  4. Edge construction — bind all non-root nodes to elected root with semantic roles
-  5. Freeze and return
+   1. Validate IntentPlan
+   2. Node materialization — register nodes or apply metadata (pure inventory, no edges)
+   3. SkillIR binding — merge SkillIR params into node.data per capability schema
+   4. Root election — select container root using semantic policy (layout.page > legacy fallback)
+   5. Edge construction — bind all non-root nodes to elected root with semantic roles
+   6. Freeze and return
 """
 
 from __future__ import annotations
@@ -26,6 +27,11 @@ from app.graphir.intent import (
     is_capability_metadata,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
+)
+from app.graphir.binding import (
+    SkillIRBindingError,
+    bind_skillir_to_nodes,
+    validate_binding,
 )
 from app.graphir.models import (
     EdgeRole,
@@ -182,9 +188,10 @@ class GraphIRBuilder:
         Phases:
           1. Validate IntentPlan
           2. Node materialization — register nodes or apply metadata
-          3. Root election — semantic policy (layout.page > legacy fallback)
-          4. Edge construction — bind non-root nodes to elected root
-          5. Freeze and return
+          3. SkillIR binding — merge SkillIR params into node.data per capability schema
+          4. Root election — semantic policy (layout.page > legacy fallback)
+          5. Edge construction — bind non-root nodes to elected root
+          6. Freeze and return
 
         Args:
             plan: Validated IntentPlan.
@@ -194,6 +201,7 @@ class GraphIRBuilder:
 
         Raises:
             ValueError: if plan is invalid or graph invariants fail.
+            SkillIRBindingError: if required SkillIR params cannot be bound.
         """
         IntentPlan.validate(plan)
 
@@ -204,10 +212,14 @@ class GraphIRBuilder:
         for i, intent in enumerate(plan.intents):
             cls._add_intent_node(draft, intent, i)
 
-        # ── Phase 3: Root election (semantic policy layer) ─────────
+        # ── Phase 3: SkillIR binding (semantic contract enforcement) ─
+        bind_skillir_to_nodes(draft, plan)
+        validate_binding(draft, plan)
+
+        # ── Phase 4: Root election (semantic policy layer) ─────────
         root_id = cls._select_root(draft)
 
-        # ── Phase 4: Edge construction (relationship binding) ──────
+        # ── Phase 5: Edge construction (relationship binding) ──────
         for i, intent in enumerate(plan.intents):
             cls._add_intent_edge(draft, intent, i, root_id)
 

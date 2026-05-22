@@ -24,6 +24,8 @@ import os
 
 from app.graphir.backends import ReactBackend
 from app.graphir.models import FileOp
+from app.graphir.compiler import UIIRCompiler
+from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
 from app.graphir.constraint.models import (
     Decision, RefactoringPlan, ComponentBoundary, DeletionRecord, FileOpDecision,
 )
@@ -102,6 +104,11 @@ class RepositoryAwareRenderer:
         children_by_source = self._children_map(graph)
         use_line_range = context.feature_flags.get("constraint_graph_line_range",
                                                      FEATURE_FLAGS.get("constraint_graph_line_range", False))
+
+        # Compile UI tree ONCE — single source of truth for rendering
+        ui_tree = UIIRCompiler.compile(graph, layout)
+        ui_node_map = RepositoryAwareRenderer._build_flat_map(ui_tree.root)
+
         fileops: list[FileOp] = []
 
         for node in graph.nodes.values():
@@ -109,18 +116,29 @@ class RepositoryAwareRenderer:
             if decision is None:
                 continue
 
+            ui_node = ui_node_map.get(node.id)
+            if ui_node is None:
+                continue
+
+            # Wrap in adapter — no GraphIRNode reaches generators
+            ctx = UIGeneratorContext(
+                id=ui_node.id,
+                type=ui_node.component,
+                data=dict(ui_node.props),
+            )
+
             # 1) Generate content
             try:
-                content = self.generator.generate(node, layout, config)
+                content = self.generator.generate(ctx, layout, config)
             except KeyError:
                 continue
 
             # Phase 6b: Materialize composition — real imports + React tree
-            child_ids = children_by_source.get(node.id, [])
+            child_ids = children_by_source.get(ctx.id, [])
             if child_ids:
                 import_block, mount_block = self._materialize_composition(
-                    node.id, child_ids, graph, layout, config,
-                    decisions, split_plan,
+                    ctx.id, child_ids, layout, config,
+                    decisions, split_plan, ui_node_map,
                 )
                 content = self._insert_imports(content, import_block)
                 content = content.replace("__COMPOSITION__", mount_block)
@@ -128,7 +146,7 @@ class RepositoryAwareRenderer:
             # 2) Phase 4: Check for SPLIT redirect
             if split_plan.is_splitting(decision.target_file):
                 new_path = split_plan.new_file_for(
-                    decision.target_file, node.type,
+                    decision.target_file, ctx.type,
                 )
                 if new_path:
                     fileops.append(FileOp(
@@ -142,10 +160,10 @@ class RepositoryAwareRenderer:
                 # Phase 5a: Line-range merge via StructuralDiffEngine
                 fn = file_nodes.get(decision.target_file)
                 boundaries = fn.component_boundaries if fn else []
-                boundary = self._find_boundary(boundaries, node.type)
+                boundary = self._find_boundary(boundaries, ctx.type)
 
                 if decision.decision in (Decision.UPDATE, Decision.EXTEND):
-                    extend_strategy = self.generator.get_extend_strategy(node.type)
+                    extend_strategy = self.generator.get_extend_strategy(ctx.type)
                     existing_lines = []
                     file_path = os.path.join(
                         exec_ctx.workspace_root, decision.target_file,
@@ -241,19 +259,30 @@ class RepositoryAwareRenderer:
         return children
 
     @staticmethod
+    def _build_flat_map(root: UIComponentNode) -> dict[str, UIComponentNode]:
+        """BFS flatten UIComponentTree: node.id → UIComponentNode."""
+        result: dict[str, UIComponentNode] = {}
+        def walk(n: UIComponentNode) -> None:
+            result[n.id] = n
+            for c in n.children:
+                walk(c)
+        walk(root)
+        return result
+
+    @staticmethod
     def _materialize_composition(
         parent_node_id: str,
         child_ids: list[str],
-        graph,
         layout,
         config,
         decisions: dict[str, object],
         split_plan: RefactoringPlan | None = None,
+        ui_node_map: dict[str, UIComponentNode] | None = None,
     ) -> tuple[str, str]:
         """Generate real React imports and mount JSX for children.
 
-        Phase 6b: Replaces the old __COMPOSITION__ placeholder approach
-        with proper import statements and layout-aware component mounting.
+        Phase 6b: Uses UIComponentTree (via ui_node_map) for child data,
+        NEVER accesses graph.nodes directly. Props come from UIComponentNode.props.
 
         Returns:
             (import_block, mount_block) — strings to inject into content.
@@ -268,9 +297,11 @@ class RepositoryAwareRenderer:
 
         parent_dir = os.path.dirname(parent_file) if parent_file else ""
 
+        ui_node_map = ui_node_map or {}
+
         for cid in child_ids:
-            child = graph.nodes.get(cid)
-            if child is None:
+            ui_node = ui_node_map.get(cid)
+            if ui_node is None:
                 continue
 
             child_decision = decisions.get(cid)
@@ -282,7 +313,7 @@ class RepositoryAwareRenderer:
                 continue
 
             if split_plan and split_plan.is_splitting(child_file):
-                redirected = split_plan.new_file_for(child_file, child.type)
+                redirected = split_plan.new_file_for(child_file, ui_node.component)
                 if redirected:
                     child_file = redirected
 
@@ -291,14 +322,14 @@ class RepositoryAwareRenderer:
             if not rel_path.startswith("."):
                 rel_path = "./" + rel_path
 
-            imports.append(f"import {{{child.type}}} from '{rel_path}';")
+            imports.append(f"import {{{ui_node.component}}} from '{rel_path}';")
 
-            props_str = ReactBackend._render_props_jsx(child.data)
+            props_str = ReactBackend._emit(ui_node.props)
             child_constraints = layout.constraints.get(cid, [])
 
             child_tag = (
-                f"<{child.type} {props_str} />" if props_str
-                else f"<{child.type} />"
+                f"<{ui_node.component} {props_str} />" if props_str
+                else f"<{ui_node.component} />"
             )
 
             if child_constraints:
