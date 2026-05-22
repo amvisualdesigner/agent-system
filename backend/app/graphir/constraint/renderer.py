@@ -9,6 +9,12 @@ IO is isolated to reading existing file content for merges.
 
 Phase 5a: Feature flag constraint_graph_line_range enables
 line-range merge via ComponentBoundary.
+
+Phase 6b (Composition Materialization):
+  Replaces __COMPOSITION__ placeholder with real React imports and
+  mounted child components. Import paths are computed relative from
+  parent file to child file using decisions.target_file and split_plan.
+  Child JSX is wrapped according to layout constraints.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import os
 from app.graphir.backends import ReactBackend
 from app.graphir.models import FileOp
 from app.graphir.constraint.models import (
-    Decision, RefactoringPlan, ComponentBoundary, DeletionRecord,
+    Decision, RefactoringPlan, ComponentBoundary, DeletionRecord, FileOpDecision,
 )
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.generator import ContentGenerator
@@ -28,6 +34,7 @@ from app.graphir.constraint.diff import (
     ExtendStrategy,
 )
 from app.graphir.constraint.executor import FileOpExecutor
+from app.graphir.constraint.context import RenderContext, PipelineState
 from app.config.feature_flags import FEATURE_FLAGS
 
 logger = logging.getLogger(__name__)
@@ -35,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 class RepositoryAwareRenderer:
     """Execution Layer: produces FileOps from ConstraintGraph decisions.
+
+    Stateless after construction. All pipeline state arrives via
+    RenderContext. No feature flag reads, no indexer calls,
+    no memory loading — pure rendering only.
 
     Phase 1: Uses matcher decisions for CREATE/UPDATE/EXTEND.
     - CREATE → FileOp(action="create") with generated content
@@ -59,48 +70,38 @@ class RepositoryAwareRenderer:
         self,
         graph,
         layout,
-        matcher,
-        file_nodes: dict,
-        component_nodes: dict,
-        exec_ctx,
         config,
-        resolver: IdentityResolver | None = None,
-        decisions: dict[str, FileOpDecision] | None = None,
-        split_plan: RefactoringPlan | None = None,
-        deletions: list[DeletionRecord] | None = None,
+        context: RenderContext | None = None,
     ) -> list[FileOp]:
-        """Produce FileOps from GraphIR + matcher + resolver.
+        """Produce FileOps from GraphIR + RenderContext.
+
+        All pipeline-derived state (file_nodes, decisions, split_plan,
+        deletions) arrives through context.execution. The renderer
+        never reads flags, indexes files, or loads memory.
 
         Args:
             graph: GraphIR instance
             layout: GraphIRLayout
-            matcher: IntentFileMatcher instance (produces candidates)
-            file_nodes: dict from indexer
-            component_nodes: dict from indexer
-            exec_ctx: ExecutionContext
             config: BackendConfig
-            resolver: IdentityResolver instance (decides from candidates).
-                Defaults to IdentityResolver() for Phase 1.
-            decisions: Pre-computed decisions (optional). When provided,
-                skips matcher + resolver calls. Used by Phase 2+ callers
-                that need access to decisions for memory persistence.
-            split_plan: RefactoringPlan from SPLITAnalyzer (Phase 4+).
-                When provided, decisions targeting overloaded files may
-                be redirected to new files instead.
-            deletions: list of DeletionRecord from detect_deletions (Phase 6a).
-                When provided, DELETE operations are computed structurally.
+            context: RenderContext with PipelineState + feature_flags.
+                When None, creates a minimal empty context for backward
+                compat with callers not yet ported.
 
         Returns:
             list[FileOp] with actions matching decisions
         """
-        if decisions is None:
-            resolver = resolver or IdentityResolver()
-            identities, candidates = matcher.match(graph, file_nodes)
-            decisions = resolver.resolve(identities, candidates, file_nodes)
-        children_by_source = self._children_map(graph)
+        if context is None:
+            context = RenderContext(execution=PipelineState())
 
-        split_plan = split_plan or RefactoringPlan()
-        use_line_range = FEATURE_FLAGS.get("constraint_graph_line_range", False)
+        execution = context.execution or PipelineState()
+        decisions = execution.decisions or {}
+        split_plan = execution.split_plan or RefactoringPlan()
+        file_nodes = execution.file_nodes or {}
+        exec_ctx = execution.exec_ctx
+
+        children_by_source = self._children_map(graph)
+        use_line_range = context.feature_flags.get("constraint_graph_line_range",
+                                                     FEATURE_FLAGS.get("constraint_graph_line_range", False))
         fileops: list[FileOp] = []
 
         for node in graph.nodes.values():
@@ -114,11 +115,15 @@ class RepositoryAwareRenderer:
             except KeyError:
                 continue
 
-            # Inject composition
+            # Phase 6b: Materialize composition — real imports + React tree
             child_ids = children_by_source.get(node.id, [])
             if child_ids:
-                composition = self._render_composition(child_ids, graph, config)
-                content = self._inject_composition(content, composition)
+                import_block, mount_block = self._materialize_composition(
+                    node.id, child_ids, graph, layout, config,
+                    decisions, split_plan,
+                )
+                content = self._insert_imports(content, import_block)
+                content = content.replace("__COMPOSITION__", mount_block)
 
             # 2) Phase 4: Check for SPLIT redirect
             if split_plan.is_splitting(decision.target_file):
@@ -144,7 +149,7 @@ class RepositoryAwareRenderer:
                     existing_lines = []
                     file_path = os.path.join(
                         exec_ctx.workspace_root, decision.target_file,
-                    )
+                    ) if exec_ctx else decision.target_file
                     if os.path.exists(file_path):
                         with open(file_path) as f:
                             existing_lines = f.read().split("\n")
@@ -155,8 +160,9 @@ class RepositoryAwareRenderer:
                         all_boundaries=boundaries,
                         extend_strategy=extend_strategy,
                     )
-                    executor = self._get_executor(exec_ctx.workspace_root)
-                    fileops.extend(executor.execute(edit))
+                    if exec_ctx:
+                        executor = self._get_executor(exec_ctx.workspace_root)
+                        fileops.extend(executor.execute(edit))
                     continue
 
                 # CREATE and SPLIT fall through to legacy handling
@@ -191,10 +197,7 @@ class RepositoryAwareRenderer:
                 ))
 
         # ── Phase 6a: DELETE — renderer orchestrates only ──
-        # Renderer does NOT infer semantics, does NOT decide whole-file vs
-        # boundary delete. It asks StructuralDiffEngine and delegates to
-        # FileOpExecutor.
-        for del_rec in (deletions or []):
+        for del_rec in (execution.deletions or []):
             fn = file_nodes.get(del_rec.file_path)
             if fn is None:
                 continue
@@ -207,7 +210,7 @@ class RepositoryAwareRenderer:
                 del_rec.component_name,
             )
 
-            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path)
+            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path) if exec_ctx else del_rec.file_path
             existing_lines: list[str] = []
             if os.path.exists(file_path):
                 with open(file_path) as f:
@@ -224,8 +227,9 @@ class RepositoryAwareRenderer:
                 )
                 continue
 
-            executor = self._get_executor(exec_ctx.workspace_root)
-            fileops.extend(executor.execute(edit))
+            if exec_ctx:
+                executor = self._get_executor(exec_ctx.workspace_root)
+                fileops.extend(executor.execute(edit))
 
         return fileops
 
@@ -237,25 +241,94 @@ class RepositoryAwareRenderer:
         return children
 
     @staticmethod
-    def _render_composition(
-        child_ids: list[str], graph, config,
-    ) -> str:
-        parts: list[str] = []
+    def _materialize_composition(
+        parent_node_id: str,
+        child_ids: list[str],
+        graph,
+        layout,
+        config,
+        decisions: dict[str, object],
+        split_plan: RefactoringPlan | None = None,
+    ) -> tuple[str, str]:
+        """Generate real React imports and mount JSX for children.
+
+        Phase 6b: Replaces the old __COMPOSITION__ placeholder approach
+        with proper import statements and layout-aware component mounting.
+
+        Returns:
+            (import_block, mount_block) — strings to inject into content.
+        """
+        imports: list[str] = []
+        mounts: list[str] = []
+
+        parent_decision = decisions.get(parent_node_id)
+        parent_file: str = ""
+        if parent_decision is not None:
+            parent_file = getattr(parent_decision, "target_file", "")
+
+        parent_dir = os.path.dirname(parent_file) if parent_file else ""
+
         for cid in child_ids:
             child = graph.nodes.get(cid)
             if child is None:
                 continue
+
+            child_decision = decisions.get(cid)
+            if child_decision is None:
+                continue
+
+            child_file = getattr(child_decision, "target_file", "")
+            if not child_file:
+                continue
+
+            if split_plan and split_plan.is_splitting(child_file):
+                redirected = split_plan.new_file_for(child_file, child.type)
+                if redirected:
+                    child_file = redirected
+
+            child_stem = os.path.splitext(child_file)[0]
+            rel_path = os.path.relpath(child_stem, parent_dir) if parent_dir else f"./{child_stem}"
+            if not rel_path.startswith("."):
+                rel_path = "./" + rel_path
+
+            imports.append(f"import {{{child.type}}} from '{rel_path}';")
+
             props_str = ReactBackend._render_props_jsx(child.data)
-            parts.append(
-                f"<{child.type} {props_str} />" if props_str else f"<{child.type} />"
+            child_constraints = layout.constraints.get(cid, [])
+
+            child_tag = (
+                f"<{child.type} {props_str} />" if props_str
+                else f"<{child.type} />"
             )
-        return "\n".join(parts)
+
+            if child_constraints:
+                open_tag, close_tag = ReactBackend._layout_to_wrapper(child_constraints)
+                mounts.append(f"{open_tag}\n        {child_tag}\n      {close_tag}")
+            else:
+                mounts.append(child_tag)
+
+        import_block = "\n".join(imports)
+        mount_block = "\n".join(mounts)
+        return import_block, mount_block
 
     @staticmethod
-    def _inject_composition(content: str, composition: str) -> str:
-        if not composition:
+    def _insert_imports(content: str, import_block: str) -> str:
+        """Insert import_block after the last import line in content."""
+        if not import_block:
             return content
-        return content.replace("__COMPOSITION__", composition)
+        lines = content.split("\n")
+        last_import_idx = -1
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("import ") and stripped.endswith(";"):
+                last_import_idx = i
+        if last_import_idx >= 0:
+            lines.insert(last_import_idx + 1, "")
+            lines.insert(last_import_idx + 2, import_block)
+        else:
+            lines.insert(0, import_block)
+            lines.insert(1, "")
+        return "\n".join(lines)
 
     @staticmethod
     def _find_boundary(

@@ -4,6 +4,13 @@ Converts semantic intent plans into validated, frozen GraphIR.
 The builder is the ONLY component that produces GraphIR from IntentPlan.
 
 Supports both Intent (new) and IntentNode (legacy/deprecated).
+
+Construction phases (in order):
+  1. Validate IntentPlan
+  2. Node materialization — register nodes or apply metadata (pure inventory, no edges)
+  3. Root election — select container root using semantic policy (layout.page > legacy fallback)
+  4. Edge construction — bind all non-root nodes to elected root with semantic roles
+  5. Freeze and return
 """
 
 from __future__ import annotations
@@ -42,82 +49,24 @@ class GraphIRBuilder:
         "CONTAINS": EdgeRole.CONTAINS,
     }
 
-    @classmethod
-    def build(cls, plan: IntentPlan) -> GraphIR:
-        """Convert an IntentPlan into a validated, frozen GraphIR.
-
-        Steps:
-          1. Validate IntentPlan
-          2. Create root node from first intent
-          3. Add remaining intents as children with inferred edge roles
-          4. Auto-attach orphan nodes
-          5. Freeze and return
-
-        Args:
-            plan: Validated IntentPlan.
-
-        Returns:
-            Frozen GraphIR.
-
-        Raises:
-            ValueError: if plan is invalid or graph invariants fail.
-        """
-        IntentPlan.validate(plan)
-
-        draft = GraphIRDraft()
-
-        for i, intent in enumerate(plan.intents):
-            cls._add_intent_to_draft(draft, intent, i, plan)
-
-        orphans = draft.get_orphan_nodes()
-        if orphans and draft._infer_root() is not None:
-            root = draft._infer_root()
-            for nid in orphans:
-                draft.add_edge(GraphIREdge(
-                    source=root,
-                    target=nid,
-                    role=EdgeRole.CONTAINS,
-                ))
-
-        return draft.freeze()
+    # ── Phase 2: Node materialization helpers ──────────────────────
 
     @classmethod
-    def _add_intent_to_draft(
+    def _add_intent_node(
         cls,
         draft: GraphIRDraft,
         intent: Intent | IntentNode,
         index: int,
-        plan: IntentPlan,
     ) -> None:
-        # ── Handle metadata-only intents (domain, style, layout.grid/container) ──
+        """Phase 2: Register a single intent as node or metadata.
+
+        No edges, no root logic. Pure inventory stage.
+        """
         if isinstance(intent, Intent) and is_capability_metadata(intent.capability):
-            cap = intent.capability
-            if cap.startswith("domain."):
-                domains = draft.params.setdefault("domains", [])
-                domain_name = cap.split(".", 1)[1]
-                if domain_name not in domains:
-                    domains.append(domain_name)
-            elif cap.startswith("style."):
-                theme_key = cap.replace("style.", "").replace(".", "_")
-                draft.params.setdefault("style_hints", {})[theme_key] = True
-            elif cap.startswith("layout."):
-                layout_key = cap.replace("layout.", "")
-                draft.params.setdefault("layout_hints", {})[layout_key] = True
+            cls._apply_metadata(draft, intent)
             return
 
-        if isinstance(intent, Intent):
-            graphir_type = resolve_graphir_type_from_capability(intent.capability)
-            if graphir_type is None:
-                graphir_type = cls._legacy_resolve(intent)
-        else:
-            graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
-
-        if graphir_type is None:
-            label = intent.capability if isinstance(intent, Intent) else intent.type
-            raise ValueError(
-                f"GraphIRBuilder: cannot resolve graphir_type for "
-                f"intent '{label}' at index {index}"
-            )
+        graphir_type = cls._resolve_graphir_type(intent, index)
 
         node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
 
@@ -135,8 +84,77 @@ class GraphIRBuilder:
         )
         draft.add_node(node)
 
-        if index == 0:
-            draft.params = dict(plan.params)
+    @staticmethod
+    def _apply_metadata(draft: GraphIRDraft, intent: Intent) -> None:
+        """Apply metadata-only intents (domain, style, layout.grid/container) to draft params."""
+        cap = intent.capability
+        if cap.startswith("domain."):
+            domains = draft.params.setdefault("domains", [])
+            domain_name = cap.split(".", 1)[1]
+            if domain_name not in domains:
+                domains.append(domain_name)
+        elif cap.startswith("style."):
+            theme_key = cap.replace("style.", "").replace(".", "_")
+            draft.params.setdefault("style_hints", {})[theme_key] = True
+        elif cap.startswith("layout."):
+            layout_key = cap.replace("layout.", "")
+            draft.params.setdefault("layout_hints", {})[layout_key] = True
+
+    @classmethod
+    def _resolve_graphir_type(cls, intent: Intent | IntentNode, index: int) -> str:
+        """Resolve graphir_type from intent, raising ValueError on failure."""
+        if isinstance(intent, Intent):
+            graphir_type = resolve_graphir_type_from_capability(intent.capability)
+            if graphir_type is None:
+                graphir_type = cls._legacy_resolve(intent)
+        else:
+            graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
+
+        if graphir_type is None:
+            label = intent.capability if isinstance(intent, Intent) else intent.type
+            raise ValueError(
+                f"GraphIRBuilder: cannot resolve graphir_type for "
+                f"intent '{label}' at index {index}"
+            )
+        return graphir_type
+
+    # ── Phase 3: Root election ─────────────────────────────────────
+
+    @staticmethod
+    def _select_root(draft: GraphIRDraft) -> str:
+        """Elect container root using semantic policy.
+
+        Rules (in order):
+          1. layout.page (type="Page") wins — structural container
+          2. Fallback: first registered node (legacy behavior)
+        """
+        if not draft.nodes:
+            raise ValueError("GraphIRBuilder: cannot select root from empty draft")
+
+        for nid, node in draft.nodes.items():
+            if node.type == "Page":
+                return nid
+
+        return next(iter(draft.nodes))
+
+    # ── Phase 4: Edge construction helpers ─────────────────────────
+
+    @classmethod
+    def _add_intent_edge(
+        cls,
+        draft: GraphIRDraft,
+        intent: Intent | IntentNode,
+        index: int,
+        root_id: str,
+    ) -> None:
+        """Phase 4: Create edge from root to node. Skip metadata and root itself."""
+        if isinstance(intent, Intent) and is_capability_metadata(intent.capability):
+            return
+
+        graphir_type = cls._resolve_graphir_type(intent, index)
+        node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
+
+        if node_id == root_id:
             return
 
         if isinstance(intent, Intent):
@@ -149,17 +167,67 @@ class GraphIRBuilder:
         else:
             role = cls._ROLE_MAP.get(role_name, EdgeRole.CONTAINS)
 
-        root_id = cls._find_first_node_id(draft)
         draft.add_edge(GraphIREdge(
             source=root_id,
             target=node_id,
             role=role,
         ))
 
+    # ── Public builder ─────────────────────────────────────────────
+
+    @classmethod
+    def build(cls, plan: IntentPlan) -> GraphIR:
+        """Convert an IntentPlan into a validated, frozen GraphIR.
+
+        Phases:
+          1. Validate IntentPlan
+          2. Node materialization — register nodes or apply metadata
+          3. Root election — semantic policy (layout.page > legacy fallback)
+          4. Edge construction — bind non-root nodes to elected root
+          5. Freeze and return
+
+        Args:
+            plan: Validated IntentPlan.
+
+        Returns:
+            Frozen GraphIR.
+
+        Raises:
+            ValueError: if plan is invalid or graph invariants fail.
+        """
+        IntentPlan.validate(plan)
+
+        draft = GraphIRDraft()
+        draft.params = dict(plan.params)
+
+        # ── Phase 2: Node materialization (inventory, no routing) ──
+        for i, intent in enumerate(plan.intents):
+            cls._add_intent_node(draft, intent, i)
+
+        # ── Phase 3: Root election (semantic policy layer) ─────────
+        root_id = cls._select_root(draft)
+
+        # ── Phase 4: Edge construction (relationship binding) ──────
+        for i, intent in enumerate(plan.intents):
+            cls._add_intent_edge(draft, intent, i, root_id)
+
+        # Safety net: attach any remaining orphans (backward compat)
+        orphans = draft.get_orphan_nodes()
+        if orphans:
+            for nid in orphans:
+                draft.add_edge(GraphIREdge(
+                    source=root_id,
+                    target=nid,
+                    role=EdgeRole.CONTAINS,
+                ))
+
+        return draft.freeze()
+
+    # ── Legacy resolvers ──────────────────────────────────────────
+
     @classmethod
     def _legacy_resolve(cls, intent: Intent) -> str | None:
         """Fallback: try to resolve via IntentExtensionRegistry."""
-        # Map capability → IntentType name for legacy resolution
         capability_to_type = {
             "display.kpi_row": "KPIGROUP",
             "display.timeseries": "CHART",
@@ -172,12 +240,6 @@ class GraphIRBuilder:
         if type_name is None:
             return None
         return IntentExtensionRegistry.resolve_graphir_type(type_name)
-
-    @staticmethod
-    def _find_first_node_id(draft: GraphIRDraft) -> str:
-        for nid in draft.nodes:
-            return nid
-        raise ValueError("GraphIRBuilder: draft has no nodes")
 
 
 def build_from_plan(plan: IntentPlan) -> GraphIR:

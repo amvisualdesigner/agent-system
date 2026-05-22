@@ -392,10 +392,12 @@ class TestFullEndToEnd(unittest.TestCase):
         fileops = backend.render(graph, layout, config)
         self.assertGreater(len(fileops), 0)
 
-        # Verify Page contains composition
+        # Verify Page composition materialized (no placeholder)
         page_file = [f for f in fileops if "Page" in f.path]
         if page_file:
-            self.assertIn("__COMPOSITION__", page_file[0].content)
+            self.assertNotIn("__COMPOSITION__", page_file[0].content)
+            self.assertIn("KpiRow", page_file[0].content)
+            self.assertIn("Timeseries", page_file[0].content)
 
     def test_render_with_style_hints(self):
         """Style hints in graph.params are accessible."""

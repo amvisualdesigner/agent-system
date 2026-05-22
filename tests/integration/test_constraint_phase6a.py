@@ -322,12 +322,19 @@ export const Chart = () => null;
             ]
 
             renderer = RepositoryAwareRenderer()
-            # Pass empty decisions so graph node processing is skipped
-            # and only the DELETE block runs
-            fileops = renderer.render(
-                graph, layout, matcher, fn, cn, ctx, config,
+            # Pass empty decisions + deletions via RenderContext
+            # so graph node processing is skipped and only the DELETE block runs
+            from app.graphir.constraint.context import PipelineState, RenderContext
+            pstate = PipelineState(
+                file_nodes=fn,
+                component_nodes=cn,
                 decisions={},
                 deletions=deletions,
+                exec_ctx=ctx,
+            )
+            fileops = renderer.render(
+                graph, layout, config,
+                context=RenderContext(execution=pstate),
             )
 
             # The file has 1 component + boundary → boundary removal (replace_range)
@@ -362,10 +369,17 @@ export const Chart = () => null;
             ]
 
             renderer = RepositoryAwareRenderer()
-            fileops = renderer.render(
-                graph, layout, matcher, fn, cn, ctx, config,
+            from app.graphir.constraint.context import PipelineState, RenderContext
+            pstate = PipelineState(
+                file_nodes=fn,
+                component_nodes=cn,
                 decisions={},
                 deletions=deletions,
+                exec_ctx=ctx,
+            )
+            fileops = renderer.render(
+                graph, layout, config,
+                context=RenderContext(execution=pstate),
             )
 
             # Chart.tsx has 2 components (KpiRow, Chart) + boundaries

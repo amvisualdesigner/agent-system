@@ -15,6 +15,8 @@ from app.graphir.constraint import (
     ExecutionContext,
     Decision,
     ExtendStrategy,
+    PipelineState,
+    RenderContext,
 )
 from app.graphir.constraint.indexer import RepositoryIndexer
 from app.graphir.constraint.generator import ContentGenerator
@@ -82,11 +84,13 @@ class TestLineRangeUPDATE:
                     ),
                 }
 
+                state = PipelineState(
+                    file_nodes=fn, component_nodes=cn,
+                    decisions=decisions, exec_ctx=ctx,
+                )
                 fileops = renderer.render(
-                    graph, layout, None,
-                    fn, cn,
-                    ctx, config,
-                    decisions=decisions,
+                    graph, layout, config,
+                    context=RenderContext(execution=state),
                 )
 
                 # Should produce exactly one modify op
@@ -145,17 +149,18 @@ class TestLineRangeEXTEND:
                     ),
                 }
 
+                state = PipelineState(
+                    file_nodes=fn, component_nodes=cn,
+                    decisions=decisions, exec_ctx=ctx,
+                )
                 fileops = renderer.render(
-                    graph, layout, None,
-                    fn, cn,
-                    ctx, config,
-                    decisions=decisions,
+                    graph, layout, config,
+                    context=RenderContext(execution=state),
                 )
 
                 assert len(fileops) == 1
                 fop = fileops[0]
                 assert fop.action == "modify"
-
                 # File should have both old content and new appended content
                 exec_path = os.path.join(ws.root, fop.path)
                 with open(exec_path) as f:
@@ -233,12 +238,14 @@ export const Timeseries = ({ data }) => {
                 ])
 
                 renderer = RepositoryAwareRenderer()
+                state = PipelineState(
+                    file_nodes=fn, component_nodes=cn,
+                    decisions=decisions, split_plan=split_plan,
+                    exec_ctx=ctx,
+                )
                 fileops = renderer.render(
-                    graph, layout, None,
-                    fn, cn,
-                    ctx, config,
-                    decisions=decisions,
-                    split_plan=split_plan,
+                    graph, layout, config,
+                    context=RenderContext(execution=state),
                 )
 
                 # Should have:

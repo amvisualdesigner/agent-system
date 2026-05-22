@@ -1,13 +1,18 @@
-"""ExecutionContext — formal execution isolation context.
+"""ExecutionContext + PipelineState + RenderContext.
 
-Every run produces exactly one ExecutionContext.
-All IO operations MUST reference this context.
+Three-layer context hierarchy:
+
+  ExecutionContext (workspace-level)
+    ↓
+  PipelineState (pipeline-level state: file_nodes, decisions, ...)
+    ↓
+  RenderContext (renderer-level projection: PipelineState + feature_flags)
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -15,6 +20,9 @@ def _get_settings():
     """Lazy import to avoid eager settings resolution at module load."""
     from app.config.settings import settings as _s
     return _s
+
+
+# ── Layer 1: Execution context (workspace isolation) ──────────────
 
 
 @dataclass(frozen=True)
@@ -63,3 +71,36 @@ class ExecutionContext:
                 f"which is outside workspace {workspace_real}"
             )
         return path
+
+
+# ── Layer 2: Pipeline state (pipeline-level data) ─────────────────
+
+
+@dataclass
+class PipelineState:
+    """Pipeline-level state: repository snapshot + decisions + plans.
+
+    Built before renderer selection. Passed to RenderContext.
+    This is the SINGLE source of truth for all pipeline-derived data.
+    """
+    file_nodes: dict = field(default_factory=dict)
+    component_nodes: dict = field(default_factory=dict)
+    decisions: dict[str, Any] = field(default_factory=dict)
+    split_plan: Any = None
+    deletions: list = field(default_factory=list)
+    resolved_mapping: dict[str, Any] = field(default_factory=dict)
+    exec_ctx: ExecutionContext | None = None
+
+
+# ── Layer 3: Render context (renderer-level projection) ───────────
+
+
+@dataclass
+class RenderContext:
+    """Renderer-level projection of pipeline state.
+
+    The renderer reads ONLY from this context. It does NOT
+    access the pipeline directly, index files, or load memory.
+    """
+    execution: PipelineState | None = None
+    feature_flags: dict = field(default_factory=dict)

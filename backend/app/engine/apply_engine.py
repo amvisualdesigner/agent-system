@@ -193,6 +193,7 @@ def _run_constraint_pipeline(
     from app.graphir.constraint.split_analyzer import SPLITAnalyzer
     from app.graphir.constraint.deletion import detect_deletions
     from app.graphir.constraint.models import MemoryRecord
+    from app.graphir.constraint.context import PipelineState, RenderContext
 
     indexer = RepositoryIndexer()
     file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
@@ -235,14 +236,23 @@ def _run_constraint_pipeline(
     # Phase 6a: DELETE detection via state difference
     deletions = detect_deletions(resolved_mapping, identities, file_nodes)
 
-    fileops = renderer.render(
-        graph, graph_layout, matcher,
-        file_nodes, component_nodes,
-        exec_ctx, backend_config,
-        resolver=resolver,
+    pipeline_state = PipelineState(
+        file_nodes=file_nodes,
+        component_nodes=component_nodes,
         decisions=decisions,
         split_plan=split_plan,
         deletions=deletions,
+        resolved_mapping=resolved_mapping,
+        exec_ctx=exec_ctx,
+    )
+    render_ctx = RenderContext(
+        execution=pipeline_state,
+        feature_flags=dict(FEATURE_FLAGS),
+    )
+
+    fileops = renderer.render(
+        graph, graph_layout, backend_config,
+        context=render_ctx,
     )
 
     if not shadow_mode:
@@ -394,6 +404,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         from app.graphir.constraint.split_analyzer import SPLITAnalyzer
         from app.graphir.constraint.deletion import detect_deletions
         from app.graphir.constraint.models import MemoryRecord
+        from app.graphir.constraint.context import PipelineState, RenderContext
 
         indexer = RepositoryIndexer()
         file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
@@ -440,14 +451,23 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Phase 6a: DELETE detection via state difference
         deletions = detect_deletions(resolved_mapping, identities, file_nodes)
 
-        fileops = renderer.render(
-            graph, graph_layout, matcher,
-            file_nodes, component_nodes,
-            exec_ctx, backend_config,
-            resolver=resolver,
+        pipeline_state = PipelineState(
+            file_nodes=file_nodes,
+            component_nodes=component_nodes,
             decisions=decisions,
             split_plan=split_plan,
             deletions=deletions,
+            resolved_mapping=resolved_mapping,
+            exec_ctx=exec_ctx,
+        )
+        render_ctx = RenderContext(
+            execution=pipeline_state,
+            feature_flags=dict(FEATURE_FLAGS),
+        )
+
+        fileops = renderer.render(
+            graph, graph_layout, backend_config,
+            context=render_ctx,
         )
 
         # Phase 2: Persist new identity→file mappings

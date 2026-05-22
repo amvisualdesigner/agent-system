@@ -16,7 +16,7 @@ Public API:
   Decision         — CREATE / UPDATE / EXTEND / SPLIT
 """
 
-from app.graphir.constraint.context import ExecutionContext
+from app.graphir.constraint.context import ExecutionContext, PipelineState, RenderContext
 from app.graphir.constraint.models import (
     Decision,
     FileOpDecision,
@@ -53,6 +53,8 @@ from app.graphir.constraint.validation import shadow_compare, shadow_compare_dec
 
 __all__ = [
     "ExecutionContext",
+    "PipelineState",
+    "RenderContext",
     "Decision",
     "FileOpDecision",
     "MemoryRecord",

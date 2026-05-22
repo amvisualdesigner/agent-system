@@ -179,6 +179,7 @@ class TestStubModulesWiring:
         from app.graphir.constraint.renderer import RepositoryAwareRenderer
         from app.graphir.constraint.matcher import IntentFileMatcher
         from app.graphir.constraint.resolver import IdentityResolver
+        from app.graphir.constraint.context import PipelineState, RenderContext
         from app.graphir.models import GraphIR, GraphIRNode, GraphIRLayout
         from app.graphir.backends import BackendConfig
 
@@ -196,8 +197,10 @@ class TestStubModulesWiring:
         config = BackendConfig()
         ctx = ExecutionContext(run_id="smoke", workspace_root="/tmp/test")
 
-        fileops = renderer.render(graph, layout, matcher, {}, {}, ctx, config,
-                                  resolver=resolver)
+        identities, candidates = matcher.match(graph, {})
+        decisions = resolver.resolve(identities, candidates, {})
+        state = PipelineState(file_nodes={}, component_nodes={}, decisions=decisions, exec_ctx=ctx)
+        fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
         assert len(fileops) > 0
         for fop in fileops:
             assert hasattr(fop, "action")

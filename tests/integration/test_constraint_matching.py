@@ -15,6 +15,8 @@ from app.graphir.backends import BackendConfig
 from app.graphir.constraint import (
     ExecutionContext,
     Decision,
+    PipelineState,
+    RenderContext,
 )
 from app.graphir.constraint.indexer import RepositoryIndexer
 from app.graphir.constraint.matcher import IntentFileMatcher
@@ -46,8 +48,8 @@ class TestMatchingGreenfield:
             decisions = resolver.resolve(identities, candidates, fn)
 
             renderer = RepositoryAwareRenderer()
-            fileops = renderer.render(graph, layout, matcher, fn, cn, ctx, config,
-                                      resolver=resolver)
+            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
+            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
 
         assert all(d.decision == Decision.CREATE for d in decisions.values())
         assert all(fop.action == "create" for fop in fileops)
@@ -67,8 +69,8 @@ class TestMatchingGreenfield:
             decisions = resolver.resolve(identities, candidates, fn)
 
             renderer = RepositoryAwareRenderer()
-            fileops = renderer.render(graph, layout, matcher, fn, cn, ctx, config,
-                                      resolver=resolver)
+            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
+            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
 
         assert all(d.decision == Decision.CREATE for d in decisions.values())
         assert len(fileops) > 0
@@ -130,9 +132,11 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
 
             matcher = IntentFileMatcher()
             resolver = IdentityResolver()
+            identities, candidates = matcher.match(graph, fn)
+            decisions = resolver.resolve(identities, candidates, fn)
             renderer = RepositoryAwareRenderer()
-            fileops = renderer.render(graph, layout, matcher, fn, cn, ctx, config,
-                                      resolver=resolver)
+            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
+            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
 
         assert len(fileops) >= 1
         for fop in fileops:
@@ -155,9 +159,11 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
 
             matcher = IntentFileMatcher()
             resolver = IdentityResolver()
+            identities, candidates = matcher.match(graph, fn)
+            decisions = resolver.resolve(identities, candidates, fn)
             renderer = RepositoryAwareRenderer()
-            fileops = renderer.render(graph, layout, matcher, fn, cn, ctx, config,
-                                      resolver=resolver)
+            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
+            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
 
         assert len(fileops) >= 1
         for fop in fileops:
@@ -216,8 +222,8 @@ class TestMatchingDeterminism:
             id1, c1 = matcher1.match(graph, fn1)
             d1 = resolver1.resolve(id1, c1, fn1)
             renderer1 = RepositoryAwareRenderer()
-            fops1 = renderer1.render(graph, layout, matcher1, fn1, cn1, ctx, config,
-                                     resolver=resolver1)
+            state1 = PipelineState(file_nodes=fn1, component_nodes=cn1, decisions=d1, exec_ctx=ctx)
+            fops1 = renderer1.render(graph, layout, config, context=RenderContext(execution=state1))
 
             # Run 2
             indexer2 = RepositoryIndexer()
@@ -227,8 +233,8 @@ class TestMatchingDeterminism:
             id2, c2 = matcher2.match(graph, fn2)
             d2 = resolver2.resolve(id2, c2, fn2)
             renderer2 = RepositoryAwareRenderer()
-            fops2 = renderer2.render(graph, layout, matcher2, fn2, cn2, ctx, config,
-                                     resolver=resolver2)
+            state2 = PipelineState(file_nodes=fn2, component_nodes=cn2, decisions=d2, exec_ctx=ctx)
+            fops2 = renderer2.render(graph, layout, config, context=RenderContext(execution=state2))
 
         for node_id in d1:
             assert d1[node_id].decision == d2[node_id].decision

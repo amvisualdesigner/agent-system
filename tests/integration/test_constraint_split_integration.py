@@ -13,6 +13,8 @@ Requires: REPO_ROOT env var.
 from app.graphir.backends import BackendConfig
 from app.graphir.constraint import (
     ExecutionContext,
+    PipelineState,
+    RenderContext,
 )
 from app.graphir.constraint.models import MemoryRecord
 from app.graphir.constraint.indexer import RepositoryIndexer
@@ -91,13 +93,14 @@ export const Chart = () => null;
 
             # Phase 4: renderer redirects
             renderer = RepositoryAwareRenderer()
+            state = PipelineState(
+                file_nodes=fn, component_nodes=cn,
+                decisions=decisions, split_plan=split_plan,
+                exec_ctx=ctx,
+            )
             fileops = renderer.render(
-                graph, layout, matcher,
-                fn, cn,
-                ctx, config,
-                resolver=resolver,
-                decisions=decisions,
-                split_plan=split_plan,
+                graph, layout, config,
+                context=RenderContext(execution=state),
             )
 
             create_ops = [f for f in fileops if f.action == "create"]
@@ -149,13 +152,14 @@ export const Chart = () => null;
             assert len(split_plan.splits) == 0
 
             renderer = RepositoryAwareRenderer()
+            state = PipelineState(
+                file_nodes=fn, component_nodes=cn,
+                decisions=decisions, split_plan=split_plan,
+                exec_ctx=ctx,
+            )
             fileops = renderer.render(
-                graph, layout, matcher,
-                fn, cn,
-                ctx, config,
-                resolver=resolver,
-                decisions=decisions,
-                split_plan=split_plan,
+                graph, layout, config,
+                context=RenderContext(execution=state),
             )
 
             # No split → normal UPDATE modify on Chart.tsx
