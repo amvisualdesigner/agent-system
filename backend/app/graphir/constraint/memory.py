@@ -161,7 +161,7 @@ class RepositorySemanticMemory:
             if identity is None:
                 continue
 
-            if decision.decision.value in ("modify", "extend"):
+            if decision.decision.value in ("modify", "extend", "create"):
                 fp = identity.fingerprint()
                 merged[fp] = MemoryRecord(
                     fingerprint=fp,

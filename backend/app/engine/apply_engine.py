@@ -275,69 +275,122 @@ def _run_constraint_pipeline(
     return fileops, decisions, identities, split_plan, deletions
 
 
+def _safe_key_set(obj):
+    """Extract keys as a set, safely handling None and non-dicts."""
+    if obj is None:
+        return set()
+    if isinstance(obj, dict):
+        return set(obj.keys())
+    if hasattr(obj, 'keys'):
+        return set(obj.keys())
+    return set()
+
+
 def _compute_semantic_loss(
     requested_intents: list[dict],
     bound_nodes: dict[str, dict],
-    rendered_entries: list[dict],
     skill_ir_obj,
 ) -> dict:
-    """Compare requested → bound → rendered to measure semantic loss.
+    """Measure semantic loss — pure intent vs structure comparison.
 
-    Returns confidence-weighted loss report with three confidence levels:
-    - source_confidence: from skill_ir decomposition confidence
-    - pipeline_confidence: proportion of requested params present in bound
-    - render_confidence: proportion of bound props present in rendered
+    NO render metrics here (those belong to RenderTrace → render_coverage).
+
+    Returns 3 independent signals:
+    - intent_binding_loss: params that reached each node
+    - skillir_override_delta: intent.params vs plan.params differences
+    - unbound_intent_params: params requested but never bound to GraphIR
     """
-    # Flatten requested params across all intents
-    requested_params: set[str] = set()
-    for intent in requested_intents:
-        params = intent.get("params", {})
-        requested_params.update(params.keys())
+    result = {}
 
-    # Bound props: all keys from GraphIRNode.data dicts
-    bound_params: set[str] = set()
-    for node_id, data in bound_nodes.items():
+    # 1. Intent binding loss: params per node
+    binding_per_node = {}
+    for node_id, node_data in (bound_nodes or {}).items():
+        data = node_data.get("data", {}) if isinstance(node_data, dict) else {}
+        if data is None:
+            data = {}
+        binding_per_node[node_id] = {
+            "bound_param_count": len(data),
+            "bound_params": sorted(data.keys()),
+        }
+    result["intent_binding_loss"] = binding_per_node
+
+    # 2. SkillIR override delta: intent.params vs plan.params
+    override_delta = {}
+    sk_params = _safe_key_set(getattr(skill_ir_obj, 'params', None))
+    if sk_params:
+        for intent in (requested_intents or []):
+            intent_params = (
+                intent.get("params", {}) if isinstance(intent, dict)
+                else getattr(intent, 'params', {})
+            )
+            if intent_params is None:
+                intent_params = {}
+            for field in _safe_key_set(intent_params) | sk_params:
+                iv = intent_params.get(field)
+                sv = skill_ir_obj.params.get(field)
+                if iv != sv:
+                    override_delta[field] = {
+                        "intent_value": iv,
+                        "skillir_value": sv,
+                    }
+    result["skillir_override_delta"] = override_delta
+
+    # 3. Unbound intent params: requested but never bound to any node
+    intent_params = set()
+    by_intent = {}
+    for intent in (requested_intents or []):
+        ip = _safe_key_set(
+            intent.get("params") if isinstance(intent, dict)
+            else getattr(intent, 'params', None)
+        )
+        intent_params.update(ip)
+        itype = (
+            intent.get("type", "unknown")
+            if isinstance(intent, dict)
+            else getattr(intent, 'type', 'unknown')
+        )
+        by_intent[itype] = ip
+    bound_params = set()
+    for node_id, node_data in (bound_nodes or {}).items():
+        data = node_data.get("data") if isinstance(node_data, dict) else {}
+        if data is None:
+            data = {}
         bound_params.update(data.keys())
-
-    # Rendered props: all keys from _emit_log entries
-    rendered_params: set[str] = set()
-    for entry in rendered_entries:
-        entry_props = entry.get("props", entry) if isinstance(entry, dict) else {}
-        if isinstance(entry_props, dict):
-            rendered_params.update(entry_props.keys())
-
-    requested_to_bound_missing = requested_params - bound_params
-    bound_to_rendered_missing = bound_params - rendered_params
-    rendered_extra = rendered_params - bound_params
-
-    source_conf = getattr(skill_ir_obj, 'confidence', None)
-    if source_conf is None:
-        source_conf = getattr(skill_ir_obj, 'decomposition_confidence', 1.0)
-    source_confidence = float(source_conf) if isinstance(source_conf, (int, float)) else 1.0
-
-    pipeline_confidence = 1.0
-    if requested_params:
-        covered = len(requested_params - requested_to_bound_missing)
-        pipeline_confidence = covered / len(requested_params)
-
-    render_confidence = 1.0
-    if bound_params:
-        rendered_covered = len(bound_params - bound_to_rendered_missing)
-        render_confidence = rendered_covered / len(bound_params) if bound_params else 1.0
-
-    return {
-        "confidence": {
-            "source_confidence": round(source_confidence, 4),
-            "pipeline_confidence": round(pipeline_confidence, 4),
-            "render_confidence": round(render_confidence, 4),
-        },
-        "requested_to_bound_loss": sorted(requested_to_bound_missing),
-        "bound_to_rendered_loss": sorted(bound_to_rendered_missing),
-        "rendered_extra": sorted(rendered_extra),
-        "requested_param_count": len(requested_params),
-        "bound_param_count": len(bound_params),
-        "rendered_param_count": len(rendered_params),
+    unbound_global = sorted(intent_params - bound_params)
+    unbound_by_intent = {
+        itype: sorted(ip - bound_params)
+        for itype, ip in by_intent.items()
     }
+    result["unbound_intent_params"] = {
+        "intent_param_count": len(intent_params),
+        "bound_param_count": len(bound_params),
+        "unbound": unbound_global,
+        "by_intent": unbound_by_intent,
+    }
+
+    return result
+
+
+def build_ownership(file_nodes, contract) -> dict:
+    """Unified ownership builder — same shape regardless of pipeline path.
+
+    Always returns {file_path: {"identity": str, "source": "index"|"contract"}}
+    """
+    ownership: dict = {}
+    if file_nodes:
+        for fp, fn in file_nodes.items():
+            raw = getattr(fn, 'identity', None)
+            identity = (
+                raw.fingerprint()
+                if raw is not None and hasattr(raw, 'fingerprint')
+                else fp
+            )
+            ownership[fp] = {"identity": identity, "source": "index"}
+    else:
+        for f in contract.renderer.get("files", []):
+            fp = f.get("path", f.get("file", ""))
+            ownership[fp] = {"identity": fp, "source": "contract"}
+    return ownership
 
 
 def _normalize(text: str) -> str:
@@ -379,27 +432,22 @@ def _build_audit(
                 "data": dict(node.data),
             }
 
-    rendered_entries: list[dict] = list(emit_log) if emit_log else list(getattr(ReactBackend, '_emit_log', []))
-
     semantic_loss = _compute_semantic_loss(
-        requested_intents, bound_nodes, rendered_entries, skill_ir_obj,
+        requested_intents, bound_nodes, skill_ir_obj,
     )
 
-    # ── Render coverage (node-level breadth + instance-level volume) ──
-    emitted_node_ids: set[str] = set()
-    emitted_instance_count = 0
-    for entry in rendered_entries:
-        if isinstance(entry, dict):
-            nid = entry.get("node_id")
-            if nid:
-                emitted_node_ids.add(nid)
-            emitted_instance_count += 1
-    missing_nodes = sorted(set(graph.nodes.keys()) - emitted_node_ids)
-    semantic_loss["render_coverage"] = {
+    # ── Render coverage — derived from RenderTrace ONLY ──
+    traces = getattr(ReactBackend, '_render_traces', [])
+    entered_set = {t.node_id for t in traces if t.phase == "entered"}
+    emitted_set = {t.node_id for t in traces if t.phase == "emitted"}
+    render_coverage = {
         "expected_nodes": len(graph.nodes),
-        "unique_nodes_emitted": len(emitted_node_ids),
-        "total_emit_instances": emitted_instance_count,
-        "missing_nodes": missing_nodes,
+        "nodes_entered": sum(1 for t in traces if t.phase == "entered"),
+        "unique_nodes_entered": len(entered_set),
+        "nodes_emitted": sum(1 for t in traces if t.phase == "emitted"),
+        "unique_nodes_emitted": len(emitted_set),
+        "missing_nodes": sorted(set(graph.nodes.keys()) - entered_set),
+        "entered_no_emit": sorted(entered_set - emitted_set),
     }
 
     # ── Section 2: component_identity ──
@@ -430,18 +478,7 @@ def _build_audit(
         })
 
     # ── Section 4: ownership ──
-    ownership: dict = {}
-    if file_nodes:
-        for fp, fn in file_nodes.items():
-            raw = getattr(fn, 'identity', None)
-            if raw is not None:
-                identity = raw.fingerprint() if hasattr(raw, 'fingerprint') else str(raw)
-            else:
-                identity = fp
-            ownership[fp] = {"identity": identity}
-    else:
-        for f in contract.renderer.get("files", []):
-            ownership[f.get("path", f.get("file", ""))] = {"identity": f.get("path", f.get("file", ""))}
+    ownership = build_ownership(file_nodes, contract)
 
     # ── Section 5: semantic_loss ──
     # Already computed above
@@ -505,12 +542,13 @@ def _build_audit(
         "intent_realization": {
             "requested": requested_intents,
             "bound": bound_nodes,
-            "rendered": rendered_entries,
+            "rendered": list(emit_log) if emit_log else [],
         },
         "component_identity": component_identity,
         "pipeline_route": pipeline_route,
         "ownership": ownership,
         "semantic_loss": semantic_loss,
+        "render_coverage": render_coverage,
         "repo_integrity": repo_integrity,
         "anomalies": anomalies,
     }
@@ -724,6 +762,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         )
 
         ReactBackend.reset_emit_log(run_id)
+        ReactBackend.reset_traces(run_id)
         fileops = renderer.render(
             graph, graph_layout, backend_config,
             context=render_ctx,
@@ -746,6 +785,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     else:
         # Legacy path: direct BackendRenderer (unchanged behavior)
         ReactBackend.reset_emit_log(run_id)
+        ReactBackend.reset_traces(run_id)
         backend = ReactBackend()
         fileops = backend.render(graph, graph_layout, backend_config)
 

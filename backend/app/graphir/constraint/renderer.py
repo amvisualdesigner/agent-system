@@ -112,6 +112,7 @@ class RepositoryAwareRenderer:
         fileops: list[FileOp] = []
 
         for node in graph.nodes.values():
+            ReactBackend.add_trace(node.id, "entered", component=getattr(node, 'type', None))
             decision = decisions.get(node.id)
             if decision is None:
                 continue
@@ -131,6 +132,10 @@ class RepositoryAwareRenderer:
             try:
                 content = self.generator.generate(ctx, layout, config)
             except KeyError:
+                logger.warning(
+                    "No generator for type '%s' — skipping node '%s'",
+                    ctx.type, ctx.id,
+                )
                 continue
 
             # Phase 6b: Materialize composition — real imports + React tree
@@ -149,6 +154,7 @@ class RepositoryAwareRenderer:
                     decision.target_file, ctx.type,
                 )
                 if new_path:
+                    ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                     fileops.append(FileOp(
                         action="create",
                         path=new_path,
@@ -180,11 +186,15 @@ class RepositoryAwareRenderer:
                     )
                     if exec_ctx:
                         executor = self._get_executor(exec_ctx.workspace_root)
-                        fileops.extend(executor.execute(edit))
+                        new_ops = executor.execute(edit)
+                        if new_ops:
+                            ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
+                        fileops.extend(new_ops)
                     continue
 
                 # CREATE and SPLIT fall through to legacy handling
                 if decision.decision in (Decision.CREATE, Decision.SPLIT):
+                    ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                     fileops.append(FileOp(
                         action="create",
                         path=decision.target_file,
@@ -194,6 +204,7 @@ class RepositoryAwareRenderer:
 
             # Legacy path (Phase 1 behavior)
             if decision.decision == Decision.CREATE:
+                ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                 fileops.append(FileOp(
                     action="create",
                     path=decision.target_file,
@@ -201,6 +212,7 @@ class RepositoryAwareRenderer:
                 ))
 
             elif decision.decision in (Decision.UPDATE, Decision.EXTEND):
+                ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                 fileops.append(FileOp(
                     action="modify",
                     path=decision.target_file,
@@ -208,6 +220,7 @@ class RepositoryAwareRenderer:
                 ))
 
             elif decision.decision == Decision.SPLIT:
+                ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                 fileops.append(FileOp(
                     action="create",
                     path=decision.target_file,

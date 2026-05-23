@@ -13,8 +13,10 @@ Construction lifecycle:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 
@@ -92,6 +94,10 @@ class GraphIRNode:
     data: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        object.__setattr__(self, 'data', _deep_freeze(self.data))
+        object.__setattr__(self, 'metadata', _deep_freeze(self.metadata))
+
 
 @dataclass(frozen=True)
 class GraphIREdge:
@@ -135,6 +141,15 @@ class GraphIRLayout:
     constraints: dict[str, list[LayoutConstraint]] = field(default_factory=dict)
 
 
+def _deep_freeze(obj):
+    """Recursively freeze dicts into MappingProxyType — protects nested data."""
+    if isinstance(obj, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in obj.items()})
+    if isinstance(obj, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in obj)
+    return obj
+
+
 @dataclass(frozen=True)
 class GraphIR:
     """Immutable, validated GraphIR.
@@ -152,7 +167,10 @@ class GraphIR:
     params: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert isinstance(self.nodes, dict), "GraphIR.nodes must be dict"
+        object.__setattr__(self, 'nodes', _deep_freeze(self.nodes))
+        assert isinstance(self.nodes, MappingProxyType), (
+            "GraphIR.nodes must be deep-frozen. Use GraphIRDraft.freeze()."
+        )
         assert isinstance(self.edges, list), "GraphIR.edges must be list"
         assert isinstance(self.layout, GraphIRLayout), "GraphIR.layout must be GraphIRLayout"
         assert all(isinstance(k, str) for k in self.nodes), "GraphIR.nodes keys must be strings"
@@ -244,3 +262,96 @@ class FileOp:
         if self.metadata and "pipeline_route" in self.metadata:
             base["pipeline_route"] = self.metadata["pipeline_route"]
         return base
+
+
+@dataclass
+class GraphIRIntegrityResult:
+    """Result of validating GraphIR structural integrity.
+
+    NEVER raises — always returns a result. The pipeline reads
+    .status and decides whether to halt or continue with degraded
+    integrity.
+    """
+    status: str  # "ok" | "degraded"
+    dangling_edges: list[dict] = field(default_factory=list)
+    malformed_nodes: list[dict] = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+
+    def to_report(self) -> dict:
+        return {
+            "graph_integrity": self.status,
+            "dangling_edges": self.dangling_edges,
+            "malformed_nodes": self.malformed_nodes,
+            "summary": self.summary,
+        }
+
+
+def validate_graph_integrity(graph: GraphIR) -> GraphIRIntegrityResult:
+    """Validate GraphIR structural integrity without mutation.
+
+    Checks:
+      A. Dangling references — edges targeting non-existent node_ids
+      B. Malformed nodes — null data, null metadata, missing type/id
+
+    Returns GraphIRIntegrityResult — NEVER raises.
+    """
+    dangling_edges: list[dict] = []
+    malformed_nodes: list[dict] = []
+
+    # A. Dangling edges
+    node_ids = set(graph.nodes.keys())
+    for edge in graph.edges:
+        if edge.source not in node_ids:
+            dangling_edges.append({
+                "reason": "missing_source",
+                "source": edge.source,
+                "target": edge.target,
+                "role": edge.role.value,
+            })
+        if edge.target not in node_ids:
+            dangling_edges.append({
+                "reason": "missing_target",
+                "source": edge.source,
+                "target": edge.target,
+                "role": edge.role.value,
+            })
+
+    # B. Malformed nodes
+    for nid, node in graph.nodes.items():
+        if node.data is None:
+            malformed_nodes.append({
+                "node_id": nid,
+                "reason": "null_data",
+            })
+        elif not isinstance(node.data, (dict, MappingProxyType)):
+            malformed_nodes.append({
+                "node_id": nid,
+                "reason": "invalid_data_type",
+                "type": type(node.data).__name__,
+            })
+        if not node.type or not isinstance(node.type, str):
+            malformed_nodes.append({
+                "node_id": nid,
+                "reason": "missing_or_invalid_type",
+                "type": node.type,
+            })
+        if not node.id:
+            malformed_nodes.append({
+                "node_id": nid,
+                "reason": "missing_id",
+            })
+
+    status = "degraded" if (dangling_edges or malformed_nodes) else "ok"
+    summary = {
+        "total_nodes": len(graph.nodes),
+        "total_edges": len(graph.edges),
+        "dangling_edge_count": len(dangling_edges),
+        "malformed_node_count": len(malformed_nodes),
+    }
+
+    return GraphIRIntegrityResult(
+        status=status,
+        dangling_edges=dangling_edges,
+        malformed_nodes=malformed_nodes,
+        summary=summary,
+    )

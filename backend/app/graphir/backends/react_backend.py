@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -26,6 +27,32 @@ ComponentGenerator = Callable[
     [GraphIRNode, list[LayoutConstraint], "ReactBackend", BackendConfig],
     str,
 ]
+
+
+class RenderTraceViolation(Exception):
+    """Raised when RenderTrace lifecycle invariant is violated.
+
+    This is a HARD fail — not an audit flag. RenderTrace must be a
+    deterministic state machine. Any out-of-order or invalid transition
+    means the pipeline state is unrecoverable.
+    """
+
+
+@dataclass
+class RenderTrace:
+    """Single observation in the render lifecycle.
+
+    phases:
+      "entered"  → node entered the render loop
+      "emitted"  → props sent to runtime (FileOp created)
+
+    Every node ends as either "entered" (not rendered) or "emitted" (success).
+    """
+    node_id: str
+    phase: str
+    component: str | None = None
+    props: dict | None = None
+    timestamp: float = 0.0
 
 
 def _flatten_tree(root: UIComponentNode) -> list[UIComponentNode]:
@@ -49,13 +76,38 @@ class ReactBackend(BackendRenderer):
     """
 
     _generators: dict[str, ComponentGenerator] = {}
-    _emit_log: dict[str, list[dict]] = {}
+    _render_traces: list[RenderTrace] = []
+    _render_traces_by_run: dict[str, list[RenderTrace]] = {}
+    _emit_log: dict[str, list[dict]] = {}  # debug dump only — NOT used in metrics
     _current_run: str = ""
+    _entered_nodes: set[str] = set()  # lifecycle enforcement set
 
     @classmethod
     def reset_emit_log(cls, run_id: str = "") -> None:
         cls._current_run = run_id if run_id else "unknown"
         cls._emit_log[cls._current_run] = []
+
+    @classmethod
+    def reset_traces(cls, run_id: str = "") -> None:
+        cls._render_traces = []
+        cls._entered_nodes.clear()
+        if run_id:
+            cls._render_traces_by_run[run_id] = []
+
+    @classmethod
+    def add_trace(cls, node_id: str, phase: str, component: str | None = None, props: dict | None = None) -> None:
+        if phase == "emitted" and node_id not in cls._entered_nodes:
+            raise RenderTraceViolation(
+                f"emit({node_id}) without prior enter({node_id}) — "
+                f"RenderTrace lifecycle violated. "
+                f"entered_nodes={sorted(cls._entered_nodes)}"
+            )
+        if phase == "entered":
+            cls._entered_nodes.add(node_id)
+        cls._render_traces.append(RenderTrace(
+            node_id=node_id, phase=phase, component=component,
+            props=props, timestamp=time.time(),
+        ))
 
     @classmethod
     def register(cls, type_name: str, generator: ComponentGenerator) -> None:
@@ -94,6 +146,7 @@ class ReactBackend(BackendRenderer):
         """
         fileops: list[FileOp] = []
         for uinode in _flatten_tree(tree.root):
+            ReactBackend.add_trace(uinode.id, "entered", component=uinode.component)
             generator = self._generators.get(uinode.component)
             if generator is None:
                 continue
@@ -111,6 +164,7 @@ class ReactBackend(BackendRenderer):
 
             file_path = self._resolve_file_path(ctx, config)
             fileops.append(FileOp(action="create", path=file_path, content=content))
+            ReactBackend.add_trace(uinode.id, "emitted", component=uinode.component, props=dict(uinode.props))
 
         return fileops
 
