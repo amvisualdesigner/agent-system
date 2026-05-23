@@ -10,6 +10,7 @@ Executes a plan against a workspace using the GraphIR pipeline:
 
 import os
 import json
+import hashlib
 import subprocess
 import logging
 
@@ -30,6 +31,7 @@ from app.graphir.validator import GraphIRValidator
 from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops
 from app.graphir.utils import extract_component_name
+from app.graphir.utils import check_repo_integrity
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 from app.graphir.constraint.validation import shadow_compare, shadow_compare_decisions
@@ -156,18 +158,25 @@ def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | Non
     return diff, None
 
 
-def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str):
+def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str,
+                     audit: dict | None = None):
     with open(f"{artifacts_dir}/plan.json", "w") as f:
         json.dump(plan, f, indent=2)
     with open(f"{artifacts_dir}/execution.json", "w") as f:
-        json.dump({"run_id": run_id, "operations": operations, "results": results}, f, indent=2)
+        payload: dict = {"run_id": run_id, "operations": operations, "results": results}
+        if audit:
+            payload["audit"] = audit
+        json.dump(payload, f, indent=2)
     with open(f"{artifacts_dir}/summary.json", "w") as f:
-        json.dump({
+        summary = {
             "run_id": run_id,
             "status": "ok",
             "files_created": [r.get("path") for r in results if r.get("status") == "created"],
             "execution_mode": "graphir",
-        }, f, indent=2)
+        }
+        if audit:
+            summary["anomalies"] = audit.get("anomalies", [])
+        json.dump(summary, f, indent=2)
     with open(f"{artifacts_dir}/diff.patch", "w") as f:
         f.write(diff)
 
@@ -266,6 +275,247 @@ def _run_constraint_pipeline(
     return fileops, decisions, identities, split_plan, deletions
 
 
+def _compute_semantic_loss(
+    requested_intents: list[dict],
+    bound_nodes: dict[str, dict],
+    rendered_entries: list[dict],
+    skill_ir_obj,
+) -> dict:
+    """Compare requested → bound → rendered to measure semantic loss.
+
+    Returns confidence-weighted loss report with three confidence levels:
+    - source_confidence: from skill_ir decomposition confidence
+    - pipeline_confidence: proportion of requested params present in bound
+    - render_confidence: proportion of bound props present in rendered
+    """
+    # Flatten requested params across all intents
+    requested_params: set[str] = set()
+    for intent in requested_intents:
+        params = intent.get("params", {})
+        requested_params.update(params.keys())
+
+    # Bound props: all keys from GraphIRNode.data dicts
+    bound_params: set[str] = set()
+    for node_id, data in bound_nodes.items():
+        bound_params.update(data.keys())
+
+    # Rendered props: all keys from _emit_log entries
+    rendered_params: set[str] = set()
+    for entry in rendered_entries:
+        entry_props = entry.get("props", entry) if isinstance(entry, dict) else {}
+        if isinstance(entry_props, dict):
+            rendered_params.update(entry_props.keys())
+
+    requested_to_bound_missing = requested_params - bound_params
+    bound_to_rendered_missing = bound_params - rendered_params
+    rendered_extra = rendered_params - bound_params
+
+    source_conf = getattr(skill_ir_obj, 'confidence', None)
+    if source_conf is None:
+        source_conf = getattr(skill_ir_obj, 'decomposition_confidence', 1.0)
+    source_confidence = float(source_conf) if isinstance(source_conf, (int, float)) else 1.0
+
+    pipeline_confidence = 1.0
+    if requested_params:
+        covered = len(requested_params - requested_to_bound_missing)
+        pipeline_confidence = covered / len(requested_params)
+
+    render_confidence = 1.0
+    if bound_params:
+        rendered_covered = len(bound_params - bound_to_rendered_missing)
+        render_confidence = rendered_covered / len(bound_params) if bound_params else 1.0
+
+    return {
+        "confidence": {
+            "source_confidence": round(source_confidence, 4),
+            "pipeline_confidence": round(pipeline_confidence, 4),
+            "render_confidence": round(render_confidence, 4),
+        },
+        "requested_to_bound_loss": sorted(requested_to_bound_missing),
+        "bound_to_rendered_loss": sorted(bound_to_rendered_missing),
+        "rendered_extra": sorted(rendered_extra),
+        "requested_param_count": len(requested_params),
+        "bound_param_count": len(bound_params),
+        "rendered_param_count": len(rendered_params),
+    }
+
+
+def _normalize(text: str) -> str:
+    return hashlib.sha256(text.strip().encode()).hexdigest()
+
+
+def _build_audit(
+    graph, intent_plan, fileops, exec_ctx, contract,
+    skill_ir_obj, config,
+    decisions=None, identities=None, resolved_mapping=None,
+    file_nodes=None, workspace_root="", coverage_report=None,
+    render_ctx=None, emit_log=None,
+) -> dict:
+    """Build run artifact audit with all 6 diagnostic sections + anomalies."""
+    anomalies: list[dict] = []
+
+    # ── Section 1: intent_realization ──
+    requested_intents: list[dict] = []
+    for intent in intent_plan.intents:
+        if hasattr(intent, 'capability'):
+            requested_intents.append({
+                "type": intent.capability,
+                "params": dict(intent.params) if hasattr(intent, 'params') else {},
+                "weight": getattr(intent, 'weight', 1.0),
+            })
+        elif hasattr(intent, 'type'):
+            requested_intents.append({
+                "type": intent.type,
+                "params": dict(intent.params) if hasattr(intent, 'params') else {},
+            })
+        elif isinstance(intent, dict):
+            requested_intents.append(intent)
+
+    bound_nodes: dict[str, dict] = {}
+    for node_id, node in graph.nodes.items():
+        if hasattr(node, 'data') and node.data:
+            bound_nodes[node_id] = {
+                "type": getattr(node, 'type', 'unknown'),
+                "data": dict(node.data),
+            }
+
+    rendered_entries: list[dict] = list(emit_log) if emit_log else list(getattr(ReactBackend, '_emit_log', []))
+
+    semantic_loss = _compute_semantic_loss(
+        requested_intents, bound_nodes, rendered_entries, skill_ir_obj,
+    )
+
+    # ── Render coverage (node-level breadth + instance-level volume) ──
+    emitted_node_ids: set[str] = set()
+    emitted_instance_count = 0
+    for entry in rendered_entries:
+        if isinstance(entry, dict):
+            nid = entry.get("node_id")
+            if nid:
+                emitted_node_ids.add(nid)
+            emitted_instance_count += 1
+    missing_nodes = sorted(set(graph.nodes.keys()) - emitted_node_ids)
+    semantic_loss["render_coverage"] = {
+        "expected_nodes": len(graph.nodes),
+        "unique_nodes_emitted": len(emitted_node_ids),
+        "total_emit_instances": emitted_instance_count,
+        "missing_nodes": missing_nodes,
+    }
+
+    # ── Section 2: component_identity ──
+    component_identity: dict = {}
+    if identities:
+        for intent_id, ci in identities.items():
+            identity_str = ci.fingerprint() if hasattr(ci, 'fingerprint') else str(ci)
+            component_identity[str(intent_id)] = identity_str
+    else:
+        for fop in fileops:
+            component_identity[fop.path] = {"action": fop.action}
+
+    # ── Section 3: pipeline_route ──
+    route = exec_ctx.active_route if exec_ctx else "unknown"
+    pipeline_route: dict = {
+        "route": route,
+        "constraint_graph": bool(FEATURE_FLAGS.get("constraint_graph", False)),
+        "constraint_graph_shadow": bool(FEATURE_FLAGS.get("constraint_graph_shadow", True)),
+        "constraint_graph_line_range": bool(FEATURE_FLAGS.get("constraint_graph_line_range", False)),
+    }
+
+    # Detect route anomalies
+    if route == "unknown":
+        anomalies.append({
+            "severity": "warning",
+            "type": "route_unknown",
+            "detail": "pipeline route was not set (defaulted to 'unknown')",
+        })
+
+    # ── Section 4: ownership ──
+    ownership: dict = {}
+    if file_nodes:
+        for fp, fn in file_nodes.items():
+            raw = getattr(fn, 'identity', None)
+            if raw is not None:
+                identity = raw.fingerprint() if hasattr(raw, 'fingerprint') else str(raw)
+            else:
+                identity = fp
+            ownership[fp] = {"identity": identity}
+    else:
+        for f in contract.renderer.get("files", []):
+            ownership[f.get("path", f.get("file", ""))] = {"identity": f.get("path", f.get("file", ""))}
+
+    # ── Section 5: semantic_loss ──
+    # Already computed above
+
+    # ── Section 6: repo_integrity ──
+    repo_root = workspace_root or (exec_ctx.workspace_root if exec_ctx else "")
+    repo_integrity = check_repo_integrity(repo_root)
+
+    # mutation_state: check if written files drifted from emitted content
+    mutation_state = "clean"
+    for fop in fileops:
+        if not repo_root:
+            continue
+        fpath = os.path.join(repo_root, fop.path)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath) as fh:
+                    if _normalize(fh.read()) != _normalize(fop.content):
+                        mutation_state = "drifted"
+                        break
+            except Exception:
+                mutation_state = "drifted"
+                break
+    repo_integrity["mutation_state"] = mutation_state
+    if mutation_state == "drifted":
+        anomalies.append({
+            "severity": "warning",
+            "type": "file_drift",
+            "detail": "Written file differs from emitted content — possible external modification",
+        })
+
+    if repo_integrity.get("issues"):
+        for issue in repo_integrity["issues"]:
+            anomalies.append({
+                "severity": issue.get("severity", "warning"),
+                "type": issue.get("type", "integrity"),
+                "detail": issue.get("detail", ""),
+                "file": issue.get("file"),
+            })
+
+    # Collect unresolved fragments from coverage
+    if coverage_report:
+        uf = getattr(coverage_report, 'unresolved_fragments', None)
+        if uf:
+            anomalies.append({
+                "severity": "warning",
+                "type": "unresolved_fragments",
+                "detail": f"{len(uf)} unresolved fragments in coverage report",
+            })
+        missing = getattr(coverage_report, 'missing', None)
+        if missing:
+            for m in missing:
+                anomalies.append({
+                    "severity": "info",
+                    "type": "missing_intent",
+                    "detail": getattr(m, 'reason', str(m)),
+                    "capability": getattr(m, 'capability', 'unknown'),
+                })
+
+    return {
+        "intent_realization": {
+            "requested": requested_intents,
+            "bound": bound_nodes,
+            "rendered": rendered_entries,
+        },
+        "component_identity": component_identity,
+        "pipeline_route": pipeline_route,
+        "ownership": ownership,
+        "semantic_loss": semantic_loss,
+        "repo_integrity": repo_integrity,
+        "anomalies": anomalies,
+    }
+
+
 def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
     """Execute a plan against a workspace using the GraphIR pipeline.
 
@@ -288,6 +538,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         workspace_root=context.workspace,
         worktree_id=f"agent-{run_id[:8]}",
         artifacts_dir=context.artifacts,
+        active_route="constraint" if FEATURE_FLAGS.get("constraint_graph", False) else "legacy",
     )
 
     skill_ir = plan.get("skill_ir")
@@ -393,6 +644,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         path_map=path_map,
     )
 
+    # ── Audit var holders (collected from whichever path runs) ──
+    _audit_decisions: dict | None = None
+    _audit_identities: dict | None = None
+    _audit_resolved_mapping: dict | None = None
+    _audit_file_nodes: dict | None = None
+    _audit_render_ctx = None
+
     if FEATURE_FLAGS.get("constraint_graph", False):
         # New ConstraintGraph pipeline (Phases 1+)
         from app.graphir.constraint.indexer import RepositoryIndexer
@@ -465,10 +723,18 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             feature_flags=dict(FEATURE_FLAGS),
         )
 
+        ReactBackend.reset_emit_log(run_id)
         fileops = renderer.render(
             graph, graph_layout, backend_config,
             context=render_ctx,
         )
+
+        # Collect constraint vars for audit
+        _audit_decisions = decisions
+        _audit_identities = identities
+        _audit_resolved_mapping = resolved_mapping
+        _audit_file_nodes = file_nodes
+        _audit_render_ctx = render_ctx
 
         # Phase 2: Persist new identity→file mappings
         deleted_fps = {d.fingerprint for d in deletions}
@@ -479,8 +745,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         memory.save(updated)
     else:
         # Legacy path: direct BackendRenderer (unchanged behavior)
+        ReactBackend.reset_emit_log(run_id)
         backend = ReactBackend()
         fileops = backend.render(graph, graph_layout, backend_config)
+
+    # ── Capture emitted props right after primary render (before shadow) ──
+    _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))
 
     # ── Shadow mode: run constraint pipeline alongside legacy ──
     # Only runs when constraint_graph=False (primary path is legacy).
@@ -529,7 +799,31 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     if err:
         return {"status": "rejected", "reason": "git_commit_failed", "error": err}
 
-    _write_artifacts(context.artifacts, run_id, plan, [fop.to_dict() for fop in fileops], results, diff or "")
+    # ── Build audit ──
+    audit = _build_audit(
+        graph=graph,
+        intent_plan=intent_plan,
+        fileops=fileops,
+        exec_ctx=exec_ctx,
+        contract=contract,
+        skill_ir_obj=skill_ir_obj,
+        config=backend_config,
+        decisions=_audit_decisions,
+        identities=_audit_identities,
+        resolved_mapping=_audit_resolved_mapping,
+        file_nodes=_audit_file_nodes,
+        workspace_root=context.workspace,
+        coverage_report=coverage_report,
+        render_ctx=_audit_render_ctx,
+        emit_log=_captured_emit_log,
+    )
+
+    _write_artifacts(
+        context.artifacts, run_id, plan,
+        [fop.to_dict() for fop in fileops],
+        results, diff or "",
+        audit=audit,
+    )
 
     # ── Step 5: Build intent_fidelity ──
     if coverage_report is not None:
@@ -581,4 +875,5 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "workspace": context.workspace,
         "execution_mode": "graphir",
         "intent_fidelity": intent_fidelity,
+        "audit": audit,
     }

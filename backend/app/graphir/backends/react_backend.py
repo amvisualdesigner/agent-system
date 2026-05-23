@@ -49,6 +49,13 @@ class ReactBackend(BackendRenderer):
     """
 
     _generators: dict[str, ComponentGenerator] = {}
+    _emit_log: dict[str, list[dict]] = {}
+    _current_run: str = ""
+
+    @classmethod
+    def reset_emit_log(cls, run_id: str = "") -> None:
+        cls._current_run = run_id if run_id else "unknown"
+        cls._emit_log[cls._current_run] = []
 
     @classmethod
     def register(cls, type_name: str, generator: ComponentGenerator) -> None:
@@ -123,6 +130,9 @@ class ReactBackend(BackendRenderer):
         """
         parts: list[str] = []
         for child in children:
+            ReactBackend._emit_log.setdefault(ReactBackend._current_run, []).append(
+                {"component": child.component, "props": dict(child.props), "node_id": child.id}
+            )
             props_str = ReactBackend._emit(child.props)
             child_tag = (
                 f"<{child.component} {props_str} />" if props_str
@@ -144,7 +154,10 @@ class ReactBackend(BackendRenderer):
 
         This is the LAST transformation in the pipeline.
         The contract is UIComponentTree; _emit is just the last mile.
+
+        Instrumented: logs emitted props to _emit_log for audit.
         """
+        ReactBackend._emit_log.setdefault(ReactBackend._current_run, []).append(dict(props))
         if not props:
             return ""
         parts = []

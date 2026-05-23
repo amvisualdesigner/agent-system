@@ -249,6 +249,11 @@ class RepositoryAwareRenderer:
                 executor = self._get_executor(exec_ctx.workspace_root)
                 fileops.extend(executor.execute(edit))
 
+        # ── Audit: annotate each FileOp with pipeline route ──
+        route = exec_ctx.active_route if exec_ctx else "unknown"
+        for fop in fileops:
+            fop.metadata["pipeline_route"] = route
+
         return fileops
 
     @staticmethod

@@ -237,6 +237,10 @@ class FileOp:
     action: str
     path: str
     content: str
+    metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {"action": self.action, "path": self.path, "content": self.content}
+        base = {"action": self.action, "path": self.path, "content": self.content}
+        if self.metadata and "pipeline_route" in self.metadata:
+            base["pipeline_route"] = self.metadata["pipeline_route"]
+        return base

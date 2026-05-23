@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+PipelineRoute = Literal["constraint", "legacy", "shadow", "replay", "unknown"]
 
 
 def _get_settings():
@@ -43,6 +45,7 @@ class ExecutionContext:
     git_ref: str | None = None
     is_isolated: bool = True
     artifacts_dir: str = ""
+    active_route: PipelineRoute = "unknown"
 
     def __post_init__(self):
         object.__setattr__(self, "worktree_id",
