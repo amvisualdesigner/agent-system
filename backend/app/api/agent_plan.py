@@ -75,6 +75,56 @@ def agent_plan(req: PlanRequest):
         dec_result = decompose_task(req.task)
         intents_data = [i.to_dict() for i in dec_result.intents]
 
+        # ── Semantic frame + confidence gate (spike) ──
+        from app.graphir.semantic_frame import build_frame_from_decomposition
+        from app.engine.gate import confidence_gate
+
+        semantic_frame = build_frame_from_decomposition(req.task, dec_result)
+        gate_result = confidence_gate(semantic_frame)
+
+        if gate_result.blocked:
+            logger.warning(
+                "Pipeline blocked by confidence gate: %s | missing: %s",
+                gate_result.reason, gate_result.missing_info,
+            )
+            plan = {
+                "skill_ir": skill_ir.to_dict(),
+                "actions": [],
+                "task": req.task,
+                "intents": intents_data,
+                "decomposition": {
+                    "decomposition_confidence": dec_result.decomposition_confidence,
+                    "detected": dec_result.detected,
+                    "inferred": dec_result.inferred,
+                    "unresolved": dec_result.unresolved,
+                },
+                "semantic_frame": {
+                    "actions": [{"verb": a.verb, "object": a.direct_object, "confidence": a.confidence} for a in semantic_frame.actions],
+                    "objects": [{"type": o.type, "confidence": o.confidence} for o in semantic_frame.objects],
+                    "constraints": [{"param": c.param, "value": c.value, "source": c.source} for c in semantic_frame.constraints],
+                    "confidence": semantic_frame.confidence,
+                    "missing_info": semantic_frame.missing_info,
+                },
+                "gate": {
+                    "blocked": True,
+                    "reason": gate_result.reason,
+                },
+            }
+            write_state(run_id, "plan")
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": gate_result.reason,
+                "plan": plan,
+                "skill_ir": skill_ir.to_dict(),
+                "planner_meta": {
+                    "task_mode": classification.mode,
+                    "semantic_score": classification.semantic_score,
+                    "composition_score": classification.composition_score,
+                    "matched_patterns": classification.matched_patterns,
+                },
+            }
+
         plan = {
             "skill_ir": skill_ir.to_dict(),
             "actions": [],
@@ -85,6 +135,13 @@ def agent_plan(req: PlanRequest):
                 "detected": dec_result.detected,
                 "inferred": dec_result.inferred,
                 "unresolved": dec_result.unresolved,
+            },
+            "semantic_frame": {
+                "actions": [{"verb": a.verb, "object": a.direct_object, "confidence": a.confidence} for a in semantic_frame.actions],
+                "objects": [{"type": o.type, "confidence": o.confidence} for o in semantic_frame.objects],
+                "constraints": [{"param": c.param, "value": c.value, "source": c.source} for c in semantic_frame.constraints],
+                "confidence": semantic_frame.confidence,
+                "missing_info": semantic_frame.missing_info,
             },
         }
 
