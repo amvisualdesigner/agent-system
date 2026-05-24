@@ -22,6 +22,7 @@ from app.utils.path_guard import guard_within
 from app.config.settings import settings
 from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
+from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.skill_registry import get_contract
 from app.graphir.intent import Intent, IntentPlan, is_capability_metadata
 from app.graphir.intent_coverage import IntentCoverageValidator, IntentCoverageError
@@ -48,10 +49,18 @@ def _build_intents_from_plan(plan: dict) -> list[Intent] | None:
 
 
 def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
-    """Convert a SkillIR into an IntentPlan (legacy path, IntentNode-based).
+    """Convert a SkillIR into an IntentPlan (LEGACY path, IntentNode-based).
 
-    Temporary adapter until the LLM produces IntentPlan directly.
+    DEPRECATED — will be removed after reconciliation validation.
+    New code MUST use _intents_to_intent_plan with SemanticResolution.
     """
+    import warnings
+    warnings.warn(
+        "_skill_ir_to_intent_plan is deprecated. "
+        "Use _intents_to_intent_plan with SemanticResolution instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     contract = get_contract(skill_ir.contract_id, skill_ir.version)
     if contract is None:
         raise ValueError(f"Contract not found: {skill_ir.contract_id}@{skill_ir.version}")
@@ -99,21 +108,47 @@ def _skill_ir_to_intent_plan(skill_ir: SkillIR) -> IntentPlan:
     )
 
 
-def _intents_to_intent_plan(intents: list[Intent], skill_ir: SkillIR) -> IntentPlan:
-    """Convert decomposed Intent objects into an IntentPlan (new path).
+def _intents_to_intent_plan(
+    intents: list[Intent],
+    semantic_resolution: SemanticResolution,
+) -> IntentPlan:
+    """Convert decomposed Intent objects into an IntentPlan.
 
-    This is the intent-first path: intents → contract match.
+    SemanticResolution.params es la ÚNICA fuente de parámetros semánticos.
+    Intent.params se eliminan — son legacy y están contaminados
+    con basura keyword-based ("ratio", "adding").
+
+    Las capabilities se conservan (para cobertura, edge routing, etc.)
+    pero sus params no viajan downstream.
     """
-    contract = get_contract(skill_ir.contract_id, skill_ir.version)
+    contract = get_contract(
+        semantic_resolution.contract_id,
+        semantic_resolution.contract_version,
+    )
     if contract is None:
-        raise ValueError(f"Contract not found: {skill_ir.contract_id}@{skill_ir.version}")
+        raise ValueError(
+            f"Contract not found: "
+            f"{semantic_resolution.contract_id}@{semantic_resolution.contract_version}"
+        )
 
-    params = dict(skill_ir.params)
+    # Stripear params de todos los intents — solo SemanticResolution es autoridad
+    clean_intents = [
+        Intent(
+            id=i.id,
+            capability=i.capability,
+            params={},
+            task_fragment=i.task_fragment,
+            weight=i.weight,
+            source=i.source,
+            structure_context=i.structure_context,
+        )
+        for i in intents
+    ]
 
     return IntentPlan(
-        intents=intents,
-        contracts=[contract] if contract else [],
-        params=params,
+        intents=clean_intents,
+        contracts=[contract],
+        params=dict(semantic_resolution.params),
     )
 
 
@@ -596,10 +631,19 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     dec_info = plan.get("decomposition", {}) if isinstance(plan, dict) else {}
 
     if intents:
-        # Intent-first path: build IntentPlan from decomposed intents
+        # Intent-first path: reconcile → SemanticResolution → IntentPlan
         try:
-            intent_plan = _intents_to_intent_plan(intents, skill_ir_obj)
-        except ValueError as e:
+            from app.engine.reconciliation import reconcile
+            from app.contracts.semantic_resolution import SemanticResolution, SemanticConflictError
+
+            semantic_frame = plan.get("semantic_frame") if isinstance(plan, dict) else None
+            if semantic_frame:
+                resolution = reconcile(semantic_frame, skill_ir_obj)
+            else:
+                resolution = SemanticResolution.from_skillir(skill_ir_obj)
+
+            intent_plan = _intents_to_intent_plan(intents, resolution)
+        except (ValueError, SemanticConflictError) as e:
             return {"status": "rejected", "reason": str(e)}
 
         # Gate 2: Intent Coverage Check (uses ALL contracts, not just the selected one)
