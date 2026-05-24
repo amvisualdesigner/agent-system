@@ -24,6 +24,12 @@ from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
 from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.skill_registry import get_contract
+from app.engine.structural_completion import (
+    complete_structure,
+    graphir_ready_to_intent_plan,
+    GraphIRReadyPlan,
+    StructuralCompletionError,
+)
 from app.graphir.intent import Intent, IntentPlan, is_capability_metadata
 from app.graphir.intent_coverage import IntentCoverageValidator, IntentCoverageError
 from app.graphir.builder import GraphIRBuilder
@@ -112,15 +118,14 @@ def _intents_to_intent_plan(
     intents: list[Intent],
     semantic_resolution: SemanticResolution,
 ) -> IntentPlan:
-    """Convert decomposed Intent objects into an IntentPlan.
-
-    SemanticResolution.params es la ÚNICA fuente de parámetros semánticos.
-    Intent.params se eliminan — son legacy y están contaminados
-    con basura keyword-based ("ratio", "adding").
-
-    Las capabilities se conservan (para cobertura, edge routing, etc.)
-    pero sus params no viajan downstream.
-    """
+    """DEPRECATED — kept for backward compat. Use _graphir_ready_to_intent_plan."""
+    import warnings
+    warnings.warn(
+        "_intents_to_intent_plan is deprecated. "
+        "Use complete_structure + _graphir_ready_to_intent_plan instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     contract = get_contract(
         semantic_resolution.contract_id,
         semantic_resolution.contract_version,
@@ -131,7 +136,6 @@ def _intents_to_intent_plan(
             f"{semantic_resolution.contract_id}@{semantic_resolution.contract_version}"
         )
 
-    # Stripear params de todos los intents — solo SemanticResolution es autoridad
     clean_intents = [
         Intent(
             id=i.id,
@@ -642,8 +646,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             else:
                 resolution = SemanticResolution.from_skillir(skill_ir_obj)
 
-            intent_plan = _intents_to_intent_plan(intents, resolution)
-        except (ValueError, SemanticConflictError) as e:
+            contract = get_contract(resolution.contract_id, resolution.contract_version)
+            if contract is None:
+                return {
+                    "status": "rejected",
+                    "reason": f"contract_not_found:{resolution.contract_id}",
+                }
+
+            ready = complete_structure(resolution, contract, semantic_frame)
+            intent_plan = graphir_ready_to_intent_plan(ready)
+        except (ValueError, SemanticConflictError, StructuralCompletionError) as e:
             return {"status": "rejected", "reason": str(e)}
 
         # Gate 2: Intent Coverage Check (uses ALL contracts, not just the selected one)
