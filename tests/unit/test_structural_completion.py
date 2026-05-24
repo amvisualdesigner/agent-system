@@ -6,14 +6,15 @@ import pytest
 
 from app.engine.structural_completion import (
     CompletionMode,
-    GraphIRReadyPlan,
-    StructuralCompletionError,
+    ResolvedCapability,
+    StructuralIR,
     STRUCTURAL_SCHEMA,
     _infer_capabilities_from_contract,
     _augment_capabilities,
     _resolve_completion_mode,
     _resolve_safe_default,
     complete_structure,
+    graphir_ready_to_intent_plan,
 )
 from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.skill_registry import SkillContract
@@ -101,6 +102,19 @@ def make_resolution(
         param_provenance=provenance or {},
         confidence=confidence,
     )
+
+
+def _cap(ir: StructuralIR, name: str) -> ResolvedCapability:
+    """Find ResolvedCapability by name in StructuralIR."""
+    for rc in ir.capabilities:
+        if rc.name == name:
+            return rc
+    raise KeyError(name)
+
+
+def _cap_names(ir: StructuralIR) -> list[str]:
+    """Return capability names from StructuralIR."""
+    return [rc.name for rc in ir.capabilities]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -221,26 +235,30 @@ class TestResolveSafeDefault:
         assert _resolve_safe_default("presentation.timeseries", "metric") == "revenue"
 
     def test_domain_never_auto_completes(self):
-        with pytest.raises(StructuralCompletionError, match="Cannot auto-complete domain field"):
+        with pytest.raises(ValueError, match="Cannot auto-complete domain field"):
             _resolve_safe_default("domain.sales", "metrics")
 
     def test_unknown_field_no_default(self):
-        with pytest.raises(StructuralCompletionError, match="No safe default available"):
+        with pytest.raises(ValueError, match="No safe default available"):
             _resolve_safe_default("presentation.kpi_row", "nonexistent")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tests: complete_structure — STRICT_FAIL path
+# Tests: complete_structure — STRICT_FAIL path (no longer raises for domain.*)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCompleteStructureStrictFail:
-    def test_domain_high_confidence_missing_required_raises(self, dashboard_contract):
+    """domain.* with missing required → SAFE_SKIP (no crash, no incomplete flag)."""
+
+    def test_domain_high_confidence_missing_required_no_raise(self, dashboard_contract):
         resolution = make_resolution(
             params={"metrics": ["net_revenue"]},
             confidence=0.8,
         )
-        with pytest.raises(StructuralCompletionError, match="Missing required field 'dimensions' for domain.sales"):
-            complete_structure(resolution, dashboard_contract)
+        ready = complete_structure(resolution, dashboard_contract)
+        rc = _cap(ready, "domain.sales")
+        assert rc.mode == CompletionMode.SAFE_SKIP
+        assert rc.params == {}
 
     def test_domain_all_required_present_passes(self, dashboard_contract):
         resolution = make_resolution(
@@ -248,9 +266,12 @@ class TestCompleteStructureStrictFail:
             confidence=0.8,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert "domain.sales" in ready.params_by_capability
-        assert ready.params_by_capability["domain.sales"]["metrics"] == ["net_revenue"]
-        assert ready.params_by_capability["domain.sales"]["dimensions"] == ["region"]
+        assert _cap(ready, "domain.sales").params["metrics"] == ["net_revenue"]
+        assert _cap(ready, "domain.sales").params["dimensions"] == ["region"]
+        completed = [c for c in ready.capabilities if c.name == "domain.sales"]
+        assert len(completed) == 1
+        assert completed[0].mode != CompletionMode.SAFE_SKIP
+
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -264,7 +285,9 @@ class TestCompleteStructureSafeSkip:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert "domain.sales" not in ready.params_by_capability
+        rc = _cap(ready, "domain.sales")
+        assert rc.mode == CompletionMode.SAFE_SKIP
+        assert rc.params == {}
         assert any("domain.sales" in w for w in ready.completion_warnings)
 
     def test_presentation_still_completed_when_domain_skipped(self, dashboard_contract):
@@ -273,8 +296,7 @@ class TestCompleteStructureSafeSkip:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert "presentation.kpi_row" in ready.params_by_capability
-        assert ready.params_by_capability["presentation.kpi_row"]["metrics"] == ["net_revenue"]
+        assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -288,7 +310,7 @@ class TestCompleteStructureSafeComplete:
             confidence=0.5,  # domain.sales → SAFE_SKIP
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert ready.params_by_capability["presentation.kpi_row"]["metrics"] == ["net_revenue"]
+        assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
 
     def test_timeseries_metric_safe_default(self, dashboard_contract):
         resolution = make_resolution(
@@ -296,7 +318,7 @@ class TestCompleteStructureSafeComplete:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert ready.params_by_capability["presentation.timeseries"]["metric"] == "revenue"
+        assert _cap(ready, "presentation.timeseries").params["metric"] == "revenue"
 
     def test_timeseries_metric_from_resolution(self, dashboard_contract):
         resolution = make_resolution(
@@ -304,18 +326,17 @@ class TestCompleteStructureSafeComplete:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        assert ready.params_by_capability["presentation.timeseries"]["time_granularity"] == "monthly"
+        assert _cap(ready, "presentation.timeseries").params["time_granularity"] == "monthly"
 
     def test_page_no_required_params(self, dashboard_contract):
         resolution = make_resolution(confidence=0.5)
         ready = complete_structure(resolution, dashboard_contract)
-        assert "layout.page" in ready.params_by_capability
-        assert ready.params_by_capability["layout.page"] == {}
+        assert _cap(ready, "layout.page").params == {}
 
     def test_table_columns_safe_default(self, table_contract):
         resolution = make_resolution(contract_id="analytics.table")
         ready = complete_structure(resolution, table_contract)
-        assert ready.params_by_capability["presentation.table"]["columns"] == ["id"]
+        assert _cap(ready, "presentation.table").params["columns"] == ["id"]
 
     def test_table_columns_from_resolution(self, table_contract):
         resolution = make_resolution(
@@ -323,7 +344,7 @@ class TestCompleteStructureSafeComplete:
             params={"columns": ["revenue", "growth"]},
         )
         ready = complete_structure(resolution, table_contract)
-        assert ready.params_by_capability["presentation.table"]["columns"] == ["revenue", "growth"]
+        assert _cap(ready, "presentation.table").params["columns"] == ["revenue", "growth"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -341,7 +362,7 @@ class TestCompleteStructureHintAugmentation:
             "actions": [{"verb": "show", "object": "table", "confidence": 0.8}],
         }
         ready = complete_structure(resolution, dashboard_contract, frame_dict=frame)
-        assert "presentation.table" in ready.capabilities
+        assert "presentation.table" in _cap_names(ready)
 
     def test_table_hint_with_columns_from_resolution(self, dashboard_contract):
         resolution = make_resolution(
@@ -353,15 +374,15 @@ class TestCompleteStructureHintAugmentation:
             "actions": [],
         }
         ready = complete_structure(resolution, dashboard_contract, frame_dict=frame)
-        assert "presentation.table" in ready.capabilities
-        assert "columns" in ready.params_by_capability.get("presentation.table", {})
+        assert "presentation.table" in _cap_names(ready)
+        assert "columns" in _cap(ready, "presentation.table").params
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tests: GraphIRReadyPlan output structure
+# Tests: StructuralIR output structure
 # ═══════════════════════════════════════════════════════════════════
 
-class TestGraphIRReadyPlan:
+class TestStructuralIR:
     def test_plan_has_expected_fields(self, dashboard_contract):
         resolution = make_resolution(
             params={"metrics": ["net_revenue"]},
@@ -371,7 +392,6 @@ class TestGraphIRReadyPlan:
         assert ready.contract_id == "dashboard.sales_overview"
         assert ready.confidence == 0.5
         assert isinstance(ready.capabilities, list)
-        assert isinstance(ready.params_by_capability, dict)
         assert isinstance(ready.param_provenance, dict)
         assert isinstance(ready.completion_warnings, list)
 
@@ -381,8 +401,10 @@ class TestGraphIRReadyPlan:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        all_values = str(ready.params_by_capability)
-        assert "ratio" not in all_values
+        all_params = ""
+        for rc in ready.capabilities:
+            all_params += str(rc.params)
+        assert "ratio" not in all_params
 
     def test_no_churn_in_any_params(self, dashboard_contract):
         resolution = make_resolution(
@@ -390,8 +412,10 @@ class TestGraphIRReadyPlan:
             confidence=0.5,
         )
         ready = complete_structure(resolution, dashboard_contract)
-        all_values = str(ready.params_by_capability)
-        assert "churn" not in all_values
+        all_params = ""
+        for rc in ready.capabilities:
+            all_params += str(rc.params)
+        assert "churn" not in all_params
 
     def test_warnings_for_safe_defaults(self, dashboard_contract):
         resolution = make_resolution(
@@ -400,9 +424,31 @@ class TestGraphIRReadyPlan:
         )
         ready = complete_structure(resolution, dashboard_contract)
         warnings = " ".join(ready.completion_warnings)
-        # timeseries.metric se completa con safe default
         assert "presentation.timeseries" in warnings
         assert "safe default" in warnings
+
+    def test_all_capabilities_list(self, dashboard_contract):
+        """All 4 capabilities appear in capabilities list (SAFE_SKIP included)."""
+        resolution = make_resolution(
+            params={"metrics": ["net_revenue"]},
+            confidence=0.5,
+        )
+        ready = complete_structure(resolution, dashboard_contract)
+        assert len(ready.capabilities) == 4
+        rc = _cap(ready, "domain.sales")
+        assert rc.mode == CompletionMode.SAFE_SKIP
+        assert rc.params == {}
+
+    def test_graphir_ready_to_intent_plan_skips_safe_skip(self, dashboard_contract):
+        """SAFE_SKIP capabilities are excluded from the IntentPlan."""
+        resolution = make_resolution(
+            params={"metrics": ["net_revenue"]},
+            confidence=0.5,
+        )
+        ready = complete_structure(resolution, dashboard_contract)
+        plan = graphir_ready_to_intent_plan(ready)
+        assert not any(i.capability == "domain.sales" for i in plan.intents)
+        assert any(i.capability == "presentation.kpi_row" for i in plan.intents)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -429,3 +475,95 @@ class TestStructuralSchemaIntegrity:
         for cap, schema in STRUCTURAL_SCHEMA.items():
             if cap.startswith("domain."):
                 assert schema["mode"] == CompletionMode.STRICT_FAIL, f"{cap} should be STRICT_FAIL"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: Pipeline invariants (ARCHITECTURAL — the one that protects you)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestPipelineInvariants:
+    """Single test that validates all 4 architectural invariants end-to-end.
+
+    Si este test pasa, el pipeline respeta:
+      1. Semantic layer correctness
+      2. StructuralIR ownership integrity (no triple dict)
+      3. No flattening leak
+      4. UI IR purity (no binding redistribution)
+    """
+
+    def test_full_pipeline_invariants(self, dashboard_contract):
+        from unittest.mock import patch
+
+        resolution = make_resolution(
+            params={"metrics": ["net_revenue"], "time_granularity": "monthly"},
+            confidence=0.8,
+        )
+
+        # ── 1. Semantic layer correctness ──
+        assert resolution.params["metrics"] == ["net_revenue"]
+        assert resolution.params["time_granularity"] == "monthly"
+
+        # ── 2. StructuralIR ownership integrity ──
+        structural_ir = complete_structure(resolution, dashboard_contract)
+        assert len(structural_ir.capabilities) == 4
+        assert all(isinstance(c.params, dict) for c in structural_ir.capabilities)
+
+        kpi = next(c for c in structural_ir.capabilities if c.name == "presentation.kpi_row")
+        assert kpi.params == {"metrics": ["net_revenue"]}
+        assert kpi.mode == CompletionMode.SAFE_COMPLETE
+
+        # ── 3. No flattening leak ──
+        assert not hasattr(structural_ir, "flat_params")
+        assert graphir_ready_to_intent_plan(structural_ir).params == {}
+
+        # ── 4a. UI IR purity: run via new path, verify node data matches capability params ──
+        from app.graphir.pipeline import GraphIRPipeline
+        from app.graphir.builder import GraphIRBuilder
+
+        # Patch forbidden functions *before* running — this catches regressions
+        with patch.object(GraphIRBuilder, "build") as mock_build:
+            graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
+
+            # The legacy build() must NOT be called from the new path
+            mock_build.assert_not_called()
+
+        # Verify actual node data (deep_freeze converts lists → tuples)
+        kpi_node = graph.nodes.get("KpiRow_1")
+        assert kpi_node is not None, "Expected KpiRow_1 node in graph"
+        assert kpi_node.data == {"metrics": ("net_revenue",)}
+
+        # ── 4b. Trace: verify forbidden code paths were never executed ──
+        from app.graphir import binding as binding_module
+        from app.graphir import builder as builder_module
+
+        with (
+            patch.object(binding_module, "bind_skillir_to_nodes") as mock_bind,
+            patch.object(binding_module, "validate_binding") as mock_val,
+            patch.object(builder_module.GraphIRBuilder, "build") as mock_build,
+        ):
+            # Run again through the new path
+            GraphIRPipeline.run_from_structural(structural_ir)
+            mock_bind.assert_not_called()
+            mock_val.assert_not_called()
+            mock_build.assert_not_called()
+
+        # ── 5. StructuralCoverageValidator integrity ──
+        from app.graphir.structural_coverage import StructuralCoverageValidator
+        sreport = StructuralCoverageValidator.validate(structural_ir, dashboard_contract)
+        assert sreport.is_valid
+        assert sreport.completeness > 0
+        # domain.sales is SAFE_SKIP (missing dimensions, high confidence but incomplete)
+        assert sreport.safe_skip_count == 1
+
+        # ── 6. CHECK 2 — Structural determinism ──
+        # SAFE_COMPLETE capabilities must have their required fields
+        # layout.page is SAFE_COMPLETE with params={} (no required fields — valid)
+        from app.engine.structural_completion import STRUCTURAL_SCHEMA
+        for cap in structural_ir.capabilities:
+            if cap.mode == CompletionMode.SAFE_COMPLETE:
+                schema = STRUCTURAL_SCHEMA.get(cap.name, {})
+                required = schema.get("required", [])
+                if required:
+                    assert all(
+                        r in cap.params for r in required
+                    ), f"{cap.name}: missing required field in SAFE_COMPLETE params"

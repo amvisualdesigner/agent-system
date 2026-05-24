@@ -1,22 +1,18 @@
-"""GraphIR Builder — IntentPlan → GraphIR via GraphIRDraft.
+"""GraphIR Builder — IntentPlan/StructuralIR → GraphIR via GraphIRDraft.
 
 Converts semantic intent plans into validated, frozen GraphIR.
 The builder is the ONLY component that produces GraphIR from IntentPlan.
 
-Supports both Intent (new) and IntentNode (legacy/deprecated).
+Two entry points:
+  - build(plan: IntentPlan) — legacy path, uses binding + validation
+  - build_from_structural(ir: StructuralIR) — new path, 1:1 capability→node, no binding
 
-Construction phases (in order):
-   1. Validate IntentPlan
-   2. Node materialization — register nodes or apply metadata (pure inventory, no edges)
-   3. SkillIR binding — merge SkillIR params into node.data per capability schema
-   4. Root election — select container root using semantic policy (layout.page > legacy fallback)
-   5. Edge construction — bind all non-root nodes to elected root with semantic roles
-   6. Freeze and return
+Supports both Intent (new) and IntentNode (legacy/deprecated).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.graphir.intent import (
     Intent,
@@ -25,6 +21,7 @@ from app.graphir.intent import (
     IntentPlan,
     is_graphir_node_capability,
     is_capability_metadata,
+    make_intent_id,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
 )
@@ -40,6 +37,12 @@ from app.graphir.models import (
     GraphIREdge,
     GraphIRDraft,
 )
+
+if TYPE_CHECKING:
+    from app.engine.structural_completion import (
+        CompletionMode,
+        StructuralIR,
+    )
 
 
 class GraphIRBuilder:
@@ -235,6 +238,59 @@ class GraphIRBuilder:
 
         return draft.freeze()
 
+    @classmethod
+    def build_from_structural(cls, ir: StructuralIR) -> GraphIR:
+        """Convert StructuralIR → GraphIR (1:1, no binding redistribution).
+
+        Structural IR ya tiene ownership resuelto. Esta construcción es
+        una proyección directa: 1 capability → 1 node, sin
+        bind_skillir_to_nodes ni validate_binding. NO hay redistribución
+        de params ni re-interpretación semántica.
+
+        Args:
+            ir: StructuralIR con capabilities resueltas.
+
+        Returns:
+            Frozen GraphIR.
+
+        Raises:
+            ValueError: if graph invariants fail or capability type unresolvable.
+        """
+        from app.engine.structural_completion import CompletionMode
+
+        draft = GraphIRDraft()
+        draft.params = {}
+
+        intents: list[Intent] = []
+        for rc in ir.capabilities:
+            if rc.mode == CompletionMode.SAFE_SKIP:
+                continue
+            intents.append(Intent(
+                id=make_intent_id(f"structural:{rc.name}", rc.name, "structural"),
+                capability=rc.name,
+                params=dict(rc.params),
+                source="structural_completion",
+            ))
+
+        for i, intent in enumerate(intents):
+            cls._add_intent_node(draft, intent, i)
+
+        root_id = cls._select_root(draft)
+
+        for i, intent in enumerate(intents):
+            cls._add_intent_edge(draft, intent, i, root_id)
+
+        orphans = draft.get_orphan_nodes()
+        if orphans:
+            for nid in orphans:
+                draft.add_edge(GraphIREdge(
+                    source=root_id,
+                    target=nid,
+                    role=EdgeRole.CONTAINS,
+                ))
+
+        return draft.freeze()
+
     # ── Legacy resolvers ──────────────────────────────────────────
 
     @classmethod
@@ -257,3 +313,8 @@ class GraphIRBuilder:
 def build_from_plan(plan: IntentPlan) -> GraphIR:
     """Convenience wrapper."""
     return GraphIRBuilder.build(plan)
+
+
+def build_from_structural(ir: StructuralIR) -> GraphIR:
+    """Convenience wrapper."""
+    return GraphIRBuilder.build_from_structural(ir)

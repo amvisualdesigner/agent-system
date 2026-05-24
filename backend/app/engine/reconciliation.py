@@ -108,12 +108,11 @@ def reconcile(
                 f"conflicts with existing {params[p]!r} — skipped"
             )
 
-    # ── Regla 5: SkillIR para params no cubiertos ─────────────────
-    for k, v in skill_ir.params.items():
-        if k not in params:
-            params[k] = v
-            provenance[k] = "skillir_proposed"
-            trace.append(f"[skillir] {k}={v!r}")
+    # ── Regla 5: SkillIR — solo contract_id/version/confidence, NO params ──
+    # SkillIR.params NO entran en la resolución. StructuralIR resuelve
+    # ownership desde frame constraints + safe defaults en complete_structure.
+    # Si SkillIR propone un valor, debe ser confirmado por el frame.
+    # Esto elimina el override silencioso de SkillIR sobre el determinismo estructural.
 
     # ── Regla 6: Warnings en trace para acciones sin cobertura ────
     actions = frame_dict.get("actions", [])

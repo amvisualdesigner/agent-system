@@ -1,11 +1,15 @@
-"""StructuralCompletionLayer — SemanticResolution → GraphIRReadyPlan.
+"""StructuralCompletionLayer — SemanticResolution → StructuralIR.
 
-Convierte SemanticResolution en un plan completo y ejecutable para GraphIR.
+Convierte SemanticResolution en StructuralIR: la representación estructural
+final donde cada capability tiene ownership definitivo de sus params.
 NO decide qué quiere el usuario. NO interpreta intención. NO corrige semántica.
 Solo asegura que cada nodo tiene los campos mínimos para no romper GraphIR.
 
 Pipeline:
   SemanticFrame → SemanticResolution → StructuralCompletionLayer → GraphIRPipeline
+
+StructuralIR es la ÚLTIMA representación donde existe ownership semántico real.
+A partir de aquí: UI IR solo construye, no decide.
 
 Responsabilidad única:
   - Valida requisitos mínimos por capability
@@ -26,11 +30,6 @@ from app.contracts.skill_registry import SkillContract, get_contract
 from app.graphir.intent import Intent, IntentPlan, make_intent_id
 
 
-class StructuralCompletionError(ValueError):
-    """Raised when required domain params cannot be auto-completed."""
-    pass
-
-
 class CompletionMode(Enum):
     STRICT_FAIL = "strict_fail"
     SAFE_SKIP = "safe_skip"
@@ -38,11 +37,32 @@ class CompletionMode(Enum):
 
 
 @dataclass
-class GraphIRReadyPlan:
+class ResolvedCapability:
+    """Capability con ownership definitivo de params después de Structural IR.
+
+    Esta es la unidad base de StructuralIR. Cada ResolvedCapability tiene
+    ownership exclusivo de sus params — ninguna capa posterior debe
+    reinterpretarlos o redistribuirlos.
+    """
+    name: str
+    params: dict[str, Any]
+    mode: "CompletionMode"
+    provenance: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class StructuralIR:
+    """Representación estructural final — ownership semántico resuelto.
+
+    Única fuente de verdad para qué capabilities existen, qué params tiene
+    cada una, y en qué modo de completitud se encuentran.
+
+    NO tiene dicts paralelos. NO tiene flattening. NO permite reinterpretación.
+    capabilities es la única lista — incluye tanto SAFE_COMPLETE como SAFE_SKIP.
+    """
     contract_id: str
     contract_version: int
-    capabilities: list[str]
-    params_by_capability: dict[str, dict[str, Any]]
+    capabilities: list[ResolvedCapability]
     param_provenance: dict[str, str]
     confidence: float
     completion_warnings: list[str] = field(default_factory=list)
@@ -212,13 +232,13 @@ def _resolve_safe_default(capability: str, field: str) -> Any:
     schema = STRUCTURAL_SCHEMA.get(capability, {})
     fallbacks = schema.get("safe_fallback", {})
     if capability.startswith("domain."):
-        raise StructuralCompletionError(
+        raise ValueError(
             f"Cannot auto-complete domain field '{field}' for {capability}. "
-            "Domain capabilities require explicit params from user or SkillIR."
+            "Domain capabilities require explicit params from user."
         )
     if field in fallbacks:
         return fallbacks[field]
-    raise StructuralCompletionError(
+    raise ValueError(
         f"No safe default available for required field '{field}' in {capability}."
     )
 
@@ -227,8 +247,8 @@ def complete_structure(
     resolution: SemanticResolution,
     contract: SkillContract,
     frame_dict: dict | None = None,
-) -> GraphIRReadyPlan:
-    """Convierte SemanticResolution en un GraphIRReadyPlan completo.
+) -> StructuralIR:
+    """Convierte SemanticResolution en StructuralIR.
 
     Args:
         resolution: SemanticResolution con params del usuario + SkillIR
@@ -236,11 +256,7 @@ def complete_structure(
         frame_dict: Dict del StructuredSemanticFrame (para hint augmentation)
 
     Returns:
-        GraphIRReadyPlan con params por capability y warnings de completion
-
-    Raises:
-        StructuralCompletionError: si domain.* tiene required missing y
-            confidence >= 0.6
+        StructuralIR con capabilities resueltas y ownership definitivo
     """
     warnings: list[str] = []
 
@@ -250,8 +266,8 @@ def complete_structure(
     # Paso 2: augmentar con hints del frame
     capabilities = _augment_capabilities(capabilities, resolution, frame_dict)
 
-    # Paso 3: completar params por capability
-    params_by_capability: dict[str, dict[str, Any]] = {}
+    # Paso 3: resolver cada capability
+    resolved: list[ResolvedCapability] = []
 
     for cap in capabilities:
         schema = STRUCTURAL_SCHEMA.get(cap)
@@ -259,83 +275,84 @@ def complete_structure(
             warnings.append(f"{cap}: no structural schema — skipping")
             continue
 
-        mode = _resolve_completion_mode(cap, resolution.confidence)
-
-        if mode == CompletionMode.SAFE_SKIP:
-            warnings.append(
-                f"{cap}: low confidence ({resolution.confidence:.2f}) — skipped"
-            )
-            continue
-
+        # Build initial params from resolution
         cap_params: dict[str, Any] = {}
-
-        # Copiar lo que ya existe en resolution.params para esta capability
         for field in schema.get("required", []) + schema.get("optional", []):
             if field in resolution.params:
                 cap_params[field] = resolution.params[field]
 
+        missing_required = [r for r in schema.get("required", []) if r not in cap_params]
+
+        # Runtime mode override: domain.* with missing required → SAFE_SKIP
+        mode = _resolve_completion_mode(cap, resolution.confidence)
+        if mode == CompletionMode.STRICT_FAIL and missing_required:
+            mode = CompletionMode.SAFE_SKIP
+
+        if mode == CompletionMode.SAFE_SKIP:
+            resolved.append(ResolvedCapability(
+                name=cap,
+                params={},
+                mode=mode,
+            ))
+            warnings.append(f"{cap}: skipped")
+            continue
+
         # Completar required faltantes
         for field in schema.get("required", []):
             if field not in cap_params:
-                if mode == CompletionMode.STRICT_FAIL:
-                    raise StructuralCompletionError(
-                        f"Missing required field '{field}' for {cap}. "
-                        "Cannot auto-complete domain capabilities."
-                    )
                 try:
                     default = _resolve_safe_default(cap, field)
                     cap_params[field] = default
                     warnings.append(
                         f"{cap}.{field} missing → injected safe default"
                     )
-                except StructuralCompletionError:
+                except ValueError:
                     raise
 
-        params_by_capability[cap] = cap_params
+        resolved.append(ResolvedCapability(
+            name=cap,
+            params=cap_params,
+            mode=mode,
+            provenance=dict(resolution.param_provenance),
+        ))
 
-    return GraphIRReadyPlan(
+    return StructuralIR(
         contract_id=resolution.contract_id,
         contract_version=resolution.contract_version,
-        capabilities=capabilities,
-        params_by_capability=params_by_capability,
+        capabilities=resolved,
         param_provenance=dict(resolution.param_provenance),
         confidence=resolution.confidence,
         completion_warnings=warnings,
     )
 
 
-def graphir_ready_to_intent_plan(ready: GraphIRReadyPlan) -> IntentPlan:
-    """Convert GraphIRReadyPlan → IntentPlan para GraphIRPipeline.
+def graphir_ready_to_intent_plan(ir: StructuralIR) -> IntentPlan:
+    """Convert StructuralIR → IntentPlan (execution artifact).
 
-    Cada capability del plan completado se convierte en un Intent
-    con sus params por-capability. Los params se aplanan a plan.params
-    para compatibilidad con bind_skillir_to_nodes — seguro porque
-    dentro de un mismo contrato no hay colisiones de keys entre capabilities.
+    StructuralIR ya tiene ownership resuelto. Esta conversión existe
+    solo como execution artifact para compatibilidad legacy y serialización.
+    NO participa en decisiones semánticas.
     """
-    contract = get_contract(ready.contract_id, ready.contract_version)
+    contract = get_contract(ir.contract_id, ir.contract_version)
     if contract is None:
         raise ValueError(
             f"Contract not found: "
-            f"{ready.contract_id}@{ready.contract_version}"
+            f"{ir.contract_id}@{ir.contract_version}"
         )
 
-    intents = [
-        Intent(
-            id=make_intent_id(f"completion:{cap}", cap, "structural"),
-            capability=cap,
-            params=dict(ready.params_by_capability.get(cap, {})),
+    intents = []
+    for rc in ir.capabilities:
+        if rc.mode == CompletionMode.SAFE_SKIP:
+            continue
+        intents.append(Intent(
+            id=make_intent_id(f"completion:{rc.name}", rc.name, "structural"),
+            capability=rc.name,
+            params=dict(rc.params),
             source="structural_completion",
-        )
-        for cap in ready.capabilities
-    ]
-
-    flat_params: dict[str, Any] = {}
-    for cap_params in ready.params_by_capability.values():
-        for k, v in cap_params.items():
-            flat_params[k] = v
+        ))
 
     return IntentPlan(
         intents=intents,
         contracts=[contract],
-        params=flat_params,
+        params={},
     )

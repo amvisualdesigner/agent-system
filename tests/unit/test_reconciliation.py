@@ -119,7 +119,8 @@ class TestReconcileExplicit(unittest.TestCase):
         res = reconcile(fr, sir)
         self.assertIn("time_granularity", res.params)
         self.assertEqual(res.params["time_granularity"], "monthly")
-        self.assertIn("metrics", res.params)  # from SkillIR
+        # SkillIR.params NO entran en resolution (Rule 5 eliminada)
+        self.assertNotIn("metrics", res.params)
 
     def test_explicit_vs_explicit_same_value_ok(self):
         """Same explicit value for same param is not a conflict."""
@@ -183,9 +184,14 @@ class TestReconcileInferred(unittest.TestCase):
 
 
 class TestReconcileSkillIR(unittest.TestCase):
-    """Regla 5: SkillIR fills uncovered params."""
+    """Rule 5 eliminada: SkillIR.params ya NO entran en resolution.
 
-    def test_skillir_fills_uncovered_params(self):
+    SkillIR solo aporta contract_id, version, confidence.
+    Los params vienen de frame constraints + safe defaults en complete_structure.
+    """
+
+    def test_skillir_params_not_injected(self):
+        """SkillIR.params no deben aparecer en resolution si frame no los cubre."""
         fr = _frame(constraints=[
             {"param": "time_granularity", "value": "monthly", "source": "explicit"},
         ])
@@ -194,10 +200,12 @@ class TestReconcileSkillIR(unittest.TestCase):
             "timeseries_metric": "revenue",
         })
         res = reconcile(fr, sir)
-        self.assertEqual(res.params["time_granularity"], "monthly")  # from frame
-        self.assertEqual(res.params["metrics"], ["revenue", "growth"])  # from SkillIR
-        self.assertEqual(res.params["timeseries_metric"], "revenue")  # from SkillIR
-        self.assertEqual(res.param_provenance["timeseries_metric"], "skillir_proposed")
+        # Frame explicit está presente
+        self.assertEqual(res.params["time_granularity"], "monthly")
+        self.assertEqual(res.param_provenance["time_granularity"], "user_explicit")
+        # SkillIR params NO deben aparecer
+        self.assertNotIn("metrics", res.params)
+        self.assertNotIn("timeseries_metric", res.params)
 
 
 class TestReconcileRun1(unittest.TestCase):
@@ -219,8 +227,9 @@ class TestReconcileRun1(unittest.TestCase):
         )
         res = reconcile(fr, sir)
         self.assertEqual(res.contract_id, "analytics.table")
-        self.assertIn("columns", res.params)
-        self.assertEqual(res.params["columns"], ["Metric", "Value"])
+        # SkillIR.params ya NO entran (Rule 5 eliminada)
+        self.assertNotIn("columns", res.params)
+        self.assertGreaterEqual(len(res.resolution_trace), 1)
         # No explicit constraints, so no override
         self.assertGreaterEqual(len(res.resolution_trace), 1)
 
@@ -278,11 +287,10 @@ class TestReconcileRun2(unittest.TestCase):
         res = reconcile(self.frame, self.skill_ir)
         self.assertEqual(res.params["time_granularity"], "monthly")
 
-    def test_timeseries_metric_from_skillir(self):
-        """timeseries_metric no está en frame → viene de SkillIR."""
+    def test_timeseries_metric_not_injected(self):
+        """timeseries_metric de SkillIR ya NO entra en resolution (Rule 5 eliminada)."""
         res = reconcile(self.frame, self.skill_ir)
-        self.assertEqual(res.params["timeseries_metric"], "revenue")
-        self.assertEqual(res.param_provenance["timeseries_metric"], "skillir_proposed")
+        self.assertNotIn("timeseries_metric", res.params)
 
     def test_confidence_is_min(self):
         """Confianza reconciliada es el mínimo entre frame y skill_ir."""
@@ -304,7 +312,8 @@ class TestReconcileEdgeCases(unittest.TestCase):
         fr = _frame(constraints=[])
         sir = _skill_ir(params={"metrics": ["revenue"]})
         res = reconcile(fr, sir)
-        self.assertEqual(res.params["metrics"], ["revenue"])
+        # SkillIR.params ya NO entran (Rule 5 eliminada)
+        self.assertNotIn("metrics", res.params)
 
     def test_frame_without_skillir_params(self):
         fr = _frame(constraints=[
@@ -318,7 +327,9 @@ class TestReconcileEdgeCases(unittest.TestCase):
         fr = _frame(constraints=[], actions=None)
         sir = _skill_ir(params={"x": 1})
         res = reconcile(fr, sir)
-        self.assertEqual(res.params["x"], 1)
+        # SkillIR.params ya NO entran (Rule 5 eliminada)
+        self.assertNotIn("x", res.params)
+        self.assertEqual(res.contract_id, "dashboard.sales_overview")
 
     def test_explicit_with_none_value(self):
         fr = _frame(constraints=[
