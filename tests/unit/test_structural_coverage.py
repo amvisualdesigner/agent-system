@@ -17,15 +17,22 @@ from app.contracts.skill_registry import SkillContract
 
 
 def make_resolution(contract_id="dashboard.sales_overview", params=None, provenance=None, confidence=0.8):
-    """Minimal SemanticResolution factory for test isolation."""
+    """Minimal SemanticResolution + ContractResolution factory for test isolation."""
     from app.contracts.semantic_resolution import SemanticResolution
-    return SemanticResolution(
-        contract_id=contract_id,
-        contract_version=1,
-        params=params or {},
-        param_provenance=provenance or {},
+    from app.contracts.contract_resolution import ContractResolution
+    semantic = SemanticResolution(
+        semantic_params=params or {},
+        semantic_provenance=provenance or {},
         confidence=confidence,
     )
+    contract = ContractResolution(
+        contract_params=params or {},
+        contract_provenance=provenance or {},
+        confidence=confidence,
+        contract_id=contract_id,
+        contract_version=1,
+    )
+    return semantic, contract
 
 
 @pytest.fixture
@@ -91,24 +98,22 @@ class TestStructuralCoverageValidator:
         assert report.safe_skip_count == 0
         assert len(report.warnings) == 0
 
-    def test_safe_complete_with_fallback_passes(self):
-        """SAFE_COMPLETE con required missing pero fallback definido → WARNING, no RAISE."""
+    def test_safe_complete_no_fallback_raises(self):
+        """SAFE_COMPLETE con required missing y sin semantic/contract → RAISE."""
         ir = StructuralIR(
             contract_id="test", contract_version=1,
             capabilities=[
                 ResolvedCapability(
                     name="presentation.timeseries",
-                    params={},  # metric missing, but safe_fallback exists
+                    params={},  # metric missing, no safe_fallback (all empty now)
                     mode=CompletionMode.SAFE_COMPLETE,
                 ),
             ],
             param_provenance={}, confidence=1.0,
         )
-        report = StructuralCoverageValidator.validate(ir)
-        assert report.is_valid
-        assert len(report.warnings) == 1
-        assert "timeseries" in report.warnings[0]
-        assert "fallback" in report.warnings[0]
+        with pytest.raises(StructuralIntegrityError) as exc:
+            StructuralCoverageValidator.validate(ir)
+        assert "metric" in str(exc.value)
 
     def test_safe_skip_passes_with_warning(self):
         """SAFE_SKIP por falta semántica → WARNING, no RAISE."""
@@ -252,11 +257,13 @@ class TestPipelineInvariantsExtended:
         from app.graphir import binding as binding_module
         from app.graphir.builder import GraphIRBuilder
 
-        resolution = make_resolution(
+        semantic_res, contract_res = make_resolution(
             params={"metrics": ["net_revenue"]},
             confidence=0.8,
         )
-        structural_ir = complete_structure(resolution, dashboard_contract)
+        structural_ir = complete_structure(
+            semantic_res, contract_res, dashboard_contract,
+        )
 
         # Validate coverage
         sreport = StructuralCoverageValidator.validate(structural_ir, dashboard_contract)
@@ -290,11 +297,13 @@ class TestPipelineInvariantsExtended:
         from app.graphir.structural_coverage import StructuralCoverageValidator
         from app.graphir.pipeline import GraphIRPipeline
 
-        resolution = make_resolution(
+        semantic_res, contract_res = make_resolution(
             params={"metrics": ["net_revenue"]},
             confidence=0.8,
         )
-        structural_ir = complete_structure(resolution, dashboard_contract)
+        structural_ir = complete_structure(
+            semantic_res, contract_res, dashboard_contract,
+        )
 
         # The new path should NOT call graphir_ready_to_intent_plan
         # IntentPlan is only for legacy compat — verify the new path works without it

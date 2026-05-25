@@ -15,6 +15,34 @@ class SkillContract:
     input_schema: dict
     ast_template: dict
     renderer: dict
+    capability_param_map: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Precompile capability_param_map from ast_template.slots at init time.
+
+        Each slot's props map capability_field → contract_param_name.
+        Example:
+          Slot: {"type": "Timeseries", "props": {"metric": "timeseries_metric"}}
+          → capability_param_map["presentation.timeseries"] = {"metric": "timeseries_metric"}
+        """
+        if not self.capability_param_map:
+            self.capability_param_map = _compile_capability_param_map(self)
+
+
+def _compile_capability_param_map(contract: SkillContract) -> dict[str, dict[str, str]]:
+    """Precompile: ast_template.slots → {capability: {cap_field: contract_param}}.
+
+    This is computed once at contract load time, never at runtime.
+    Structural completion reads this map — it does NOT parse slots.
+    """
+    mapping: dict[str, dict[str, str]] = {}
+    caps = contract.ast_template.get("capabilities", {})
+    for slot in contract.ast_template.get("slots", []):
+        cap_name = caps.get(slot.get("type", ""))
+        if cap_name:
+            props = slot.get("props", {})
+            mapping[cap_name] = dict(props)
+    return mapping
 
 
 SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {

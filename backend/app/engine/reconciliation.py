@@ -1,19 +1,18 @@
-"""Reconciliation — produce SemanticResolution desde frame + SkillIR proposal.
+"""Reconciliation — produce SemanticResolution desde frame.
+
+Resolución puramente semántica: extrae lo que el usuario DICE
+del lenguaje natural. NO incluye params de contrato ni SkillIR.
 
 Reglas de resolución (por prioridad):
 
   1. Frame constraint source="explicit" — override absoluto
      - Si dos explicit conflicts para el mismo param → SemanticConflictError
-     - Si explicit vs SkillIR → gana explicit + trace (no error)
 
   2. Frame constraint source="inferred" — merge si no hay conflicto
 
-  3. SkillIR.params — para params no cubiertos por frame
+  3. SkillIR.params NO entran aquí. Son competencia de ContractResolution.
 
-  4. Intent.params — NO ENTRAN NUNCA. Son legacy, solo para telemetría/auditoría.
-
-NO hay fallback a Intent.params. Si ni frame ni SkillIR lo proponen,
-el parámetro no existe en la resolución.
+  4. Intent.params — NO ENTRAN NUNCA. Son legacy.
 """
 
 from __future__ import annotations
@@ -30,30 +29,30 @@ logger = logging.getLogger(__name__)
 
 def reconcile(
     frame_dict: dict | None,
-    skill_ir,
+    skill_ir=None,
 ) -> SemanticResolution:
-    """Produce SemanticResolution desde frame + SkillIR proposal.
+    """Produce SemanticResolution puramente desde el frame semántico.
 
     Args:
         frame_dict: Diccionario del StructuredSemanticFrame (o None).
                     Espera claves: "actions", "objects", "constraints",
                     "confidence", "missing_info".
-        skill_ir: Objeto SkillIR con contract_id y params.
+        skill_ir: No usado para params. Solo se acepta para mantener
+                  firma compatible (legacy). Los params vienen del frame.
 
     Returns:
-        SemanticResolution con params limpios y trazabilidad.
+        SemanticResolution con solo params lingüísticos del usuario.
 
     Raises:
         SemanticConflictError: Si hay conflictos irresolubles.
     """
-    # Sin frame → fallback directo a SkillIR (backward compat)
+    # Sin frame → resolución vacía (sin params semánticos)
     if frame_dict is None:
-        return SemanticResolution.from_skillir(skill_ir)
-
-    if not skill_ir.contract_id:
-        raise SemanticConflictError(
-            "No contract_id available — neither frame nor SkillIR "
-            "can determine target contract"
+        return SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.0,
+            resolution_trace=["No semantic frame — empty resolution"],
         )
 
     constraints = frame_dict.get("constraints", [])
@@ -87,15 +86,7 @@ def reconcile(
         provenance[p] = "user_explicit"
         trace.append(f"[explicit] {p}={c['value']!r}")
 
-    # ── Regla 3: Conflict trace: explicit vs SkillIR ──────────────
-    for p in explicit_map:
-        if p in skill_ir.params and skill_ir.params[p] != params[p]:
-            trace.append(
-                f"[explicit→override] {p}: SkillIR proposed "
-                f"{skill_ir.params[p]!r} — overridden by user_explicit"
-            )
-
-    # ── Regla 4: Inferred → merge si no hay conflicto ────────────
+    # ── Regla 3: Inferred → merge si no hay conflicto ────────────
     for c in inferred:
         p = c["param"]
         if p not in params:
@@ -108,39 +99,30 @@ def reconcile(
                 f"conflicts with existing {params[p]!r} — skipped"
             )
 
-    # ── Regla 5: SkillIR — solo contract_id/version/confidence, NO params ──
-    # SkillIR.params NO entran en la resolución. StructuralIR resuelve
-    # ownership desde frame constraints + safe defaults en complete_structure.
-    # Si SkillIR propone un valor, debe ser confirmado por el frame.
-    # Esto elimina el override silencioso de SkillIR sobre el determinismo estructural.
-
-    # ── Regla 6: Warnings en trace para acciones sin cobertura ────
+    # ── Regla 4: Observaciones para acciones sin cobertura ──────
     actions = frame_dict.get("actions", [])
     for a in actions:
         verb = a.get("verb", "?")
         obj = a.get("object", "?")
         key = f"{verb} {obj}"
         if key not in str(params):
-            trace.append(f"[missing] Action '{key}' has no corresponding param")
+            trace.append(f"[action] '{key}' has no corresponding param")
 
-    # ── Confianza: mínimo entre frame y SkillIR ──────────────────
+    # ── Confianza: desde frame ──────────────────────────────────
     frame_conf = frame_dict.get("confidence", 0.0)
-    confidence = (
-        min(frame_conf, skill_ir.confidence)
-        if skill_ir.confidence > 0
-        else frame_conf
-    )
+    if skill_ir is not None and hasattr(skill_ir, 'confidence') and skill_ir.confidence > 0:
+        confidence = min(frame_conf, skill_ir.confidence)
+    else:
+        confidence = frame_conf
 
     logger.info(
-        "Reconciliation: contract=%s | params=%s | provenance=%s",
-        skill_ir.contract_id, params, provenance,
+        "Reconciliation: semantic_params=%s | provenance=%s",
+        params, provenance,
     )
 
     return SemanticResolution(
-        contract_id=skill_ir.contract_id,
-        contract_version=skill_ir.version,
-        params=params,
-        param_provenance=provenance,
+        semantic_params=params,
+        semantic_provenance=provenance,
         confidence=confidence,
         resolution_trace=trace,
     )

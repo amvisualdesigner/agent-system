@@ -1,4 +1,11 @@
-"""Tests for StructuralCompletionLayer."""
+"""Tests for StructuralCompletionLayer.
+
+Architecture:
+  SemanticResolution (language) + ContractResolution (contract)
+  → StructuralIR (ownership)
+
+Structural layer NEVER invents domain semantics.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +19,12 @@ from app.engine.structural_completion import (
     _infer_capabilities_from_contract,
     _augment_capabilities,
     _resolve_completion_mode,
-    _resolve_safe_default,
     complete_structure,
     graphir_ready_to_intent_plan,
 )
 from app.contracts.semantic_resolution import SemanticResolution
-from app.contracts.skill_registry import SkillContract
+from app.contracts.contract_resolution import ContractResolution
+from app.contracts.skill_registry import SkillContract, get_contract
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -89,18 +96,29 @@ def table_contract():
     )
 
 
-def make_resolution(
-    contract_id: str = "dashboard.sales_overview",
+def make_semantic(
     params: dict | None = None,
     provenance: dict | None = None,
     confidence: float = 0.8,
-):
+) -> SemanticResolution:
     return SemanticResolution(
+        semantic_params=params or {},
+        semantic_provenance=provenance or {},
+        confidence=confidence,
+    )
+
+
+def make_contract(
+    contract_id: str = "dashboard.sales_overview",
+    params: dict | None = None,
+    confidence: float = 0.8,
+) -> ContractResolution:
+    return ContractResolution(
+        contract_params=params or {},
+        contract_provenance={k: "test" for k in (params or {})},
+        confidence=confidence,
         contract_id=contract_id,
         contract_version=1,
-        params=params or {},
-        param_provenance=provenance or {},
-        confidence=confidence,
     )
 
 
@@ -113,7 +131,6 @@ def _cap(ir: StructuralIR, name: str) -> ResolvedCapability:
 
 
 def _cap_names(ir: StructuralIR) -> list[str]:
-    """Return capability names from StructuralIR."""
     return [rc.name for rc in ir.capabilities]
 
 
@@ -149,48 +166,61 @@ class TestInferCapabilities:
 
 class TestAugmentCapabilities:
     def test_no_frame_no_change(self):
-        resolution = make_resolution()
-        result = _augment_capabilities(["presentation.kpi_row"], resolution, None)
+        semantic = make_semantic()
+        contract = make_contract()
+        result = _augment_capabilities(
+            ["presentation.kpi_row"], semantic, contract, None,
+        )
         assert result == ["presentation.kpi_row"]
 
     def test_table_hint_adds_table_capability(self):
-        resolution = make_resolution(params={"mentioned_metrics": ["revenue"]})
-        frame = {
-            "objects": [{"type": "table", "confidence": 0.9}],
-            "actions": [],
-        }
-        result = _augment_capabilities(["presentation.kpi_row"], resolution, frame)
-        assert "presentation.table" in result
-        assert "presentation.kpi_row" in result
-
-    def test_no_table_object_no_add(self):
-        resolution = make_resolution(params={"mentioned_metrics": ["revenue"]})
-        frame = {
-            "objects": [{"type": "kpi_row", "confidence": 0.9}],
-            "actions": [],
-        }
-        result = _augment_capabilities(["presentation.kpi_row"], resolution, frame)
-        assert result == ["presentation.kpi_row"]
-
-    def test_table_object_no_signal_no_add(self):
-        resolution = make_resolution()
-        frame = {
-            "objects": [{"type": "table", "confidence": 0.9}],
-            "actions": [],
-        }
-        result = _augment_capabilities(["presentation.kpi_row"], resolution, frame)
-        assert result == ["presentation.kpi_row"]
-
-    def test_deduplicates(self):
-        resolution = make_resolution(params={"columns": ["id"]})
+        semantic = make_semantic(params={"mentioned_metrics": ["revenue"]})
+        contract = make_contract()
         frame = {
             "objects": [{"type": "table", "confidence": 0.9}],
             "actions": [],
         }
         result = _augment_capabilities(
-            ["presentation.kpi_row", "presentation.table"], resolution, frame,
+            ["presentation.kpi_row"], semantic, contract, frame,
         )
-        # Should not duplicate
+        assert "presentation.table" in result
+        assert "presentation.kpi_row" in result
+
+    def test_no_table_object_no_add(self):
+        semantic = make_semantic(params={"mentioned_metrics": ["revenue"]})
+        contract = make_contract()
+        frame = {
+            "objects": [{"type": "kpi_row", "confidence": 0.9}],
+            "actions": [],
+        }
+        result = _augment_capabilities(
+            ["presentation.kpi_row"], semantic, contract, frame,
+        )
+        assert result == ["presentation.kpi_row"]
+
+    def test_table_object_no_signal_no_add(self):
+        semantic = make_semantic()
+        contract = make_contract()
+        frame = {
+            "objects": [{"type": "table", "confidence": 0.9}],
+            "actions": [],
+        }
+        result = _augment_capabilities(
+            ["presentation.kpi_row"], semantic, contract, frame,
+        )
+        assert result == ["presentation.kpi_row"]
+
+    def test_deduplicates(self):
+        semantic = make_semantic(params={"columns": ["id"]})
+        contract = make_contract()
+        frame = {
+            "objects": [{"type": "table", "confidence": 0.9}],
+            "actions": [],
+        }
+        result = _augment_capabilities(
+            ["presentation.kpi_row", "presentation.table"],
+            semantic, contract, frame,
+        )
         assert result == ["presentation.kpi_row", "presentation.table"]
 
 
@@ -221,81 +251,51 @@ class TestResolveCompletionMode:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tests: _resolve_safe_default
-# ═══════════════════════════════════════════════════════════════════
-
-class TestResolveSafeDefault:
-    def test_kpi_metrics_default(self):
-        assert _resolve_safe_default("presentation.kpi_row", "metrics") == ["net_revenue"]
-
-    def test_table_columns_default(self):
-        assert _resolve_safe_default("presentation.table", "columns") == ["id"]
-
-    def test_timeseries_metric_default(self):
-        assert _resolve_safe_default("presentation.timeseries", "metric") == "revenue"
-
-    def test_domain_never_auto_completes(self):
-        with pytest.raises(ValueError, match="Cannot auto-complete domain field"):
-            _resolve_safe_default("domain.sales", "metrics")
-
-    def test_unknown_field_no_default(self):
-        with pytest.raises(ValueError, match="No safe default available"):
-            _resolve_safe_default("presentation.kpi_row", "nonexistent")
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Tests: complete_structure — STRICT_FAIL path (no longer raises for domain.*)
+# Tests: complete_structure — STRICT_FAIL path
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCompleteStructureStrictFail:
-    """domain.* with missing required → SAFE_SKIP (no crash, no incomplete flag)."""
+    """domain.* with missing required → SAFE_SKIP (no crash)."""
 
-    def test_domain_high_confidence_missing_required_no_raise(self, dashboard_contract):
-        resolution = make_resolution(
-            params={"metrics": ["net_revenue"]},
-            confidence=0.8,
-        )
-        ready = complete_structure(resolution, dashboard_contract)
+    def test_domain_high_confidence_missing_required_skips(self, dashboard_contract):
+        semantic = make_semantic(params={"metrics": ["net_revenue"]})
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.8)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         rc = _cap(ready, "domain.sales")
         assert rc.mode == CompletionMode.SAFE_SKIP
         assert rc.params == {}
 
     def test_domain_all_required_present_passes(self, dashboard_contract):
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"], "dimensions": ["region"]},
-            confidence=0.8,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(
+            params={"metrics": ["net_revenue"], "dimensions": ["region"]},
+        )
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "domain.sales").params["metrics"] == ["net_revenue"]
         assert _cap(ready, "domain.sales").params["dimensions"] == ["region"]
-        completed = [c for c in ready.capabilities if c.name == "domain.sales"]
-        assert len(completed) == 1
-        assert completed[0].mode != CompletionMode.SAFE_SKIP
-
+        assert _cap(ready, "domain.sales").mode != CompletionMode.SAFE_SKIP
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tests: complete_structure — SAFE_SKIP path (domain low confidence)
+# Tests: complete_structure — SAFE_SKIP path
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCompleteStructureSafeSkip:
     def test_domain_low_confidence_skips_node(self, dashboard_contract):
-        resolution = make_resolution(
-            params={"metrics": ["net_revenue"]},
-            confidence=0.5,
-        )
-        ready = complete_structure(resolution, dashboard_contract)
+        semantic = make_semantic(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         rc = _cap(ready, "domain.sales")
         assert rc.mode == CompletionMode.SAFE_SKIP
         assert rc.params == {}
         assert any("domain.sales" in w for w in ready.completion_warnings)
 
     def test_presentation_still_completed_when_domain_skipped(self, dashboard_contract):
-        resolution = make_resolution(
-            params={"metrics": ["net_revenue"]},
-            confidence=0.5,
-        )
-        ready = complete_structure(resolution, dashboard_contract)
+        semantic = make_semantic(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
 
 
@@ -304,47 +304,97 @@ class TestCompleteStructureSafeSkip:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCompleteStructureSafeComplete:
-    def test_kpi_metrics_from_resolution(self, dashboard_contract):
-        resolution = make_resolution(
+    def test_kpi_metrics_from_semantic(self, dashboard_contract):
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
-            confidence=0.5,  # domain.sales → SAFE_SKIP
+            confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
 
-    def test_timeseries_metric_safe_default(self, dashboard_contract):
-        resolution = make_resolution(
-            params={"metrics": ["net_revenue"]},
+    def test_timeseries_metric_from_contract_slot_mapping(self, dashboard_contract):
+        """timeseries gets metric via slot mapping: metric ← timeseries_metric."""
+        semantic = make_semantic(confidence=0.5)
+        contract = make_contract(
+            params={"timeseries_metric": "growth"},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        ready = complete_structure(semantic, contract, dashboard_contract)
+        assert _cap(ready, "presentation.timeseries").params["metric"] == "growth"
+
+    def test_timeseries_metric_via_contract_default(self, dashboard_contract):
+        """Without SkillIR, contract default 'revenue' flows via slot mapping."""
+        semantic = make_semantic(confidence=0.5)
+        # Create ContractResolution from SkillIR without timeseries_metric
+        from app.contracts.skill_ir import SkillIR
+        skill_ir = SkillIR(
+            contract_id="dashboard.sales_overview",
+            confidence=0.5,
+            params={"metrics": ["net_revenue"]},
+            version=1,
+        )
+        contract = ContractResolution.from_skillir(skill_ir, dashboard_contract)
+        ready = complete_structure(semantic, contract, dashboard_contract)
+        # Contract default "revenue" applied via slot mapping
         assert _cap(ready, "presentation.timeseries").params["metric"] == "revenue"
 
-    def test_timeseries_metric_from_resolution(self, dashboard_contract):
-        resolution = make_resolution(
-            params={"metrics": ["net_revenue"], "time_granularity": "monthly"},
+    def test_timeseries_missing_metric_uses_contract_default(self, dashboard_contract):
+        """No semantic, no contract params → contract input_schema default 'revenue' via slot mapping."""
+        semantic = make_semantic(confidence=0.5)
+        contract = make_contract(confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
+        rc = _cap(ready, "presentation.timeseries")
+        assert rc.mode == CompletionMode.SAFE_COMPLETE
+        assert rc.params["metric"] == "revenue"
+        assert rc.params == {"metric": "revenue"}
+
+    def test_timeseries_time_granularity_from_semantic(self, dashboard_contract):
+        semantic = make_semantic(
+            params={"time_granularity": "monthly"},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"timeseries_metric": "revenue"}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "presentation.timeseries").params["time_granularity"] == "monthly"
+        assert _cap(ready, "presentation.timeseries").params["metric"] == "revenue"
 
     def test_page_no_required_params(self, dashboard_contract):
-        resolution = make_resolution(confidence=0.5)
-        ready = complete_structure(resolution, dashboard_contract)
+        semantic = make_semantic(confidence=0.5)
+        contract = make_contract(confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "layout.page").params == {}
 
-    def test_table_columns_safe_default(self, table_contract):
-        resolution = make_resolution(contract_id="analytics.table")
-        ready = complete_structure(resolution, table_contract)
-        assert _cap(ready, "presentation.table").params["columns"] == ["id"]
+    def test_table_columns_missing_skips(self, table_contract):
+        semantic = make_semantic(confidence=0.5)
+        contract = make_contract(confidence=0.5)
+        ready = complete_structure(semantic, contract, table_contract)
+        rc = _cap(ready, "presentation.table")
+        assert rc.mode == CompletionMode.SAFE_SKIP
+        assert rc.params == {}
 
-    def test_table_columns_from_resolution(self, table_contract):
-        resolution = make_resolution(
-            contract_id="analytics.table",
-            params={"columns": ["revenue", "growth"]},
-        )
-        ready = complete_structure(resolution, table_contract)
+    def test_table_columns_from_semantic(self, table_contract):
+        semantic = make_semantic(params={"columns": ["revenue", "growth"]})
+        contract = make_contract(params={"columns": ["revenue", "growth"]})
+        ready = complete_structure(semantic, contract, table_contract)
         assert _cap(ready, "presentation.table").params["columns"] == ["revenue", "growth"]
+
+    def test_kpi_metrics_from_contract_when_semantic_empty(self, dashboard_contract):
+        """When semantic layer has no metrics, contract provides them via slot mapping."""
+        semantic = make_semantic(confidence=0.5)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
+        assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
+
+    def test_semantic_wins_over_contract(self, dashboard_contract):
+        """Semantic (language) wins over contract (SkillIR/defaults)."""
+        semantic = make_semantic(
+            params={"metrics": ["user_specified_metric"]},
+            confidence=0.8,
+        )
+        contract = make_contract(params={"metrics": ["contract_default"]}, confidence=0.8)
+        ready = complete_structure(semantic, contract, dashboard_contract)
+        assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["user_specified_metric"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -353,19 +403,24 @@ class TestCompleteStructureSafeComplete:
 
 class TestCompleteStructureHintAugmentation:
     def test_table_hint_adds_table_to_dashboard_contract(self, dashboard_contract):
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"mentioned_metrics": ["revenue"]},
             confidence=0.5,
         )
+        contract = make_contract(confidence=0.5)
         frame = {
             "objects": [{"type": "table", "confidence": 0.9}],
             "actions": [{"verb": "show", "object": "table", "confidence": 0.8}],
         }
-        ready = complete_structure(resolution, dashboard_contract, frame_dict=frame)
+        ready = complete_structure(semantic, contract, dashboard_contract, frame_dict=frame)
         assert "presentation.table" in _cap_names(ready)
 
-    def test_table_hint_with_columns_from_resolution(self, dashboard_contract):
-        resolution = make_resolution(
+    def test_table_hint_with_columns_from_semantic(self, dashboard_contract):
+        semantic = make_semantic(
+            params={"columns": ["revenue"], "metrics": ["net_revenue"]},
+            confidence=0.5,
+        )
+        contract = make_contract(
             params={"columns": ["revenue"], "metrics": ["net_revenue"]},
             confidence=0.5,
         )
@@ -373,7 +428,7 @@ class TestCompleteStructureHintAugmentation:
             "objects": [{"type": "table", "confidence": 0.9}],
             "actions": [],
         }
-        ready = complete_structure(resolution, dashboard_contract, frame_dict=frame)
+        ready = complete_structure(semantic, contract, dashboard_contract, frame_dict=frame)
         assert "presentation.table" in _cap_names(ready)
         assert "columns" in _cap(ready, "presentation.table").params
 
@@ -384,56 +439,63 @@ class TestCompleteStructureHintAugmentation:
 
 class TestStructuralIR:
     def test_plan_has_expected_fields(self, dashboard_contract):
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert ready.contract_id == "dashboard.sales_overview"
         assert ready.confidence == 0.5
-        assert isinstance(ready.capabilities, list)
+        assert isinstance(ready.capabilities, tuple)
         assert isinstance(ready.param_provenance, dict)
-        assert isinstance(ready.completion_warnings, list)
+        assert isinstance(ready.completion_warnings, tuple)
 
     def test_no_ratio_in_any_params(self, dashboard_contract):
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         all_params = ""
         for rc in ready.capabilities:
             all_params += str(rc.params)
         assert "ratio" not in all_params
 
     def test_no_churn_in_any_params(self, dashboard_contract):
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         all_params = ""
         for rc in ready.capabilities:
             all_params += str(rc.params)
         assert "churn" not in all_params
 
-    def test_warnings_for_safe_defaults(self, dashboard_contract):
-        resolution = make_resolution(
+    def test_warnings_for_skipped_capabilities(self, dashboard_contract):
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         warnings = " ".join(ready.completion_warnings)
-        assert "presentation.timeseries" in warnings
-        assert "safe default" in warnings
+        # domain.sales is skipped (missing dimensions)
+        # timeseries gets metric from contract default via slot mapping
+        assert "domain.sales" in warnings
+        assert "skipped" in warnings
 
     def test_all_capabilities_list(self, dashboard_contract):
         """All 4 capabilities appear in capabilities list (SAFE_SKIP included)."""
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         assert len(ready.capabilities) == 4
         rc = _cap(ready, "domain.sales")
         assert rc.mode == CompletionMode.SAFE_SKIP
@@ -441,11 +503,12 @@ class TestStructuralIR:
 
     def test_graphir_ready_to_intent_plan_skips_safe_skip(self, dashboard_contract):
         """SAFE_SKIP capabilities are excluded from the IntentPlan."""
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
         )
-        ready = complete_structure(resolution, dashboard_contract)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        ready = complete_structure(semantic, contract, dashboard_contract)
         plan = graphir_ready_to_intent_plan(ready)
         assert not any(i.capability == "domain.sales" for i in plan.intents)
         assert any(i.capability == "presentation.kpi_row" for i in plan.intents)
@@ -466,10 +529,13 @@ class TestStructuralSchemaIntegrity:
             assert "safe_fallback" in schema, f"{cap} missing safe_fallback"
             assert isinstance(schema["safe_fallback"], dict), f"{cap} safe_fallback not dict"
 
-    def test_domain_safe_fallback_empty(self):
+    def test_all_safe_fallbacks_empty(self):
+        """No semantic defaults in structural schema — all safe_fallback must be empty."""
         for cap, schema in STRUCTURAL_SCHEMA.items():
-            if cap.startswith("domain."):
-                assert schema["safe_fallback"] == {}, f"{cap} should have empty safe_fallback"
+            assert schema["safe_fallback"] == {}, (
+                f"{cap} has non-empty safe_fallback: {schema['safe_fallback']}. "
+                "Structural layer must not contain semantic defaults."
+            )
 
     def test_domain_mode_strict_fail(self):
         for cap, schema in STRUCTURAL_SCHEMA.items():
@@ -478,39 +544,39 @@ class TestStructuralSchemaIntegrity:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Test: Pipeline invariants (ARCHITECTURAL — the one that protects you)
+# Test: Pipeline invariants (ARCHITECTURAL)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestPipelineInvariants:
-    """Single test that validates all 4 architectural invariants end-to-end.
-
-    Si este test pasa, el pipeline respeta:
-      1. Semantic layer correctness
-      2. StructuralIR ownership integrity (no triple dict)
-      3. No flattening leak
-      4. UI IR purity (no binding redistribution)
-    """
+    """Single test that validates all architectural invariants end-to-end."""
 
     def test_full_pipeline_invariants(self, dashboard_contract):
         from unittest.mock import patch
 
-        resolution = make_resolution(
+        semantic = make_semantic(
             params={"metrics": ["net_revenue"], "time_granularity": "monthly"},
+            confidence=0.8,
+        )
+        contract = make_contract(
+            params={"metrics": ["net_revenue"], "timeseries_metric": "net_revenue"},
             confidence=0.8,
         )
 
         # ── 1. Semantic layer correctness ──
-        assert resolution.params["metrics"] == ["net_revenue"]
-        assert resolution.params["time_granularity"] == "monthly"
+        assert semantic.semantic_params["metrics"] == ["net_revenue"]
+        assert semantic.semantic_params["time_granularity"] == "monthly"
 
         # ── 2. StructuralIR ownership integrity ──
-        structural_ir = complete_structure(resolution, dashboard_contract)
+        structural_ir = complete_structure(semantic, contract, dashboard_contract)
         assert len(structural_ir.capabilities) == 4
         assert all(isinstance(c.params, dict) for c in structural_ir.capabilities)
 
         kpi = next(c for c in structural_ir.capabilities if c.name == "presentation.kpi_row")
         assert kpi.params == {"metrics": ["net_revenue"]}
         assert kpi.mode == CompletionMode.SAFE_COMPLETE
+
+        ts = next(c for c in structural_ir.capabilities if c.name == "presentation.timeseries")
+        assert ts.params["metric"] == "net_revenue"
 
         # ── 3. No flattening leak ──
         assert not hasattr(structural_ir, "flat_params")
@@ -520,17 +586,17 @@ class TestPipelineInvariants:
         from app.graphir.pipeline import GraphIRPipeline
         from app.graphir.builder import GraphIRBuilder
 
-        # Patch forbidden functions *before* running — this catches regressions
         with patch.object(GraphIRBuilder, "build") as mock_build:
             graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
-
-            # The legacy build() must NOT be called from the new path
             mock_build.assert_not_called()
 
-        # Verify actual node data (deep_freeze converts lists → tuples)
         kpi_node = graph.nodes.get("KpiRow_1")
         assert kpi_node is not None, "Expected KpiRow_1 node in graph"
         assert kpi_node.data == {"metrics": ("net_revenue",)}
+
+        ts_node = graph.nodes.get("Timeseries_2")
+        assert ts_node is not None, "Expected Timeseries_2 node in graph"
+        assert ts_node.data["metric"] == "net_revenue"
 
         # ── 4b. Trace: verify forbidden code paths were never executed ──
         from app.graphir import binding as binding_module
@@ -541,7 +607,6 @@ class TestPipelineInvariants:
             patch.object(binding_module, "validate_binding") as mock_val,
             patch.object(builder_module.GraphIRBuilder, "build") as mock_build,
         ):
-            # Run again through the new path
             GraphIRPipeline.run_from_structural(structural_ir)
             mock_bind.assert_not_called()
             mock_val.assert_not_called()
@@ -552,13 +617,9 @@ class TestPipelineInvariants:
         sreport = StructuralCoverageValidator.validate(structural_ir, dashboard_contract)
         assert sreport.is_valid
         assert sreport.completeness > 0
-        # domain.sales is SAFE_SKIP (missing dimensions, high confidence but incomplete)
-        assert sreport.safe_skip_count == 1
+        assert sreport.safe_skip_count == 1  # domain.sales
 
-        # ── 6. CHECK 2 — Structural determinism ──
-        # SAFE_COMPLETE capabilities must have their required fields
-        # layout.page is SAFE_COMPLETE with params={} (no required fields — valid)
-        from app.engine.structural_completion import STRUCTURAL_SCHEMA
+        # ── 6. Structural determinism ──
         for cap in structural_ir.capabilities:
             if cap.mode == CompletionMode.SAFE_COMPLETE:
                 schema = STRUCTURAL_SCHEMA.get(cap.name, {})

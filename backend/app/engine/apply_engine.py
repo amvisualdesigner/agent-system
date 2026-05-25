@@ -23,6 +23,7 @@ from app.config.settings import settings
 from app.config.feature_flags import FEATURE_FLAGS
 from app.contracts.skill_ir import SkillIR
 from app.contracts.semantic_resolution import SemanticResolution
+from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_registry import get_contract
 from app.engine.structural_completion import (
     complete_structure,
@@ -134,7 +135,42 @@ def _resolve_props(props_template: dict, params: dict) -> dict:
     return resolved
 
 
-def _dump_execution_snapshot(run_id: str, plan: dict, operations: list, results: list):
+def _compare_graphs_structural(graph, shadow_graph) -> list[dict]:
+    """Compare structural graph vs legacy shadow graph for structural equivalence.
+
+    Both graphs should have the same node set with identical params when
+    the StructuralIR → IntentPlan projection is correct.
+
+    Returns:
+        List of divergence dicts (empty = structurally equivalent).
+    """
+    divergences: list[dict] = []
+
+    s_nodes = set(graph.nodes.keys())
+    l_nodes = set(shadow_graph.nodes.keys())
+
+    if s_nodes != l_nodes:
+        divergences.append({
+            "type": "node_set_mismatch",
+            "structural_only": sorted(s_nodes - l_nodes),
+            "legacy_only": sorted(l_nodes - s_nodes),
+        })
+
+    if not divergences:
+        for node_id in s_nodes:
+            s_node = graph.nodes[node_id]
+            l_node = shadow_graph.nodes[node_id]
+            s_data = getattr(s_node, 'data', {}) or {}
+            l_data = getattr(l_node, 'data', {}) or {}
+            if s_data != l_data:
+                divergences.append({
+                    "type": "param_mismatch",
+                    "node": node_id,
+                    "structural": dict(s_data),
+                    "legacy": dict(l_data),
+                })
+
+    return divergences
     snapshot = {
         "run_id": run_id,
         "plan": plan,
@@ -174,7 +210,8 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
             "run_id": run_id,
             "status": "ok",
             "files_created": [r.get("path") for r in results if r.get("status") == "created"],
-            "execution_mode": "graphir",
+            "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
+            "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
         }
         if audit:
             summary["anomalies"] = audit.get("anomalies", [])
@@ -277,34 +314,17 @@ def _run_constraint_pipeline(
     return fileops, decisions, identities, split_plan, deletions
 
 
-def _safe_key_set(obj):
-    """Extract keys as a set, safely handling None and non-dicts."""
-    if obj is None:
-        return set()
-    if isinstance(obj, dict):
-        return set(obj.keys())
-    if hasattr(obj, 'keys'):
-        return set(obj.keys())
-    return set()
-
-
 def _compute_semantic_loss(
-    requested_intents: list[dict],
     bound_nodes: dict[str, dict],
-    skill_ir_obj,
 ) -> dict:
-    """Measure semantic loss — pure intent vs structure comparison.
+    """Measure semantic loss — pure binding fidelity.
 
-    NO render metrics here (those belong to RenderTrace → render_coverage).
+    StructuralIR is truth. No SkillIR comparison.
+    Param provenance is already in trace.semantic.param_provenance.
 
-    Returns 3 independent signals:
-    - intent_binding_loss: params that reached each node
-    - skillir_override_delta: intent.params vs plan.params differences
-    - unbound_intent_params: params requested but never bound to GraphIR
+    Returns:
+        intent_binding_loss: params that reached each bound node
     """
-    result = {}
-
-    # 1. Intent binding loss: params per node
     binding_per_node = {}
     for node_id, node_data in (bound_nodes or {}).items():
         data = node_data.get("data", {}) if isinstance(node_data, dict) else {}
@@ -314,30 +334,7 @@ def _compute_semantic_loss(
             "bound_param_count": len(data),
             "bound_params": sorted(data.keys()),
         }
-    result["intent_binding_loss"] = binding_per_node
-
-    # 2. SkillIR override delta: intent.params vs plan.params
-    override_delta = {}
-    sk_params = _safe_key_set(getattr(skill_ir_obj, 'params', None))
-    if sk_params:
-        for intent in (requested_intents or []):
-            intent_params = (
-                intent.get("params", {}) if isinstance(intent, dict)
-                else getattr(intent, 'params', {})
-            )
-            if intent_params is None:
-                intent_params = {}
-            for field in _safe_key_set(intent_params) | sk_params:
-                iv = intent_params.get(field)
-                sv = skill_ir_obj.params.get(field)
-                if iv != sv:
-                    override_delta[field] = {
-                    "intent_value": iv,
-                    "skillir_value": sv,
-                }
-    result["skillir_override_delta"] = override_delta
-
-    return result
+    return {"intent_binding_loss": binding_per_node}
 
 
 def build_ownership(file_nodes, contract) -> dict:
@@ -373,6 +370,7 @@ def _build_audit(
     file_nodes=None, workspace_root="", coverage_report=None,
     render_ctx=None, emit_log=None,
     structural_ir=None, sreport=None,
+    shadow_divergences=None,
 ) -> dict:
     """Build run artifact audit with all diagnostic sections + anomalies.
 
@@ -421,7 +419,7 @@ def _build_audit(
             }
 
     semantic_loss = _compute_semantic_loss(
-        requested_intents, bound_nodes, skill_ir_obj,
+        bound_nodes,
     )
 
     # ── Render coverage — derived from RenderTrace ONLY ──
@@ -526,9 +524,18 @@ def _build_audit(
                     "capability": getattr(m, 'capability', 'unknown'),
                 })
 
+    # ── Shadow validation anomaly (structural ↔ legacy divergence) ──
+    if shadow_divergences:
+        anomalies.append({
+            "severity": "warning",
+            "type": "structural_shadow_divergence",
+            "detail": f"{len(shadow_divergences)} divergences between structural and legacy graph",
+            "divergences": shadow_divergences,
+        })
+
     if structural_ir is not None:
         # NEW PATH: layered trace
-        return {
+        output = {
             "trace": {
                 "semantic": {
                     "resolution": {
@@ -573,6 +580,15 @@ def _build_audit(
             "repo_integrity": repo_integrity,
             "anomalies": anomalies,
         }
+        if shadow_divergences is not None:
+            output["trace"]["validation"] = {
+                "shadow": {
+                    "mode": "structural_vs_legacy",
+                    "divergences": shadow_divergences,
+                    "equivalent": len(shadow_divergences) == 0,
+                },
+            }
+        return output
 
     # ── LEGACY PATH: flat sections ──
     return {
@@ -642,16 +658,17 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             from app.contracts.semantic_resolution import SemanticConflictError
 
             semantic_frame = plan["semantic_frame"]
-            resolution = reconcile(semantic_frame, skill_ir_obj)
 
-            contract = get_contract(resolution.contract_id, resolution.contract_version)
-            if contract is None:
-                return {
-                    "status": "rejected",
-                    "reason": f"contract_not_found:{resolution.contract_id}",
-                }
+            # Phase 1: Pure semantic from language
+            semantic_resolution = reconcile(semantic_frame, skill_ir_obj)
 
-            structural_ir = complete_structure(resolution, contract, semantic_frame)
+            # Phase 2: Contract adaptation from SkillIR proposal
+            contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
+
+            # Phase 3: StructuralIR (merges both + slot mapping)
+            structural_ir = complete_structure(
+                semantic_resolution, contract_resolution, contract, semantic_frame,
+            )
 
             # Gate 2: StructuralCoverageValidator (replaces IntentCoverageValidator)
             sreport = StructuralCoverageValidator.validate(structural_ir, contract)
@@ -666,25 +683,24 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         dec_info = plan.get("decomposition", {}) if isinstance(plan, dict) else {}
 
         if intents:
-            # Intent-first legacy: reconcile → SemanticResolution → IntentPlan
+            # Intent-first legacy: reconcile → ContractResolution → IntentPlan
             try:
                 from app.engine.reconciliation import reconcile
-                from app.contracts.semantic_resolution import SemanticResolution, SemanticConflictError
+                from app.contracts.semantic_resolution import SemanticConflictError
 
                 semantic_frame = plan.get("semantic_frame") if isinstance(plan, dict) else None
                 if semantic_frame:
-                    resolution = reconcile(semantic_frame, skill_ir_obj)
+                    semantic_resolution = reconcile(semantic_frame, skill_ir_obj)
                 else:
-                    resolution = SemanticResolution.from_skillir(skill_ir_obj)
+                    semantic_resolution = SemanticResolution(
+                        semantic_params={}, semantic_provenance={}, confidence=0.0,
+                    )
 
-                contract = get_contract(resolution.contract_id, resolution.contract_version)
-                if contract is None:
-                    return {
-                        "status": "rejected",
-                        "reason": f"contract_not_found:{resolution.contract_id}",
-                    }
+                contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
 
-                structural_ir = complete_structure(resolution, contract, semantic_frame)
+                structural_ir = complete_structure(
+                    semantic_resolution, contract_resolution, contract, semantic_frame,
+                )
                 intent_plan = graphir_ready_to_intent_plan(structural_ir)
             except (ValueError, SemanticConflictError) as e:
                 return {"status": "rejected", "reason": str(e)}
@@ -740,6 +756,28 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         enforce_graph_purity(graph)
     except Exception as e:
         return {"status": "rejected", "reason": f"purity_violation:{e}"}
+
+    # ── Step 2b: Structural shadow validation ──
+    # Runs legacy GraphIRPipeline.run() in shadow mode to compare
+    # structural vs legacy graph equivalence. Validates that the
+    # StructuralIR → IntentPlan projection is lossless.
+    shadow_divergences = None
+    emit_assertions = FEATURE_FLAGS.get("emit_structural_assertions", False)
+    if pipeline_mode == "STRUCTURAL" and emit_assertions:
+        try:
+            shadow_intent_plan = graphir_ready_to_intent_plan(structural_ir)
+            shadow_graph, _ = GraphIRPipeline.run(shadow_intent_plan)
+            shadow_divergences = _compare_graphs_structural(graph, shadow_graph)
+            if shadow_divergences:
+                logger.warning(
+                    "STRUCTURAL SHADOW: %d divergences — structural ↔ legacy graph mismatch",
+                    len(shadow_divergences),
+                )
+                for div in shadow_divergences:
+                    logger.warning("  SHADOW divergence: %s", div)
+        except Exception as e:
+            shadow_divergences = [{"type": "shadow_failed", "error": str(e)}]
+            logger.warning("STRUCTURAL SHADOW: validation failed — %s", e)
 
     # ── Step 3: Gate 4 — Coverage revalidation (LEGACY path only) ──
     if pipeline_mode == "LEGACY" and intents and coverage_report is not None:
@@ -952,6 +990,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         coverage_report=coverage_report,
         render_ctx=_audit_render_ctx,
         emit_log=_captured_emit_log,
+        shadow_divergences=shadow_divergences,
     )
 
     _write_artifacts(
@@ -968,7 +1007,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "safe_skip_count": sreport.safe_skip_count,
             "total_capabilities": len(structural_ir.capabilities),
             "warnings": sreport.warnings,
+            "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
+            "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
         }
+        if shadow_divergences is not None:
+            structural_fidelity["shadow_validation"] = {
+                "divergences": len(shadow_divergences),
+                "equivalent": len(shadow_divergences) == 0,
+            }
         fidelity = structural_fidelity
     elif coverage_report is not None:
         intent_fidelity = {
@@ -1018,7 +1064,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "operations": [fop.to_dict() for fop in fileops],
         "execution": results,
         "workspace": context.workspace,
-        "execution_mode": "graphir",
+        "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
+        "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
         "fidelity": fidelity,
         "audit": audit,
     }

@@ -1,13 +1,12 @@
 """Tests for reconciliation layer — SemanticResolution + reconcile().
 
 Covers:
-  - SemanticResolution dataclass + from_skillir()
+  - SemanticResolution dataclass (pure semantic params)
+  - ContractResolution dataclass (contract-validated params)
   - reconcile() with full frame
   - Explicit vs explicit conflict → hard fail
-  - Explicit vs SkillIR → explicit wins
   - Inferred merge
-  - No frame fallback
-  - No contract_id → hard fail
+  - No frame → empty resolution
   - Run 1 + Run 2 scenarios from instrumented run
 """
 
@@ -21,6 +20,7 @@ from app.contracts.semantic_resolution import (
     SemanticResolution,
     SemanticConflictError,
 )
+from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_ir import SkillIR
 from app.engine.reconciliation import reconcile
 
@@ -53,74 +53,94 @@ def _skill_ir(
 
 
 class TestSemanticResolution(unittest.TestCase):
-    """SemanticResolution dataclass + from_skillir()."""
+    """SemanticResolution dataclass — pure semantic params only."""
 
-    def test_from_skillir_creates_resolution(self):
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = SemanticResolution.from_skillir(sir)
-        self.assertEqual(res.contract_id, "dashboard.sales_overview")
-        self.assertEqual(res.params["metrics"], ["revenue"])
-        self.assertEqual(res.param_provenance["metrics"], "skillir_proposed")
-        self.assertEqual(res.confidence, 0.8)
-
-    def test_from_skillir_raises_on_no_contract(self):
-        sir = _skill_ir(contract_id=None)
-        with self.assertRaises(SemanticConflictError):
-            SemanticResolution.from_skillir(sir)
-
-    def test_resolution_has_all_fields(self):
+    def test_creates_with_semantic_params(self):
         res = SemanticResolution(
-            contract_id="test",
-            contract_version=1,
-            params={"x": 1},
-            param_provenance={"x": "user_explicit"},
-            confidence=0.9,
-            resolution_trace=["test"],
+            semantic_params={"mentioned_metrics": ["revenue"]},
+            semantic_provenance={"mentioned_metrics": "user_explicit"},
+            confidence=0.7,
         )
-        self.assertEqual(res.contract_id, "test")
-        self.assertEqual(res.params["x"], 1)
+        self.assertEqual(res.semantic_params["mentioned_metrics"], ["revenue"])
+        self.assertEqual(res.semantic_provenance["mentioned_metrics"], "user_explicit")
+        self.assertEqual(res.confidence, 0.7)
+
+    def test_empty_params_by_default(self):
+        res = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.0,
+        )
+        self.assertEqual(res.semantic_params, {})
+        self.assertEqual(res.semantic_provenance, {})
+
+    def test_resolution_trace(self):
+        res = SemanticResolution(
+            semantic_params={"time_granularity": "monthly"},
+            semantic_provenance={"time_granularity": "user_explicit"},
+            confidence=0.9,
+            resolution_trace=["[explicit] time_granularity=monthly"],
+        )
         self.assertEqual(len(res.resolution_trace), 1)
+        self.assertIn("monthly", res.resolution_trace[0])
+
+
+class TestContractResolution(unittest.TestCase):
+    """ContractResolution dataclass — contract-validated params."""
+
+    def test_from_skillir_empty_contract(self):
+        """Without contract, just pass through SkillIR params."""
+        sir = _skill_ir(params={"metrics": ["net_revenue"]})
+        res = ContractResolution.from_skillir(sir)
+        self.assertEqual(res.contract_params["metrics"], ["net_revenue"])
+        self.assertEqual(res.contract_provenance["metrics"], "skillir_proposed")
+
+    def test_from_skillir_applies_defaults(self):
+        """Contract defaults applied for optional params not in SkillIR."""
+        from app.contracts.skill_registry import get_contract
+        contract = get_contract("dashboard.sales_overview", 1)
+        sir = _skill_ir(params={"metrics": ["net_revenue"]})
+        res = ContractResolution.from_skillir(sir, contract)
+        # metrics from SkillIR
+        self.assertEqual(res.contract_params["metrics"], ["net_revenue"])
+        # timeseries_metric default from contract
+        self.assertIn("timeseries_metric", res.contract_params)
+        self.assertEqual(res.contract_params["timeseries_metric"], "revenue")
+        self.assertEqual(res.contract_provenance["timeseries_metric"], "contract_default")
+
+    def test_from_skillir_overrides_default(self):
+        """SkillIR value overrides contract default."""
+        from app.contracts.skill_registry import get_contract
+        contract = get_contract("dashboard.sales_overview", 1)
+        sir = _skill_ir(
+            params={"metrics": ["net_revenue"], "timeseries_metric": "net_revenue"},
+        )
+        res = ContractResolution.from_skillir(sir, contract)
+        self.assertEqual(res.contract_params["timeseries_metric"], "net_revenue")
+        self.assertEqual(res.contract_provenance["timeseries_metric"], "skillir_proposed")
 
 
 class TestReconcileNoFrame(unittest.TestCase):
     """reconcile() con frame_dict=None."""
 
-    def test_no_frame_falls_back_to_skillir(self):
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = reconcile(None, sir)
-        self.assertEqual(res.params["metrics"], ["revenue"])
-        self.assertEqual(res.param_provenance["metrics"], "skillir_proposed")
-
-    def test_no_frame_no_contract_raises(self):
-        sir = _skill_ir(contract_id=None)
-        with self.assertRaises(SemanticConflictError):
-            reconcile(None, sir)
+    def test_no_frame_returns_empty_resolution(self):
+        res = reconcile(None)
+        self.assertEqual(res.semantic_params, {})
+        self.assertEqual(res.semantic_provenance, {})
+        self.assertEqual(res.confidence, 0.0)
 
 
 class TestReconcileExplicit(unittest.TestCase):
     """Regla 1-2: Explicit constraints."""
 
-    def test_explicit_override_skillir(self):
-        """Explicit user constraint overrides SkillIR proposal."""
-        fr = _frame(constraints=[
-            {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
-        ])
-        sir = _skill_ir(params={"metrics": ["revenue", "growth"]})
-        res = reconcile(fr, sir)
-        self.assertEqual(res.params["metrics"], ["net_revenue"])
-        self.assertEqual(res.param_provenance["metrics"], "user_explicit")
-
-    def test_explicit_adds_new_param(self):
-        """Explicit constraint adds a param SkillIR didn't have."""
+    def test_explicit_adds_param(self):
         fr = _frame(constraints=[
             {"param": "time_granularity", "value": "monthly", "source": "explicit"},
         ])
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = reconcile(fr, sir)
-        self.assertIn("time_granularity", res.params)
-        self.assertEqual(res.params["time_granularity"], "monthly")
-        # SkillIR.params NO entran en resolution (Rule 5 eliminada)
-        self.assertNotIn("metrics", res.params)
+        res = reconcile(fr)
+        self.assertIn("time_granularity", res.semantic_params)
+        self.assertEqual(res.semantic_params["time_granularity"], "monthly")
+        self.assertEqual(res.semantic_provenance["time_granularity"], "user_explicit")
 
     def test_explicit_vs_explicit_same_value_ok(self):
         """Same explicit value for same param is not a conflict."""
@@ -128,9 +148,8 @@ class TestReconcileExplicit(unittest.TestCase):
             {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
             {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
         ])
-        sir = _skill_ir(params={})
-        res = reconcile(fr, sir)
-        self.assertEqual(res.params["metrics"], ["net_revenue"])
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params["metrics"], ["net_revenue"])
 
     def test_explicit_vs_explicit_different_value_raises(self):
         """Two different explicit values for same param → hard fail."""
@@ -138,74 +157,53 @@ class TestReconcileExplicit(unittest.TestCase):
             {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
             {"param": "metrics", "value": ["revenue"], "source": "explicit"},
         ])
-        sir = _skill_ir(params={})
         with self.assertRaises(SemanticConflictError) as ctx:
-            reconcile(fr, sir)
+            reconcile(fr)
         err = str(ctx.exception)
         self.assertIn("metrics", err)
         self.assertIn("net_revenue", err)
         self.assertIn("revenue", err)
 
-    def test_explicit_vs_skillir_trace(self):
-        """Explicit vs SkillIR conflict is traced, not errored."""
+    def test_mentioned_metrics_from_explicit(self):
+        """mentioned_metrics is a semantic observation, not a structural param."""
         fr = _frame(constraints=[
-            {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
+            {"param": "mentioned_metrics", "value": ["revenue", "net_revenue"],
+             "source": "explicit"},
         ])
-        sir = _skill_ir(params={"metrics": ["revenue", "ratio"]})
-        res = reconcile(fr, sir)
-        # Explicit wins
-        self.assertEqual(res.params["metrics"], ["net_revenue"])
-        # Trace captures the conflict
-        traces = [t for t in res.resolution_trace if "override" in t]
-        self.assertGreaterEqual(len(traces), 1, "Should have override trace")
-        self.assertIn("ratio", traces[0], "Trace should mention what was overridden")
+        res = reconcile(fr)
+        self.assertIn("mentioned_metrics", res.semantic_params)
+        self.assertEqual(res.semantic_params["mentioned_metrics"],
+                         ["revenue", "net_revenue"])
 
 
 class TestReconcileInferred(unittest.TestCase):
-    """Regla 4: Inferred constraints."""
+    """Regla 3: Inferred constraints."""
 
     def test_inferred_merges_when_no_explicit(self):
         fr = _frame(constraints=[
             {"param": "time_granularity", "value": "monthly", "source": "inferred"},
         ])
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = reconcile(fr, sir)
-        self.assertEqual(res.params["time_granularity"], "monthly")
-        self.assertEqual(res.param_provenance["time_granularity"], "user_inferred")
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params["time_granularity"], "monthly")
+        self.assertEqual(res.semantic_provenance["time_granularity"], "user_inferred")
 
     def test_inferred_skipped_when_explicit_exists(self):
         fr = _frame(constraints=[
             {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
             {"param": "metrics", "value": ["revenue"], "source": "inferred"},
         ])
-        sir = _skill_ir(params={})
-        res = reconcile(fr, sir)
-        self.assertEqual(res.params["metrics"], ["net_revenue"])
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params["metrics"], ["net_revenue"])
 
-
-class TestReconcileSkillIR(unittest.TestCase):
-    """Rule 5 eliminada: SkillIR.params ya NO entran en resolution.
-
-    SkillIR solo aporta contract_id, version, confidence.
-    Los params vienen de frame constraints + safe defaults en complete_structure.
-    """
-
-    def test_skillir_params_not_injected(self):
-        """SkillIR.params no deben aparecer en resolution si frame no los cubre."""
+    def test_inferred_race_trace(self):
+        """Inferred conflict is traced, not errored."""
         fr = _frame(constraints=[
-            {"param": "time_granularity", "value": "monthly", "source": "explicit"},
+            {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
+            {"param": "metrics", "value": ["revenue"], "source": "inferred"},
         ])
-        sir = _skill_ir(params={
-            "metrics": ["revenue", "growth"],
-            "timeseries_metric": "revenue",
-        })
-        res = reconcile(fr, sir)
-        # Frame explicit está presente
-        self.assertEqual(res.params["time_granularity"], "monthly")
-        self.assertEqual(res.param_provenance["time_granularity"], "user_explicit")
-        # SkillIR params NO deben aparecer
-        self.assertNotIn("metrics", res.params)
-        self.assertNotIn("timeseries_metric", res.params)
+        res = reconcile(fr)
+        traces = " ".join(res.resolution_trace)
+        self.assertIn("skip", traces.lower())
 
 
 class TestReconcileRun1(unittest.TestCase):
@@ -220,17 +218,8 @@ class TestReconcileRun1(unittest.TestCase):
             constraints=[],
             confidence=0.506,
         )
-        sir = _skill_ir(
-            contract_id="analytics.table",
-            params={"columns": ["Metric", "Value"]},
-            confidence=0.7,
-        )
-        res = reconcile(fr, sir)
-        self.assertEqual(res.contract_id, "analytics.table")
-        # SkillIR.params ya NO entran (Rule 5 eliminada)
-        self.assertNotIn("columns", res.params)
-        self.assertGreaterEqual(len(res.resolution_trace), 1)
-        # No explicit constraints, so no override
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params, {})
         self.assertGreaterEqual(len(res.resolution_trace), 1)
 
 
@@ -254,55 +243,30 @@ class TestReconcileRun2(unittest.TestCase):
             ],
             confidence=0.703,
         )
-        self.skill_ir = _skill_ir(
-            contract_id="dashboard.sales_overview",
-            params={
-                "metrics": ["revenue", "growth", "retention", "churn"],
-                "timeseries_metric": "revenue",
-            },
-            confidence=0.85,
-        )
 
     def test_metrics_override(self):
-        """metrics debe ser net_revenue del usuario, NO el mix contaminado."""
-        res = reconcile(self.frame, self.skill_ir)
+        """metrics debe ser net_revenue del usuario."""
+        res = reconcile(self.frame)
         self.assertEqual(
-            res.params["metrics"],
+            res.semantic_params["metrics"],
             ["net_revenue"],
-            "metrics should be user_explicit override, not SkillIR mix",
+            "metrics should be user_explicit override",
         )
-        self.assertEqual(res.param_provenance["metrics"], "user_explicit")
-
-    def test_ratio_not_in_params(self):
-        """'ratio' no debe aparecer en los params reconciliados."""
-        res = reconcile(self.frame, self.skill_ir)
-        params_str = str(res.params).lower()
-        self.assertNotIn(
-            "ratio", params_str,
-            "'ratio' should NOT appear in reconciled params"
-        )
+        self.assertEqual(res.semantic_provenance["metrics"], "user_explicit")
 
     def test_time_granularity_from_frame(self):
         """time_granularity monthly del usuario debe preservarse."""
-        res = reconcile(self.frame, self.skill_ir)
-        self.assertEqual(res.params["time_granularity"], "monthly")
+        res = reconcile(self.frame)
+        self.assertEqual(res.semantic_params["time_granularity"], "monthly")
 
-    def test_timeseries_metric_not_injected(self):
-        """timeseries_metric de SkillIR ya NO entra en resolution (Rule 5 eliminada)."""
-        res = reconcile(self.frame, self.skill_ir)
-        self.assertNotIn("timeseries_metric", res.params)
-
-    def test_confidence_is_min(self):
-        """Confianza reconciliada es el mínimo entre frame y skill_ir."""
-        res = reconcile(self.frame, self.skill_ir)
-        self.assertAlmostEqual(res.confidence, min(0.703, 0.85))
-
-    def test_override_trace_present(self):
-        """Trace debe documentar que SkillIR metrics fue overridden."""
-        res = reconcile(self.frame, self.skill_ir)
-        traces = " ".join(res.resolution_trace)
-        self.assertIn("override", traces,
-                       "Trace should mention override of SkillIR params")
+    def test_mentioned_metrics_present(self):
+        """mentioned_metrics debe estar en semantic_params como observación."""
+        res = reconcile(self.frame)
+        self.assertIn("mentioned_metrics", res.semantic_params)
+        self.assertEqual(
+            res.semantic_params["mentioned_metrics"],
+            ["revenue", "net_revenue", "retention"],
+        )
 
 
 class TestReconcileEdgeCases(unittest.TestCase):
@@ -310,34 +274,48 @@ class TestReconcileEdgeCases(unittest.TestCase):
 
     def test_empty_constraints(self):
         fr = _frame(constraints=[])
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = reconcile(fr, sir)
-        # SkillIR.params ya NO entran (Rule 5 eliminada)
-        self.assertNotIn("metrics", res.params)
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params, {})
 
-    def test_frame_without_skillir_params(self):
+    def test_frame_without_skillir_does_not_affect(self):
+        """Frame without skill_ir still produces semantic params."""
         fr = _frame(constraints=[
             {"param": "metrics", "value": ["net_revenue"], "source": "explicit"},
         ])
-        sir = _skill_ir(params={})
-        res = reconcile(fr, sir)
-        self.assertEqual(res.params["metrics"], ["net_revenue"])
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params["metrics"], ["net_revenue"])
 
     def test_no_actions_no_crash(self):
         fr = _frame(constraints=[], actions=None)
-        sir = _skill_ir(params={"x": 1})
-        res = reconcile(fr, sir)
-        # SkillIR.params ya NO entran (Rule 5 eliminada)
-        self.assertNotIn("x", res.params)
-        self.assertEqual(res.contract_id, "dashboard.sales_overview")
+        res = reconcile(fr)
+        self.assertEqual(res.semantic_params, {})
 
     def test_explicit_with_none_value(self):
         fr = _frame(constraints=[
             {"param": "metrics", "value": None, "source": "explicit"},
         ])
-        sir = _skill_ir(params={"metrics": ["revenue"]})
-        res = reconcile(fr, sir)
-        self.assertIsNone(res.params["metrics"])
+        res = reconcile(fr)
+        self.assertIsNone(res.semantic_params["metrics"])
+
+    def test_contract_resolution_preserves_skillir_params(self):
+        """ContractResolution.from_skillir preserva params de SkillIR."""
+        sir = _skill_ir(
+            params={"metrics": ["net_revenue"], "timeseries_metric": "net_revenue"},
+        )
+        res = ContractResolution.from_skillir(sir)
+        self.assertIn("metrics", res.contract_params)
+        self.assertIn("timeseries_metric", res.contract_params)
+        self.assertEqual(res.contract_params["metrics"], ["net_revenue"])
+        self.assertEqual(res.contract_params["timeseries_metric"], "net_revenue")
+
+    def test_semantic_resolution_never_has_contract_params(self):
+        """SemanticResolution NEVER contains contract-level params like timeseries_metric."""
+        fr = _frame(constraints=[
+            {"param": "time_granularity", "value": "monthly", "source": "explicit"},
+        ])
+        res = reconcile(fr)
+        self.assertNotIn("timeseries_metric", res.semantic_params)
+        self.assertNotIn("metrics", res.semantic_params)
 
 
 if __name__ == "__main__":
