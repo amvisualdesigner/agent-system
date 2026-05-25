@@ -580,28 +580,35 @@ def complete_structure(
             contract_caps, repo_state, contract.contract_id,
         ))
 
-    # Paso 1: capabilities base del contrato
-    capabilities = _infer_capabilities_from_contract(contract)
-
-    # Paso 2: augmentar con hints del frame
-    capabilities = _augment_capabilities(
-        capabilities, semantic_resolution, contract_resolution, frame_dict,
-    )
+    # Paso 1: scope bootstrap según modo
+    # Operational mode (con acciones): actions + repo definen scope
+    # Declarative mode (sin acciones): contrato define scope
+    if semantic_resolution.actions:
+        capabilities = []
+    else:
+        capabilities = _infer_capabilities_from_contract(contract)
+        capabilities = _augment_capabilities(
+            capabilities, semantic_resolution, contract_resolution, frame_dict,
+        )
 
     # Paso 2b: Step A — match actions from semantic layer to capabilities
-    # El universo de matching es repo ∪ contract
+    # El universo de matching SIEMPRE es repo ∪ contract
+    # (necesitamos contract_caps para resolver nombres de capability aunque
+    # en operational mode el scope de iteración sea distinto)
+    contract_caps_for_matching = (
+        _infer_capabilities_from_contract(contract)
+        if semantic_resolution.actions
+        else capabilities
+    )
     action_map = _match_actions_to_capabilities(
-        semantic_resolution.actions, capabilities, contract,
+        semantic_resolution.actions, contract_caps_for_matching, contract,
         repo_state=repo_state,
     )
 
-    # Incluir capabilities del repo que fueron target de alguna acción
-    # pero no están en el contrato (e.g., "remove barchart" → presentation.chart.bar
-    # existe en repo pero no en dashboard.sales_overview)
-    repo_only_targets = set(action_map) - set(capabilities)
-    for target in repo_only_targets:
-        if repo_state and target in repo_state:
-            capabilities.append(target)
+    # Ampliar scope con targets de acciones que no están en capabilities
+    # (tanto repo-only como CREATE targets que no existen en repo aún)
+    for target in set(action_map) - set(capabilities):
+        capabilities.append(target)
 
     # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
