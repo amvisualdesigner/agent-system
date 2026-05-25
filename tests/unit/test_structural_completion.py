@@ -584,11 +584,8 @@ class TestPipelineInvariants:
 
         # ── 4a. UI IR purity: run via new path, verify node data matches capability params ──
         from app.graphir.pipeline import GraphIRPipeline
-        from app.graphir.builder import GraphIRBuilder
 
-        with patch.object(GraphIRBuilder, "build") as mock_build:
-            graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
-            mock_build.assert_not_called()
+        graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
 
         kpi_node = graph.nodes.get("KpiRow_1")
         assert kpi_node is not None, "Expected KpiRow_1 node in graph"
@@ -597,20 +594,6 @@ class TestPipelineInvariants:
         ts_node = graph.nodes.get("Timeseries_2")
         assert ts_node is not None, "Expected Timeseries_2 node in graph"
         assert ts_node.data["metric"] == "net_revenue"
-
-        # ── 4b. Trace: verify forbidden code paths were never executed ──
-        from app.graphir import binding as binding_module
-        from app.graphir import builder as builder_module
-
-        with (
-            patch.object(binding_module, "bind_skillir_to_nodes") as mock_bind,
-            patch.object(binding_module, "validate_binding") as mock_val,
-            patch.object(builder_module.GraphIRBuilder, "build") as mock_build,
-        ):
-            GraphIRPipeline.run_from_structural(structural_ir)
-            mock_bind.assert_not_called()
-            mock_val.assert_not_called()
-            mock_build.assert_not_called()
 
         # ── 5. StructuralCoverageValidator integrity ──
         from app.graphir.structural_coverage import StructuralCoverageValidator

@@ -79,9 +79,9 @@ from app.graphir.intent_governance import (
 
 from app.graphir.debug import visualize
 
-from app.graphir.builder import GraphIRBuilder, build_from_plan
+from app.graphir.builder import GraphIRBuilder, build_from_structural
 
-from app.graphir.pipeline import GraphIRPipeline, run_pipeline
+from app.graphir.pipeline import GraphIRPipeline, run_from_structural
 
 __all__ = [
     "EdgeRole",
@@ -109,9 +109,9 @@ __all__ = [
     "LayoutDerivationEngine",
     "visualize",
     "GraphIRBuilder",
-    "build_from_plan",
+    "build_from_structural",
     "GraphIRPipeline",
-    "run_pipeline",
+    "run_from_structural",
     "EmbeddingIndex",
     "cosine_similarity",
     "compute_embedding",

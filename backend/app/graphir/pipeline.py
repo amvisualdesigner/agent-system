@@ -1,11 +1,11 @@
 """GraphIR Pipeline — orchestrates builder + layout + enrichment.
 
 The pipeline is the HIGHEST-LEVEL GraphIR operation, converting
-an IntentPlan or StructuralIR into a fully enriched (GraphIR + GraphIRLayout) pair
+StructuralIR into a fully enriched (GraphIR + GraphIRLayout) pair
 ready for backend rendering.
 
 Pipeline order (immutable):
-  1. Build: IntentPlan/StructuralIR → GraphIR (via GraphIRBuilder)
+  1. Build: StructuralIR → GraphIR (via GraphIRBuilder.build_from_structural)
   2. Layout: GraphIR → GraphIRLayout (via LayoutDerivationEngine)
   3. Enrich: optional enrichment passes (future: import resolution,
      template binding, context injection)
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.graphir.intent import IntentPlan
 from app.graphir.models import GraphIR, GraphIRLayout
 from app.graphir.builder import GraphIRBuilder
 from app.graphir.layout import LayoutDerivationEngine
@@ -29,37 +28,13 @@ if TYPE_CHECKING:
 
 
 class GraphIRPipeline:
-    """Immutable pipeline: IntentPlan/StructuralIR → (GraphIR, GraphIRLayout).
+    """Immutable pipeline: StructuralIR → (GraphIR, GraphIRLayout).
 
     Stateless and deterministic. Each call runs the full pipeline.
     No caching, no global state, no side effects.
 
-    Two entry points:
-      - run(plan: IntentPlan) — legacy path with binding redistribution
-      - run_from_structural(ir: StructuralIR) — new path, 1:1, no decisions
+    Single entry point: run_from_structural(ir). 1:1 capability→node.
     """
-
-    @staticmethod
-    def run(
-        plan: IntentPlan,
-        preferences: dict | None = None,
-    ) -> tuple[GraphIR, GraphIRLayout]:
-        """Run the full GraphIR pipeline from IntentPlan (legacy).
-
-        Args:
-            plan: Validated IntentPlan.
-            preferences: Optional layout preferences dict.
-
-        Returns:
-            (GraphIR, GraphIRLayout) — frozen graph + derived layout.
-
-        Raises:
-            ValueError: on any pipeline failure.
-        """
-        graph = GraphIRBuilder.build(plan)
-        GraphIRValidator.validate(graph)
-        layout = LayoutDerivationEngine.derive(graph, preferences)
-        return graph, layout
 
     @staticmethod
     def run_from_structural(
@@ -85,14 +60,6 @@ class GraphIRPipeline:
         GraphIRValidator.validate(graph)
         layout = LayoutDerivationEngine.derive(graph, preferences)
         return graph, layout
-
-
-def run_pipeline(
-    plan: IntentPlan,
-    preferences: dict | None = None,
-) -> tuple[GraphIR, GraphIRLayout]:
-    """Convenience wrapper."""
-    return GraphIRPipeline.run(plan, preferences)
 
 
 def run_from_structural(

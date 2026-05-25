@@ -1,13 +1,7 @@
-"""GraphIR Builder — IntentPlan/StructuralIR → GraphIR via GraphIRDraft.
+"""GraphIR Builder — StructuralIR → GraphIR via GraphIRDraft.
 
-Converts semantic intent plans into validated, frozen GraphIR.
-The builder is the ONLY component that produces GraphIR from IntentPlan.
-
-Two entry points:
-  - build(plan: IntentPlan) — legacy path, uses binding + validation
-  - build_from_structural(ir: StructuralIR) — new path, 1:1 capability→node, no binding
-
-Supports both Intent (new) and IntentNode (legacy/deprecated).
+Single entry point: build_from_structural(ir). 1:1 capability→node,
+no binding redistribution.
 """
 
 from __future__ import annotations
@@ -16,19 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 from app.graphir.intent import (
     Intent,
-    IntentExtensionRegistry,
-    IntentNode,
-    IntentPlan,
-    is_graphir_node_capability,
     is_capability_metadata,
     make_intent_id,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
-)
-from app.graphir.binding import (
-    SkillIRBindingError,
-    bind_skillir_to_nodes,
-    validate_binding,
 )
 from app.graphir.models import (
     EdgeRole,
@@ -64,14 +49,14 @@ class GraphIRBuilder:
     def _add_intent_node(
         cls,
         draft: GraphIRDraft,
-        intent: Intent | IntentNode,
+        intent: Intent,
         index: int,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
         No edges, no root logic. Pure inventory stage.
         """
-        if isinstance(intent, Intent) and is_capability_metadata(intent.capability):
+        if is_capability_metadata(intent.capability):
             cls._apply_metadata(draft, intent)
             return
 
@@ -79,17 +64,15 @@ class GraphIRBuilder:
 
         node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
 
-        metadata: dict[str, Any] = {"intent_type": intent.type if isinstance(intent, IntentNode) else ""}
-        if isinstance(intent, Intent):
-            metadata["intent_id"] = intent.id
-            metadata["intent_capability"] = intent.capability
-            metadata["intent_source"] = intent.source
-
         node = GraphIRNode(
             id=node_id,
             type=graphir_type,
             data=dict(intent.params),
-            metadata=metadata,
+            metadata={
+                "intent_id": intent.id,
+                "intent_capability": intent.capability,
+                "intent_source": intent.source,
+            },
         )
         draft.add_node(node)
 
@@ -110,20 +93,14 @@ class GraphIRBuilder:
             draft.params.setdefault("layout_hints", {})[layout_key] = True
 
     @classmethod
-    def _resolve_graphir_type(cls, intent: Intent | IntentNode, index: int) -> str:
+    def _resolve_graphir_type(cls, intent: Intent, index: int) -> str:
         """Resolve graphir_type from intent, raising ValueError on failure."""
-        if isinstance(intent, Intent):
-            graphir_type = resolve_graphir_type_from_capability(intent.capability)
-            if graphir_type is None:
-                graphir_type = cls._legacy_resolve(intent)
-        else:
-            graphir_type = IntentExtensionRegistry.resolve_graphir_type(intent.type)
+        graphir_type = resolve_graphir_type_from_capability(intent.capability)
 
         if graphir_type is None:
-            label = intent.capability if isinstance(intent, Intent) else intent.type
             raise ValueError(
                 f"GraphIRBuilder: cannot resolve graphir_type for "
-                f"intent '{label}' at index {index}"
+                f"intent '{intent.capability}' at index {index}"
             )
         return graphir_type
 
@@ -152,12 +129,12 @@ class GraphIRBuilder:
     def _add_intent_edge(
         cls,
         draft: GraphIRDraft,
-        intent: Intent | IntentNode,
+        intent: Intent,
         index: int,
         root_id: str,
     ) -> None:
         """Phase 4: Create edge from root to node. Skip metadata and root itself."""
-        if isinstance(intent, Intent) and is_capability_metadata(intent.capability):
+        if is_capability_metadata(intent.capability):
             return
 
         graphir_type = cls._resolve_graphir_type(intent, index)
@@ -166,10 +143,7 @@ class GraphIRBuilder:
         if node_id == root_id:
             return
 
-        if isinstance(intent, Intent):
-            role_name = resolve_edge_role_from_capability(intent.capability)
-        else:
-            role_name = IntentExtensionRegistry.resolve_edge_role(intent.type)
+        role_name = resolve_edge_role_from_capability(intent.capability)
 
         if role_name is None:
             role = EdgeRole.CONTAINS
@@ -183,60 +157,6 @@ class GraphIRBuilder:
         ))
 
     # ── Public builder ─────────────────────────────────────────────
-
-    @classmethod
-    def build(cls, plan: IntentPlan) -> GraphIR:
-        """Convert an IntentPlan into a validated, frozen GraphIR.
-
-        Phases:
-          1. Validate IntentPlan
-          2. Node materialization — register nodes or apply metadata
-          3. SkillIR binding — merge SkillIR params into node.data per capability schema
-          4. Root election — semantic policy (layout.page > legacy fallback)
-          5. Edge construction — bind non-root nodes to elected root
-          6. Freeze and return
-
-        Args:
-            plan: Validated IntentPlan.
-
-        Returns:
-            Frozen GraphIR.
-
-        Raises:
-            ValueError: if plan is invalid or graph invariants fail.
-            SkillIRBindingError: if required SkillIR params cannot be bound.
-        """
-        IntentPlan.validate(plan)
-
-        draft = GraphIRDraft()
-        draft.params = dict(plan.params)
-
-        # ── Phase 2: Node materialization (inventory, no routing) ──
-        for i, intent in enumerate(plan.intents):
-            cls._add_intent_node(draft, intent, i)
-
-        # ── Phase 3: SkillIR binding (semantic contract enforcement) ─
-        bind_skillir_to_nodes(draft, plan)
-        validate_binding(draft, plan)
-
-        # ── Phase 4: Root election (semantic policy layer) ─────────
-        root_id = cls._select_root(draft)
-
-        # ── Phase 5: Edge construction (relationship binding) ──────
-        for i, intent in enumerate(plan.intents):
-            cls._add_intent_edge(draft, intent, i, root_id)
-
-        # Safety net: attach any remaining orphans (backward compat)
-        orphans = draft.get_orphan_nodes()
-        if orphans:
-            for nid in orphans:
-                draft.add_edge(GraphIREdge(
-                    source=root_id,
-                    target=nid,
-                    role=EdgeRole.CONTAINS,
-                ))
-
-        return draft.freeze()
 
     @classmethod
     def build_from_structural(cls, ir: StructuralIR) -> GraphIR:
@@ -290,30 +210,6 @@ class GraphIRBuilder:
                 ))
 
         return draft.freeze()
-
-    # ── Legacy resolvers ──────────────────────────────────────────
-
-    @classmethod
-    def _legacy_resolve(cls, intent: Intent) -> str | None:
-        """Fallback: try to resolve via IntentExtensionRegistry."""
-        capability_to_type = {
-            "display.kpi_row": "KPIGROUP",
-            "display.timeseries": "CHART",
-            "display.analytics_table": "DATATABLE",
-            "display.filter_panel": "FILTERPANEL",
-            "embed.external": "EMBED",
-            "layout.page": "PAGE",
-        }
-        type_name = capability_to_type.get(intent.capability)
-        if type_name is None:
-            return None
-        return IntentExtensionRegistry.resolve_graphir_type(type_name)
-
-
-def build_from_plan(plan: IntentPlan) -> GraphIR:
-    """Convenience wrapper."""
-    return GraphIRBuilder.build(plan)
-
 
 def build_from_structural(ir: StructuralIR) -> GraphIR:
     """Convenience wrapper."""

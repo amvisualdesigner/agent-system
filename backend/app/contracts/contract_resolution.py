@@ -21,6 +21,27 @@ class ContractResolutionError(ValueError):
     pass
 
 
+MERGE_STRATEGIES = frozenset({"replace", "append", "fill_if_missing"})
+
+
+def infer_merge_strategy(prop: dict) -> str:
+    """Infer merge strategy from property schema type.
+
+    Strategies:
+      replace       — array: user value replaces default entirely (no merge)
+      fill_if_missing — scalar: default fills only when user provides nothing
+      append        — array: user values appended to default list (e.g. filters)
+
+    Overridable via x-strategy in the property definition.
+    """
+    explicit = prop.get("x-strategy")
+    if explicit in MERGE_STRATEGIES:
+        return explicit
+    if prop.get("type") == "array":
+        return "replace"
+    return "fill_if_missing"
+
+
 @dataclass
 class ContractResolution:
     """Contract-validated params — SkillIR proposal adapted to contract schema.
@@ -50,8 +71,14 @@ class ContractResolution:
 
         Applies:
           1. SkillIR.params as-is (already validated by planner)
-          2. Contract input_schema defaults for missing optional params
+          2. Contract input_schema defaults for missing optional params,
+             respecting per-field merge strategy
           3. Validation warnings for unknown or out-of-enum params
+
+        Merge strategies:
+          - replace       (arrays): user value stays, default only fills if absent
+          - fill_if_missing (scalars): default fills only when user provides nothing
+          - append        (arrays): user values merged into default list
 
         Does NOT raise on missing required fields — that is a structural
         concern handled by StructuralCompletionLayer.
@@ -65,13 +92,31 @@ class ContractResolution:
             params[k] = v
             provenance[k] = "skillir_proposed"
 
-        # Apply contract defaults for fields not in SkillIR params
+        # Apply contract defaults respecting per-field merge strategy
         if contract is not None:
             properties = contract.input_schema.get("properties", {})
             for field, prop in properties.items():
-                if field not in params and "default" in prop:
-                    params[field] = prop["default"]
-                    provenance[field] = "contract_default"
+                strategy = infer_merge_strategy(prop)
+                default_val = prop.get("default")
+
+                if field not in params:
+                    # Field absent — apply default for all strategies
+                    if default_val is not None:
+                        params[field] = default_val
+                        provenance[field] = "contract_default"
+                elif strategy == "append" and "default" in prop:
+                    # Append user values to default (e.g. filters)
+                    if default_val is not None and isinstance(default_val, list):
+                        user_val = params[field]
+                        if isinstance(user_val, list):
+                            combined = list(default_val)
+                            for v in user_val:
+                                if v not in combined:
+                                    combined.append(v)
+                            params[field] = combined
+                            provenance[field] = "contract_default"
+                    # else: strategy is replace or fill_if_missing
+                    # — user value stays as-is, no merge needed
 
         return cls(
             contract_params=params,

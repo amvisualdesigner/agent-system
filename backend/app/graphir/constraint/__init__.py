@@ -49,7 +49,7 @@ from app.graphir.constraint.diff import (
 from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.executor import FileOpExecutor
 from app.graphir.constraint.deletion import detect_deletions
-from app.graphir.constraint.validation import shadow_compare, shadow_compare_decisions
+
 
 __all__ = [
     "ExecutionContext",
@@ -84,6 +84,4 @@ __all__ = [
     "ContentGenerator",
     "FileOpExecutor",
     "detect_deletions",
-    "shadow_compare",
-    "shadow_compare_decisions",
 ]

@@ -254,8 +254,6 @@ class TestPipelineInvariantsExtended:
         from app.graphir.structural_coverage import StructuralCoverageValidator
         from app.graphir.pipeline import GraphIRPipeline
         from app.graphir import intent_coverage as ic_module
-        from app.graphir import binding as binding_module
-        from app.graphir.builder import GraphIRBuilder
 
         semantic_res, contract_res = make_resolution(
             params={"metrics": ["net_revenue"]},
@@ -269,22 +267,15 @@ class TestPipelineInvariantsExtended:
         sreport = StructuralCoverageValidator.validate(structural_ir, dashboard_contract)
         assert sreport.is_valid
 
-        # Execute full new path with mocks on forbidden functions
+        # Execute full new path — verify legacy code is never called
         with (
             patch.object(ic_module.IntentCoverageValidator, "check_coverage") as mock_cc,
             patch.object(ic_module.IntentCoverageValidator, "revalidate") as mock_reval,
-            patch.object(binding_module, "bind_skillir_to_nodes") as mock_bind,
-            patch.object(binding_module, "validate_binding") as mock_val,
-            patch.object(GraphIRBuilder, "build") as mock_legacy_build,
         ):
             graph, layout = GraphIRPipeline.run_from_structural(structural_ir)
 
-            # These should NEVER be called in the new path
             mock_cc.assert_not_called()
             mock_reval.assert_not_called()
-            mock_bind.assert_not_called()
-            mock_val.assert_not_called()
-            mock_legacy_build.assert_not_called()
 
         # Verify output is purely structural
         assert graph.nodes is not None
