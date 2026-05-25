@@ -40,6 +40,7 @@ _OBJECT_KEYWORDS: dict[str, str] = {
     "trend": "timeseries",
     "chart": "chart",
     "bar chart": "chart.bar",
+    "barchart": "chart.bar",
     "dashboard": "dashboard",
     "page": "page",
     "grid": "grid",

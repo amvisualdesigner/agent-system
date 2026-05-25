@@ -587,12 +587,12 @@ class TestPipelineInvariants:
 
         graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
 
-        kpi_node = graph.nodes.get("KpiRow_1")
-        assert kpi_node is not None, "Expected KpiRow_1 node in graph"
+        kpi_node = graph.nodes.get("KpiRow")
+        assert kpi_node is not None, "Expected KpiRow node in graph"
         assert kpi_node.data == {"metrics": ("net_revenue",)}
 
-        ts_node = graph.nodes.get("Timeseries_2")
-        assert ts_node is not None, "Expected Timeseries_2 node in graph"
+        ts_node = graph.nodes.get("Timeseries")
+        assert ts_node is not None, "Expected Timeseries node in graph"
         assert ts_node.data["metric"] == "net_revenue"
 
         # ── 5. StructuralCoverageValidator integrity ──
@@ -611,3 +611,198 @@ class TestPipelineInvariants:
                     assert all(
                         r in cap.params for r in required
                     ), f"{cap.name}: missing required field in SAFE_COMPLETE params"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Tests: Action matching & lifecycle (Phase 2–3)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestActionMatching:
+    """_match_actions_to_capabilities — Step A."""
+
+    def test_matches_by_object_keywords(self, dashboard_contract):
+        from app.engine.structural_completion import _match_actions_to_capabilities
+        caps = ["presentation.kpi_row", "presentation.timeseries", "layout.page"]
+        result = _match_actions_to_capabilities(
+            [{"verb": "modify", "object": "kpi"}], caps, dashboard_contract,
+        )
+        assert result == {"presentation.kpi_row": "modify"}
+
+    def test_matches_by_template_key(self, dashboard_contract):
+        from app.engine.structural_completion import _match_actions_to_capabilities
+        caps = ["presentation.kpi_row", "presentation.timeseries", "layout.page"]
+        result = _match_actions_to_capabilities(
+            [{"verb": "create", "object": "dashboard"}], caps, dashboard_contract,
+        )
+        assert result == {"layout.page": "create"}
+
+    def test_matches_multiple_actions(self, dashboard_contract):
+        from app.engine.structural_completion import _match_actions_to_capabilities
+        caps = ["presentation.kpi_row", "presentation.timeseries",
+                 "presentation.filter_panel", "layout.page"]
+        result = _match_actions_to_capabilities([
+            {"verb": "remove", "object": "timeseries"},
+            {"verb": "add", "object": "filter"},
+        ], caps, dashboard_contract)
+        assert result == {
+            "presentation.timeseries": "remove",
+            "presentation.filter_panel": "add",
+        }
+
+    def test_no_match_returns_empty(self, dashboard_contract):
+        from app.engine.structural_completion import _match_actions_to_capabilities
+        caps = ["presentation.kpi_row", "presentation.timeseries"]
+        result = _match_actions_to_capabilities(
+            [{"verb": "modify", "object": "unknown"}], caps, dashboard_contract,
+        )
+        assert result == {}
+
+    def test_empty_actions_returns_empty(self, dashboard_contract):
+        from app.engine.structural_completion import _match_actions_to_capabilities
+        caps = ["presentation.kpi_row"]
+        result = _match_actions_to_capabilities([], caps, dashboard_contract)
+        assert result == {}
+
+
+class TestActionLifecycle:
+    """_resolve_action — Step B deterministic rules."""
+
+    def test_create_when_not_exists_and_create_verb(self):
+        from app.engine.structural_completion import _resolve_action, CREATE, MODIFY, DELETE, KEEP
+        assert _resolve_action("presentation.table", "create", set()) == CREATE
+
+    def test_modify_when_exists_and_modify_verb(self):
+        from app.engine.structural_completion import _resolve_action, MODIFY
+        assert _resolve_action("presentation.table", "modify", {"presentation.table"}) == MODIFY
+
+    def test_delete_when_exists_and_delete_verb(self):
+        from app.engine.structural_completion import _resolve_action, DELETE
+        assert _resolve_action("presentation.table", "remove", {"presentation.table"}) == DELETE
+
+    def test_keep_when_exists_no_verb(self):
+        from app.engine.structural_completion import _resolve_action, KEEP
+        assert _resolve_action("presentation.table", None, {"presentation.table"}) == KEEP
+
+    def test_create_when_not_exists_no_verb(self):
+        from app.engine.structural_completion import _resolve_action, CREATE
+        assert _resolve_action("presentation.table", None, set()) == CREATE
+
+    def test_modify_not_exists_becomes_create(self):
+        from app.engine.structural_completion import _resolve_action, CREATE
+        assert _resolve_action("presentation.table", "modify", set()) == CREATE
+
+    def test_delete_not_exists_becomes_keep(self):
+        from app.engine.structural_completion import _resolve_action, KEEP
+        assert _resolve_action("presentation.table", "delete", set()) == KEEP
+
+    def test_add_not_exists_becomes_create(self):
+        from app.engine.structural_completion import _resolve_action, CREATE
+        assert _resolve_action("presentation.table", "add", set()) == CREATE
+
+    def test_unrecognized_verb_on_existing_becomes_modify(self):
+        from app.engine.structural_completion import _resolve_action, MODIFY
+        assert _resolve_action("presentation.table", "custom_action", {"presentation.table"}) == MODIFY
+
+
+class TestCompleteStructureWithActions:
+    """complete_structure con actions y repo_state."""
+
+    def test_create_default_when_no_repo(self, dashboard_contract):
+        semantic = SemanticResolution(
+            semantic_params={"metrics": ["revenue"]},
+            semantic_provenance={"metrics": "user_explicit"},
+            confidence=0.9,
+            actions=[],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=set())
+        assert all(c.action == "CREATE" for c in ir.capabilities if c.mode == CompletionMode.SAFE_COMPLETE)
+
+    def test_keep_capabilities_in_repo(self, dashboard_contract):
+        semantic = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.9,
+            actions=[],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        keeps = [c for c in ir.capabilities if c.action == "KEEP"]
+        assert len(keeps) > 0
+        for k in keeps:
+            assert k.params == {}
+            assert k.mode == CompletionMode.SAFE_SKIP
+
+    def test_modify_action_from_semantic(self, dashboard_contract):
+        semantic = SemanticResolution(
+            semantic_params={"metrics": ["growth"]},
+            semantic_provenance={"metrics": "user_explicit"},
+            confidence=0.9,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metrics": ["growth"]}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"presentation.kpi_row", "presentation.timeseries"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        kpi = next(c for c in ir.capabilities if c.name == "presentation.kpi_row")
+        assert kpi.action == "MODIFY"
+        assert kpi.params.get("metrics") is not None
+
+    def test_delete_action_from_semantic(self, dashboard_contract):
+        semantic = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.9,
+            actions=[{"verb": "remove", "object": "timeseries", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        ts = next(c for c in ir.capabilities if c.name == "presentation.timeseries")
+        assert ts.action == "DELETE"
+        assert ts.params == {}
+
+    def test_delete_repo_only_capability(self, dashboard_contract):
+        """Action targets a capability in repo but not in the contract
+        (e.g., 'remove barchart' → presentation.chart.bar exists in repo
+        but dashboard.sales_overview contract doesn't declare it)."""
+        semantic = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.9,
+            actions=[{"verb": "remove", "object": "barchart", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {
+            "presentation.kpi_row", "presentation.timeseries", "layout.page",
+            "presentation.chart.bar",
+        }
+        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        names = {c.name: c.action for c in ir.capabilities}
+        assert "presentation.chart.bar" in names, (
+            f"Repo-only cap not in resolved list: {names}"
+        )
+        assert names["presentation.chart.bar"] == "DELETE"
+        ops = ir.operations
+        bar_deletes = [o for o in ops if o["action"] == "DELETE" and "chart.bar" in str(o)]
+        assert len(bar_deletes) == 1, f"No DELETE for chart.bar in operations: {ops}"
+
+
+class MockSkillIR:
+    """Minimal SkillIR-like object for test compatibility."""
+    def __init__(self, params, contract_id, confidence=1.0):
+        self.params = params
+        self.contract_id = contract_id
+        self.version = 1
+        self.confidence = confidence

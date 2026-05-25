@@ -279,8 +279,8 @@ class TestPipelineInvariantsExtended:
 
         # Verify output is purely structural
         assert graph.nodes is not None
-        assert "KpiRow_1" in graph.nodes
-        assert graph.nodes["KpiRow_1"].data == {"metrics": ("net_revenue",)}
+        assert "KpiRow" in graph.nodes
+        assert graph.nodes["KpiRow"].data == {"metrics": ("net_revenue",)}
 
     def test_no_intent_plan_created_in_structural_path(self, dashboard_contract):
         """Structural path NO crea IntentPlan — usa StructuralIR directamente."""
@@ -302,7 +302,7 @@ class TestPipelineInvariantsExtended:
         graph, layout = GraphIRPipeline.run_from_structural(structural_ir)
 
         # Verify node data comes from structural_ir, not an intermediate IntentPlan
-        kpi = graph.nodes.get("KpiRow_1")
+        kpi = graph.nodes.get("KpiRow")
         assert kpi is not None
         assert dict(kpi.data) == {"metrics": ("net_revenue",)}
 

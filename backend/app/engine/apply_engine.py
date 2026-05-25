@@ -34,7 +34,7 @@ from app.graphir.structural_coverage import (
 )
 from app.graphir.pipeline import GraphIRPipeline
 from app.graphir.backends import ReactBackend, BackendConfig
-from app.graphir.utils import validate_fileops
+from app.graphir.utils import validate_fileops, FileOp
 from app.graphir.utils import extract_component_name
 from app.graphir.utils import check_repo_integrity
 from app.graphir.boundary import enforce_graph_purity
@@ -127,6 +127,90 @@ def build_ownership(file_nodes, contract) -> dict:
 
 def _normalize(text: str) -> str:
     return hashlib.sha256(text.strip().encode()).hexdigest()
+
+
+def _build_name_map() -> dict[str, str]:
+    """Build reverse lookup: filename pattern → capability name."""
+    from app.engine.structural_completion import STRUCTURAL_SCHEMA
+    name_map: dict[str, str] = {}
+    for cap_name in STRUCTURAL_SCHEMA:
+        suffix = cap_name.rsplit(".", 1)[-1]
+        parts = suffix.split("_")
+        pascal = "".join(p.title() for p in parts)
+        name_map[pascal.lower()] = cap_name
+        name_map[suffix.replace("_", "").lower()] = cap_name
+        name_map[suffix.lower()] = cap_name
+    return name_map
+
+
+def _discover_repo_capabilities(workspace_root: str) -> set[str]:
+    """Scan workspace para detectar capabilities existentes.
+
+    NO depende del contrato. Escanea archivos del repo y mapea
+    nombres de componente a capability names usando STRUCTURAL_SCHEMA.
+
+    El repo es la fuente de verdad de lo que existe.
+    El contrato solo expresa intención parcial sobre esa realidad.
+    """
+    if not workspace_root or not os.path.isdir(workspace_root):
+        return set()
+
+    name_map = _build_name_map()
+
+    caps: set[str] = set()
+    for root, _dirs, files in os.walk(workspace_root):
+        for fn in files:
+            name, _ext = os.path.splitext(fn)
+            if not name:
+                continue
+            name_lower = name.lower()
+
+            # 1. Direct match in name_map
+            if name_lower in name_map:
+                caps.add(name_map[name_lower])
+                continue
+
+            # 2. Substring match: capability suffix in filename
+            for pattern, cap_name in name_map.items():
+                if pattern in name_lower:
+                    caps.add(cap_name)
+                    break
+
+    return caps
+
+
+def _discover_repo_capability_files(workspace_root: str) -> dict[str, list[str]]:
+    """Scan workspace y retorna {capability_name: [file_paths]}.
+
+    Los file paths son relativos al workspace_root.
+    """
+    if not workspace_root or not os.path.isdir(workspace_root):
+        return {}
+
+    name_map = _build_name_map()
+    cap_files: dict[str, list[str]] = {}
+
+    for root, _dirs, files in os.walk(workspace_root):
+        for fn in files:
+            full_path = os.path.join(root, fn)
+            rel_path = os.path.relpath(full_path, workspace_root)
+            name, _ext = os.path.splitext(fn)
+            if not name:
+                continue
+            name_lower = name.lower()
+
+            matched = None
+            if name_lower in name_map:
+                matched = name_map[name_lower]
+            else:
+                for pattern, cap_name in name_map.items():
+                    if pattern in name_lower:
+                        matched = cap_name
+                        break
+            if matched is not None:
+                cap_files.setdefault(matched, []).append(rel_path)
+
+    return cap_files
 
 
 def _build_audit(
@@ -372,10 +456,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Phase 2: Contract adaptation from SkillIR proposal
         contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
 
-        # Phase 3: StructuralIR (merges both + slot mapping)
+        # Phase 3: StructuralIR (merges both + slot mapping + lifecycle)
+        repo_state = _discover_repo_capabilities(context.workspace)
         structural_ir = complete_structure(
             semantic_resolution, contract_resolution, contract, semantic_frame,
+            repo_state=repo_state,
         )
+
 
         # Gate 2: StructuralCoverageValidator
         sreport = StructuralCoverageValidator.validate(structural_ir, contract)
@@ -515,6 +602,18 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     # ── Capture emitted props ──
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))
+
+    # ── Inject DELETE FileOps for structural DELETE operations ──
+    delete_targets = [
+        op for op in structural_ir.operations
+        if op.get("action") == "DELETE"
+    ]
+    if delete_targets:
+        cap_files = _discover_repo_capability_files(context.workspace)
+        for op in delete_targets:
+            target = op["target"]
+            for fp in cap_files.get(target, []):
+                fileops.append(FileOp(action="delete", path=fp, content=""))
 
     ok, vreason = validate_fileops(fileops)
     if not ok:

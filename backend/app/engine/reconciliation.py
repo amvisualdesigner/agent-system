@@ -99,14 +99,12 @@ def reconcile(
                 f"conflicts with existing {params[p]!r} — skipped"
             )
 
-    # ── Regla 4: Observaciones para acciones sin cobertura ──────
+    # ── Regla 4: Acciones del usuario (fluyen a Structural decision) ──
     actions = frame_dict.get("actions", [])
     for a in actions:
         verb = a.get("verb", "?")
         obj = a.get("object", "?")
-        key = f"{verb} {obj}"
-        if key not in str(params):
-            trace.append(f"[action] '{key}' has no corresponding param")
+        trace.append(f"[action] {verb} {obj} (conf={a.get('confidence', 0.0)})")
 
     # ── Confianza: desde frame ──────────────────────────────────
     frame_conf = frame_dict.get("confidence", 0.0)
@@ -124,5 +122,6 @@ def reconcile(
         semantic_params=params,
         semantic_provenance=provenance,
         confidence=confidence,
+        actions=actions,
         resolution_trace=trace,
     )

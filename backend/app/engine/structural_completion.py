@@ -36,26 +36,105 @@ class CompletionMode(Enum):
     SAFE_COMPLETE = "safe_complete"
 
 
+# ── Action constants (lifecycle decision) ─────────────────────
+CREATE = "CREATE"
+MODIFY = "MODIFY"
+DELETE = "DELETE"
+KEEP = "KEEP"
+
+VALID_ACTIONS = frozenset({CREATE, MODIFY, DELETE, KEEP})
+
+
+class OperationError(ValueError):
+    """Operation validation error — operation plan violates spec."""
+
+
+def validate_operations(
+    operations: list[dict],
+    repo_state: set[str] | None = None,
+) -> list[str]:
+    """Validate StructuralIR.operations against spec invariants.
+
+    Rules (non-negotiable):
+      1. All actions must be in {CREATE, MODIFY, DELETE, KEEP}
+      2. No duplicate targets
+      3. If repo_state provided:
+         - CREATE → target must NOT exist
+         - MODIFY → target must exist
+         - DELETE → target must exist
+         - KEEP   → target must exist
+
+    Returns list of warnings (empty = valid).
+    Raises OperationError on hard failures (rule 1, 2).
+    """
+    warnings: list[str] = []
+    seen_targets: set[str] = set()
+
+    for i, op in enumerate(operations):
+        action = op.get("action", "")
+        target = op.get("target", "")
+
+        # Rule 1: valid action
+        if action not in VALID_ACTIONS:
+            raise OperationError(
+                f"Operation[{i}]: invalid action '{action}'. "
+                f"Must be one of {sorted(VALID_ACTIONS)}"
+            )
+
+        if not target:
+            raise OperationError(f"Operation[{i}]: missing target")
+
+        # Rule 2: no duplicate targets
+        if target in seen_targets:
+            raise OperationError(
+                f"Duplicate target '{target}' in operations "
+                f"(actions: {action})"
+            )
+        seen_targets.add(target)
+
+        # Rule 3: repo_state consistency
+        if repo_state is not None:
+            exists = target in repo_state
+            if action == CREATE and exists:
+                warnings.append(
+                    f"CREATE '{target}' but already exists in repo"
+                )
+            elif action in (MODIFY, DELETE, KEEP) and not exists:
+                warnings.append(
+                    f"{action} '{target}' but not found in repo_state"
+                )
+
+    return warnings
+
+
 @dataclass(frozen=True)
 class ResolvedCapability:
-    """Capability con ownership definitivo de params.
+    """Capability con ownership definitivo de params y lifecycle action.
 
     Frozen: immutable después de creación. Ninguna capa posterior puede
-    reinterpretar, redistribuir o mutar estos params.
+    reinterpretar, redistribuir o mutar estos params o la acción.
+
+    action: CREATE | MODIFY | DELETE | KEEP
     """
     name: str
     params: dict[str, Any]
     mode: "CompletionMode"
+    action: str = CREATE
     provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class StructuralIR:
-    """Representación estructural final — ownership semántico resuelto.
+    """Plan de diff estructural — operaciones sobre el repo existente.
+
+    NO es el "estado final deseado". Es un plan de operaciones:
+    cada capability tiene una acción (CREATE/MODIFY/DELETE/KEEP)
+    que GraphIR debe APLICAR, no reinterpretar.
 
     Frozen: completamente inmutable. LangGraph-safe. Cacheable.
 
-    capabilities es la única lista — incluye tanto SAFE_COMPLETE como SAFE_SKIP.
+    operations es la vista explícita del diff plan.
+    capabilities incluye todas (para auditoría/trazabilidad).
     """
     contract_id: str
     contract_version: int
@@ -63,6 +142,28 @@ class StructuralIR:
     param_provenance: dict[str, str]
     confidence: float
     completion_warnings: tuple[str, ...] = ()
+
+    @property
+    def operations(self) -> list[dict]:
+        """Diff plan explícito: acciones que GraphIR debe ejecutar.
+
+        Cada operación:
+          action: CREATE | MODIFY | DELETE | KEEP
+          target: capability name
+          payload: params (solo para CREATE/MODIFY)
+        """
+        ops: list[dict] = []
+        for rc in self.capabilities:
+            if rc.action in (KEEP,):
+                continue
+            op: dict[str, Any] = {
+                "action": rc.action,
+                "target": rc.name,
+            }
+            if rc.action in (CREATE, MODIFY):
+                op["payload"] = dict(rc.params)
+            ops.append(op)
+        return ops
 
 
 STRUCTURAL_SCHEMA: dict[str, dict[str, Any]] = {
@@ -217,6 +318,193 @@ def _resolve_completion_mode(capability: str, confidence: float) -> CompletionMo
     return mode
 
 
+# ── Action verb sets (Step B: lifecycle resolution) ───────
+_VERBS_MODIFY = frozenset({
+    "modify", "update", "change", "edit",
+    "override", "overwrite", "replace", "use instead",
+})
+_VERBS_DELETE = frozenset({"remove", "delete", "destroy"})
+_VERBS_CREATE = frozenset({
+    "add", "create", "show", "build", "generate",
+    "compose", "design", "include", "insert",
+})
+
+
+def validate_contract_repo_consistency(
+    contract_caps: list[str],
+    repo_state: set[str],
+    contract_id: str = "",
+) -> list[str]:
+    """Validación bidireccional contrato ↔ repositorio.
+
+    Rules:
+      1. Every capability in contract must have a node in repo_state
+      2. Every node in repo_state must map to a contract capability
+
+    Returns list of warnings (vacía si todo está consistente).
+    No bloquea — solo advierte.
+    """
+    warnings: list[str] = []
+
+    if not repo_state:
+        return warnings
+
+    contract_set = set(contract_caps)
+    # Rule 1: contract → repo
+    for cap in contract_set:
+        if cap not in repo_state:
+            warnings.append(
+                f"[contract-repo] {contract_id}: capability '{cap}' "
+                f"declared in contract but not found in repo"
+            )
+
+    # Rule 2: repo → contract
+    for cap in repo_state:
+        if cap not in contract_set:
+            warnings.append(
+                f"[contract-repo] {contract_id}: capability '{cap}' "
+                f"exists in repo but not declared in contract"
+            )
+
+    return warnings
+
+
+def _match_actions_to_capabilities(
+    actions: list[dict],
+    contract_caps: list[str],
+    contract: SkillContract | None = None,
+    repo_state: set[str] | None = None,
+) -> dict[str, str]:
+    """Step A: Match action objects to capability names.
+
+    El universo de targets posibles es repo_state ∪ contract_caps.
+    Un action puede referirse a capabilities existentes en el repo
+    aunque el contrato no las declare.
+
+    1. target_hint → match directo contra universo completo
+    2. OBJECT_KEYWORDS mapping (e.g., "kpi" → "kpi_row")
+    3. Capability suffix (e.g., "table" → "presentation.table")
+    4. Contract template keys (e.g., "Page" → "layout.page")
+    5. Direct substring match
+
+    Returns: {capability_name: action_verb}
+    """
+    from app.graphir.semantic_frame import _OBJECT_KEYWORDS
+
+    matched: dict[str, str] = {}
+
+    # Universo de targets: repo ∪ contract
+    all_targets: set[str] = set(contract_caps)
+    if repo_state:
+        all_targets |= repo_state
+    all_targets_list = sorted(all_targets)
+
+    # Build suffix name_map for bidirectional matching
+    # e.g., "bar" → "presentation.chart.bar", "kpirow" → "presentation.kpi_row"
+    suffix_map: dict[str, str] = {}
+    for cap_name in all_targets:
+        suffix = cap_name.rsplit(".", 1)[-1]
+        parts = suffix.split("_")
+        pascal = "".join(p.title() for p in parts)
+        suffix_map[pascal.lower()] = cap_name
+        suffix_map[suffix.replace("_", "").lower()] = cap_name
+        suffix_map[suffix.lower()] = cap_name
+
+    # Build reverse lookup from contract template keys (e.g., "Page" → "layout.page")
+    template_reverse: dict[str, str] = {}
+    if contract is not None:
+        for key, val in contract.ast_template.get("capabilities", {}).items():
+            template_reverse[key.lower()] = val
+
+    # Semantic aliases: objects that don't directly map via OBJECT_KEYWORDS
+    # but are clearly the same concept (e.g., "dashboard" → "page")
+    SEMANTIC_ALIASES: dict[str, str] = {
+        "dashboard": "page",
+    }
+
+    for action in actions:
+        verb = action.get("verb", "")
+        obj = action.get("object", "")
+        target_hint = action.get("target_hint", "")
+
+        if not verb:
+            continue
+
+        # Express lane: target_hint pre-resuelto contra universo completo
+        if target_hint and target_hint in all_targets:
+            matched[target_hint] = verb
+            continue
+
+        if not obj:
+            continue
+
+        obj_lower = obj.lower()
+        aliases = {obj_lower, SEMANTIC_ALIASES.get(obj_lower, "")} - {""}
+
+        for cap in all_targets_list:
+            if cap in matched:
+                continue
+            cap_lower = cap.lower()
+
+            # 1. OBJECT_KEYWORDS → short type in capability name
+            obj_type = _OBJECT_KEYWORDS.get(obj_lower)
+            if obj_type and obj_type in cap_lower:
+                matched[cap] = verb
+                continue
+
+            # 2. Suffix map match: suffix key in object or object in suffix key
+            # e.g., "bar" (suffix of presentation.chart.bar) in "barchart" → match
+            suffix_key = cap.rsplit(".", 1)[-1].lower()
+            # Check: suffix is in object, or object is in suffix
+            if suffix_key in obj_lower or obj_lower in suffix_key or obj_lower == suffix_key:
+                matched[cap] = verb
+                continue
+
+            # 3. Direct substring: object or alias in capability name
+            if any(a in cap_lower for a in aliases):
+                matched[cap] = verb
+                continue
+
+            # 4. Contract template key matches (e.g., "page" → "layout.page")
+            if any(a in template_reverse and template_reverse[a] == cap for a in aliases):
+                matched[cap] = verb
+                continue
+
+    return matched
+
+
+def _resolve_action(
+    capability: str,
+    action_verb: str | None,
+    repo_state: set[str] | None,
+) -> str:
+    """Step B: Determinar lifecycle action para una capability.
+
+    Regla determinista:
+      - existe en repo + verb delete → DELETE
+      - existe en repo + verb modify → MODIFY
+      - existe en repo + sin verb  → KEEP
+      - no existe + verb create    → CREATE
+      - no existe + sin verb       → CREATE (contract default)
+    """
+    exists = repo_state is not None and capability in repo_state
+
+    if action_verb:
+        vl = action_verb.lower()
+        if vl in _VERBS_DELETE:
+            return DELETE if exists else KEEP
+        if vl in _VERBS_MODIFY:
+            return MODIFY if exists else CREATE
+        if vl in _VERBS_CREATE:
+            return CREATE
+        if exists:
+            return MODIFY  # unrecognized verb on existing → modify
+
+    if exists:
+        return KEEP
+    return CREATE
+
+
 def _resolve_field(
     field: str,
     capability: str,
@@ -265,14 +553,17 @@ def complete_structure(
     contract_resolution: ContractResolution,
     contract: SkillContract,
     frame_dict: dict | None = None,
+    repo_state: set[str] | None = None,
 ) -> StructuralIR:
     """Convierte SemanticResolution + ContractResolution en StructuralIR.
 
     Args:
-        semantic_resolution: Params del lenguaje del usuario.
+        semantic_resolution: Params del lenguaje del usuario + actions.
         contract_resolution: Params del contrato (SkillIR + defaults).
         contract: SkillContract seleccionado.
         frame_dict: Dict del StructuredSemanticFrame (para hint augmentation).
+        repo_state: Conjunto de capability names que ya existen en el repo.
+                    Si es None, se asume repositorio vacío (todo CREATE).
 
     Returns:
         StructuralIR con capabilities resueltas y ownership definitivo.
@@ -282,6 +573,13 @@ def complete_structure(
     """
     warnings: list[str] = []
 
+    # Paso 0: validación consistencia contrato ↔ repositorio
+    if repo_state is not None:
+        contract_caps = _infer_capabilities_from_contract(contract)
+        warnings.extend(validate_contract_repo_consistency(
+            contract_caps, repo_state, contract.contract_id,
+        ))
+
     # Paso 1: capabilities base del contrato
     capabilities = _infer_capabilities_from_contract(contract)
 
@@ -290,10 +588,40 @@ def complete_structure(
         capabilities, semantic_resolution, contract_resolution, frame_dict,
     )
 
-    # Paso 3: resolver cada capability
+    # Paso 2b: Step A — match actions from semantic layer to capabilities
+    # El universo de matching es repo ∪ contract
+    action_map = _match_actions_to_capabilities(
+        semantic_resolution.actions, capabilities, contract,
+        repo_state=repo_state,
+    )
+
+    # Incluir capabilities del repo que fueron target de alguna acción
+    # pero no están en el contrato (e.g., "remove barchart" → presentation.chart.bar
+    # existe en repo pero no en dashboard.sales_overview)
+    repo_only_targets = set(action_map) - set(capabilities)
+    for target in repo_only_targets:
+        if repo_state and target in repo_state:
+            capabilities.append(target)
+
+    # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
 
     for cap in capabilities:
+        action_verb = action_map.get(cap)
+        action = _resolve_action(cap, action_verb, repo_state)
+
+        # KEEP / DELETE → no resuelven params (repo tiene la verdad)
+        if action in (KEEP, DELETE):
+            resolved.append(ResolvedCapability(
+                name=cap,
+                params={},
+                mode=CompletionMode.SAFE_SKIP,
+                action=action,
+            ))
+            if action == DELETE:
+                warnings.append(f"{cap}: marked for deletion")
+            continue
+
         schema = STRUCTURAL_SCHEMA.get(cap)
         if schema is None:
             warnings.append(f"{cap}: no structural schema — skipping")
@@ -332,17 +660,18 @@ def complete_structure(
                 name=cap,
                 params={},
                 mode=mode,
+                action=action,
             ))
             warnings.append(f"{cap}: skipped")
             continue
 
         # SAFE_COMPLETE con required faltantes → SAFE_SKIP
-        # Structural layer nunca inventa semántica de dominio
         if mode == CompletionMode.SAFE_COMPLETE and missing_required:
             resolved.append(ResolvedCapability(
                 name=cap,
                 params={},
                 mode=CompletionMode.SAFE_SKIP,
+                action=action,
             ))
             warnings.append(
                 f"{cap}: missing required fields {missing_required} "
@@ -354,6 +683,7 @@ def complete_structure(
             name=cap,
             params=cap_params,
             mode=mode,
+            action=action,
             provenance=cap_provenance,
         ))
 

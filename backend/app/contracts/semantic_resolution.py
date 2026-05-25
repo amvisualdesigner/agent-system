@@ -31,6 +31,7 @@ class SemanticResolution:
 
     Fields:
         semantic_params: params extracted from user language (frame constraints)
+        actions: user actions (verb + object) extracted from language
         semantic_provenance: provenance per param ("user_explicit", "user_inferred")
         confidence: how well the user's intent was understood
         resolution_trace: audit trail of resolution decisions
@@ -38,4 +39,5 @@ class SemanticResolution:
     semantic_params: dict[str, Any]
     semantic_provenance: dict[str, str]
     confidence: float
+    actions: list[dict] = field(default_factory=list)
     resolution_trace: list[str] = field(default_factory=list)

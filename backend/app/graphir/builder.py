@@ -46,23 +46,38 @@ class GraphIRBuilder:
     # ── Phase 2: Node materialization helpers ──────────────────────
 
     @classmethod
+    def _node_id_for_capability(cls, graphir_type: str, capability: str) -> str:
+        """Stable node identity from capability name, not positional index.
+
+        La misma capability produce siempre el mismo node_id,
+        independientemente de qué otras capabilities haya en la lista.
+        Esto evita que DELETE/MODIFY/KEEP cambie identidades.
+
+        Para metadata capabilities (domain, style, layout) no se crean nodos.
+        """
+        # Page es caso especial por ser root
+        if graphir_type == "Page":
+            return graphir_type
+        # Para el resto, el type es único por capability en el structural path
+        return graphir_type
+
+    @classmethod
     def _add_intent_node(
         cls,
         draft: GraphIRDraft,
         intent: Intent,
-        index: int,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
         No edges, no root logic. Pure inventory stage.
+        Identity estable por capability, no por posición en lista.
         """
         if is_capability_metadata(intent.capability):
             cls._apply_metadata(draft, intent)
             return
 
-        graphir_type = cls._resolve_graphir_type(intent, index)
-
-        node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
+        graphir_type = cls._resolve_graphir_type(intent, 0)
+        node_id = cls._node_id_for_capability(graphir_type, intent.capability)
 
         node = GraphIRNode(
             id=node_id,
@@ -130,15 +145,14 @@ class GraphIRBuilder:
         cls,
         draft: GraphIRDraft,
         intent: Intent,
-        index: int,
         root_id: str,
     ) -> None:
         """Phase 4: Create edge from root to node. Skip metadata and root itself."""
         if is_capability_metadata(intent.capability):
             return
 
-        graphir_type = cls._resolve_graphir_type(intent, index)
-        node_id = f"{graphir_type}_{index}" if index > 0 else graphir_type
+        graphir_type = cls._resolve_graphir_type(intent, 0)
+        node_id = cls._node_id_for_capability(graphir_type, intent.capability)
 
         if node_id == root_id:
             return
@@ -159,46 +173,74 @@ class GraphIRBuilder:
     # ── Public builder ─────────────────────────────────────────────
 
     @classmethod
-    def build_from_structural(cls, ir: StructuralIR) -> GraphIR:
-        """Convert StructuralIR → GraphIR (1:1, no binding redistribution).
+    def build_from_structural(
+        cls,
+        ir: StructuralIR,
+        repo_state: set[str] | None = None,
+    ) -> GraphIR:
+        """Apply StructuralIR operations → GraphIR (diff plan execution).
 
-        Structural IR ya tiene ownership resuelto. Esta construcción es
-        una proyección directa: 1 capability → 1 node, sin
-        bind_skillir_to_nodes ni validate_binding. NO hay redistribución
-        de params ni re-interpretación semántica.
+        StructuralIR NO es un "estado final deseado". Es un plan de
+        operaciones (CREATE/MODIFY/DELETE/KEEP) que GraphIR APLICA:
+
+          CREATE  → add new node
+          MODIFY  → add node with updated params (identity estable por capability)
+          DELETE  → skip (el nodo existente se elimina externamente)
+          KEEP    → skip (el nodo existente permanece igual)
+
+        NO hay reconstrucción — solo aplicación de operaciones.
 
         Args:
-            ir: StructuralIR con capabilities resueltas.
+            ir: StructuralIR con operations explícitas.
+            repo_state: Conjunto de capability names existentes.
+                        Si se provee, valida las operaciones antes de aplicarlas.
 
         Returns:
-            Frozen GraphIR.
+            Frozen GraphIR con solo nodos CREATE + MODIFY.
 
         Raises:
+            OperationError: if operation plan violates spec invariants.
             ValueError: if graph invariants fail or capability type unresolvable.
         """
-        from app.engine.structural_completion import CompletionMode
+        from app.engine.structural_completion import (
+            CREATE, MODIFY, validate_operations, OperationError,
+        )
+
+        # Validate operations against repo_state before applying
+        op_warnings = validate_operations(ir.operations, repo_state)
+        if op_warnings:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Operation warnings: %s", op_warnings,
+            )
 
         draft = GraphIRDraft()
         draft.params = {}
 
         intents: list[Intent] = []
-        for rc in ir.capabilities:
-            if rc.mode == CompletionMode.SAFE_SKIP:
-                continue
-            intents.append(Intent(
-                id=make_intent_id(f"structural:{rc.name}", rc.name, "structural"),
-                capability=rc.name,
-                params=dict(rc.params),
-                source="structural_completion",
-            ))
+        for op in ir.operations:
+            action = op["action"]
+            target = op["target"]
+            payload = op.get("payload", {})
 
-        for i, intent in enumerate(intents):
-            cls._add_intent_node(draft, intent, i)
+            if action not in (CREATE, MODIFY):
+                continue
+
+            intent = Intent(
+                id=make_intent_id(f"op:{action}:{target}", target, "structural"),
+                capability=target,
+                params=dict(payload),
+                source=f"structural_{action.lower()}",
+            )
+            intents.append(intent)
+
+        for intent in intents:
+            cls._add_intent_node(draft, intent)
 
         root_id = cls._select_root(draft)
 
-        for i, intent in enumerate(intents):
-            cls._add_intent_edge(draft, intent, i, root_id)
+        for intent in intents:
+            cls._add_intent_edge(draft, intent, root_id)
 
         orphans = draft.get_orphan_nodes()
         if orphans:
