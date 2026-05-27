@@ -28,6 +28,7 @@ from app.engine.structural_completion import (
     complete_structure,
     StructuralIR,
 )
+from app.graphir.structure.models import StructuralResolution
 from app.graphir.structural_coverage import (
     StructuralCoverageValidator,
     StructuralIntegrityError,
@@ -58,25 +59,29 @@ def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | Non
 
 
 def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str,
-                     audit: dict | None = None):
+                     audit: dict | None = None, fidelity: dict | None = None):
     with open(f"{artifacts_dir}/plan.json", "w") as f:
         json.dump(plan, f, indent=2)
     with open(f"{artifacts_dir}/execution.json", "w") as f:
-        payload: dict = {"run_id": run_id, "operations": operations, "results": results}
-        if audit:
-            payload["audit"] = audit
-        json.dump(payload, f, indent=2)
-    with open(f"{artifacts_dir}/summary.json", "w") as f:
-        summary = {
-            "run_id": run_id,
+        json.dump({
             "status": "ok",
-            "files_created": [r.get("path") for r in results if r.get("status") == "created"],
+            "diff": diff or None,
+            "operations": operations,
+        }, f, indent=2)
+    with open(f"{artifacts_dir}/context.json", "w") as f:
+        json.dump({
+            "run_id": run_id,
             "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
             "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
-        }
+            "repo_snapshot": [op.get("path") for op in operations if "path" in op],
+        }, f, indent=2)
+    with open(f"{artifacts_dir}/meta.json", "w") as f:
+        payload = {}
         if audit:
-            summary["anomalies"] = audit.get("anomalies", [])
-        json.dump(summary, f, indent=2)
+            payload["audit"] = audit
+        if fidelity:
+            payload["fidelity"] = fidelity
+        json.dump(payload, f, indent=2)
     with open(f"{artifacts_dir}/diff.patch", "w") as f:
         f.write(diff)
 
@@ -433,12 +438,18 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     skill_ir = plan.get("skill_ir")
     if not skill_ir:
-        return {"status": "rejected", "reason": "no_skill_ir"}
+        return {
+            "execution": {"status": "rejected", "reason": "no_skill_ir", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     skill_ir_obj = SkillIR.from_dict(skill_ir)
     contract = get_contract(skill_ir_obj.contract_id, skill_ir_obj.version)
     if contract is None:
-        return {"status": "rejected", "reason": f"contract_not_found:{skill_ir_obj.contract_id}"}
+        return {
+            "execution": {"status": "rejected", "reason": f"contract_not_found:{skill_ir_obj.contract_id}", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     # ── Step 1: Build StructuralIR (SemanticResolution + ContractResolution) ──
     structural_ir: StructuralIR | None = None
@@ -469,25 +480,94 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Gate 2: StructuralCoverageValidator
         sreport = StructuralCoverageValidator.validate(structural_ir, contract)
     except (ValueError, SemanticConflictError, StructuralIntegrityError) as e:
-        return {"status": "rejected", "reason": f"structural:{e}"}
+        return {
+            "execution": {"status": "rejected", "reason": f"structural:{e}", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
+
+    # ── Gate 2.5: Canonicalizer + Structural Resolver + Ambiguity Gate ──
+    resolution: StructuralResolution | None = None
+
+    if FEATURE_FLAGS.get("structural_resolver", False):
+        from app.graphir.structure.registry import StructuralRegistry
+        from app.graphir.structure.canonicalizer import canonicalize
+        from app.graphir.structure.resolver import resolve
+
+        try:
+            registry = StructuralRegistry.build_from_contract(contract)
+
+            # Canonicalizer: pure classifier (no filtering, no registry)
+            canon_trace = canonicalize(structural_ir.operations)
+            if canon_trace.structural_unknown or canon_trace.non_structural:
+                logger.info(
+                    "Canonicalizer: %d valid, %d unknown, %d non_structural",
+                    len(canon_trace.structural_valid),
+                    len(canon_trace.structural_unknown),
+                    len(canon_trace.non_structural),
+                )
+
+            resolution = resolve(structural_ir, registry)
+            logger.info(
+                "StructuralResolver: confidence=%.2f reason=%s",
+                resolution.confidence, resolution.reason,
+            )
+
+            if resolution.reason is not None:
+                return {
+                    "execution": {
+                        "status": "clarification_needed",
+                        "reason": resolution.reason,
+                        "detail": (
+                            f"No structural targets resolved. "
+                            f"Canonicalization: {len(canon_trace.structural_valid)} valid, "
+                            f"{len(canon_trace.structural_unknown)} unknown, "
+                            f"{len(canon_trace.non_structural)} non_structural"
+                        ),
+                        "diff": None,
+                        "operations": [],
+                    },
+                    "context": {
+                        "repo_snapshot": [],
+                        "canonicalization_trace": canon_trace.to_dict(),
+                    },
+                }
+        except AmbiguousStructuralTargetError as e:
+            return {
+                "execution": {
+                    "status": "clarification_needed", "reason": "ambiguous_target",
+                    "detail": str(e), "diff": None, "operations": [],
+                },
+                "context": {"repo_snapshot": []},
+            }
 
     # ── Step 2: GraphIR pipeline (build_from_structural + layout + validate) ──
     try:
-        graph, graph_layout = GraphIRPipeline.run_from_structural(structural_ir)
+        graph, graph_layout = GraphIRPipeline.run_from_structural(
+            structural_ir,
+            resolution=resolution,
+        )
     except AmbiguousStructuralTargetError as e:
         return {
-            "status": "clarification_needed",
-            "reason": "ambiguous_target",
-            "detail": str(e),
+            "execution": {
+                "status": "clarification_needed", "reason": "ambiguous_target",
+                "detail": str(e), "diff": None, "operations": [],
+            },
+            "context": {"repo_snapshot": []},
         }
     except ValueError as e:
-        return {"status": "rejected", "reason": f"graphir:{e}"}
+        return {
+            "execution": {"status": "rejected", "reason": f"graphir:{e}", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     # ── Step 2a: GraphIR Purity Check ──
     try:
         enforce_graph_purity(graph)
     except Exception as e:
-        return {"status": "rejected", "reason": f"purity_violation:{e}"}
+        return {
+            "execution": {"status": "rejected", "reason": f"purity_violation:{e}", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     # ── Step 3: ConstraintGraph or BackendRenderer ──
     files = contract.renderer.get("files", [])
@@ -625,7 +705,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     ok, vreason = validate_fileops(fileops)
     if not ok:
-        return {"status": "rejected", "reason": vreason}
+        return {
+            "execution": {"status": "rejected", "reason": vreason, "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     results = []
     for fop in fileops:
@@ -639,7 +722,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     diff, err = _run_git_flow(context.workspace, run_id, dry_run)
     if err:
-        return {"status": "rejected", "reason": "git_commit_failed", "error": err}
+        return {
+            "execution": {"status": "rejected", "reason": "git_commit_failed", "detail": err, "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
 
     # ── Step 4: Filter plan for artifacts (strip decomposition fields) ──
     clean_plan = {k: v for k, v in plan.items() if k not in ("intents", "decomposition")}
@@ -669,7 +755,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         context.artifacts, run_id, clean_plan,
         [fop.to_dict() for fop in fileops],
         results, diff or "",
-        audit=audit,
+        audit=audit, fidelity=fidelity,
     )
 
     # ── Step 5: Build fidelity report ──
@@ -685,14 +771,21 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     write_state(run_id, "apply")
 
     return {
-        "status": "ok",
-        "run_id": run_id,
-        "dry_run": dry_run,
-        "operations": [fop.to_dict() for fop in fileops],
-        "execution": results,
-        "workspace": context.workspace,
-        "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
-        "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
-        "fidelity": fidelity,
-        "audit": audit,
+        "execution": {
+            "status": "ok",
+            "diff": diff or None,
+            "operations": [fop.to_dict() for fop in fileops],
+        },
+        "context": {
+            "run_id": run_id,
+            "dry_run": dry_run,
+            "workspace": context.workspace,
+            "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
+            "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
+            "repo_snapshot": [fop.path for fop in fileops],
+        },
+        "meta": {
+            "fidelity": fidelity,
+            "audit": audit,
+        },
     }

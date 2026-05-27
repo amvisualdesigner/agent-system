@@ -38,8 +38,8 @@ class RunResult(BaseModel):
     run_id: str
     plan: Optional[Dict[str, Any]] = None
     execution: Optional[Dict[str, Any]] = None
-    diff: Optional[str] = None
-    files: Optional[List[str]] = None
+    context: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None
     status: str
     error: Optional[str] = None
 

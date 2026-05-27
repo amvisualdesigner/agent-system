@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         CompletionMode,
         StructuralIR,
     )
+    from app.graphir.structure.models import StructuralResolution
 
 
 class GraphIRBuilder:
@@ -97,11 +98,16 @@ class GraphIRBuilder:
         draft: GraphIRDraft,
         intent: Intent,
         contract_id: str | None = None,
+        resolution: StructuralResolution | None = None,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
         No edges, no root logic. Pure inventory stage.
         Identity estable por capability, no por posición en lista.
+
+        Si se provee resolution, se usa capability_to_path para
+        enriquecer component_instance_path. Si no, fallback a
+        derivación heurística (Fase 1a).
         """
         if is_capability_metadata(intent.capability):
             cls._apply_metadata(draft, intent)
@@ -110,8 +116,15 @@ class GraphIRBuilder:
         graphir_type = cls._resolve_graphir_type(intent, 0)
         node_id = cls._node_id_for_capability(graphir_type, intent.capability)
 
-        component_instance_path = cls._derive_component_instance_path(
-            contract_id, intent.capability,
+        # Preferir path resuelto por registry, fallback a heurístico
+        resolved_path = (
+            resolution.capability_to_path.get(intent.capability)
+            if resolution is not None
+            else None
+        )
+        component_instance_path = (
+            resolved_path
+            or cls._derive_component_instance_path(contract_id, intent.capability)
         )
 
         node = GraphIRNode(
@@ -221,6 +234,7 @@ class GraphIRBuilder:
         cls,
         ir: StructuralIR,
         repo_state: set[str] | None = None,
+        resolution: StructuralResolution | None = None,
     ) -> GraphIR:
         """Apply StructuralIR operations → GraphIR (diff plan execution).
 
@@ -238,6 +252,9 @@ class GraphIRBuilder:
             ir: StructuralIR con operations explícitas.
             repo_state: Conjunto de capability names existentes.
                         Si se provee, valida las operaciones antes de aplicarlas.
+            resolution: StructuralResolution opcional del resolver.
+                        Si se provee, enriquece component_instance_path
+                        con paths resueltos del registry.
 
         Returns:
             Frozen GraphIR con solo nodos CREATE + MODIFY.
@@ -280,7 +297,7 @@ class GraphIRBuilder:
             intents.append(intent)
 
         for intent in intents:
-            cls._add_intent_node(draft, intent, contract_id=ir.contract_id)
+            cls._add_intent_node(draft, intent, contract_id=ir.contract_id, resolution=resolution)
 
         root_id = cls._select_root(draft)
 

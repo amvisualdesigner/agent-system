@@ -25,6 +25,7 @@ from app.graphir.validator import GraphIRValidator
 
 if TYPE_CHECKING:
     from app.engine.structural_completion import StructuralIR
+    from app.graphir.structure.models import StructuralResolution
 
 
 class GraphIRPipeline:
@@ -40,6 +41,7 @@ class GraphIRPipeline:
     def run_from_structural(
         ir: StructuralIR,
         preferences: dict | None = None,
+        resolution: StructuralResolution | None = None,
     ) -> tuple[GraphIR, GraphIRLayout]:
         """Run the full GraphIR pipeline from StructuralIR (new path).
 
@@ -49,6 +51,8 @@ class GraphIRPipeline:
         Args:
             ir: StructuralIR with resolved capabilities.
             preferences: Optional layout preferences dict.
+            resolution: Optional StructuralResolution del resolver.
+                        Si se provee, pasa paths resueltos al builder.
 
         Returns:
             (GraphIR, GraphIRLayout) — frozen graph + derived layout.
@@ -56,7 +60,10 @@ class GraphIRPipeline:
         Raises:
             ValueError: on any pipeline failure.
         """
-        graph = GraphIRBuilder.build_from_structural(ir)
+        graph = GraphIRBuilder.build_from_structural(
+            ir,
+            resolution=resolution,
+        )
         GraphIRValidator.validate(graph)
         layout = LayoutDerivationEngine.derive(graph, preferences)
         return graph, layout
@@ -65,6 +72,7 @@ class GraphIRPipeline:
 def run_from_structural(
     ir: StructuralIR,
     preferences: dict | None = None,
+    resolution: StructuralResolution | None = None,
 ) -> tuple[GraphIR, GraphIRLayout]:
     """Convenience wrapper."""
-    return GraphIRPipeline.run_from_structural(ir, preferences)
+    return GraphIRPipeline.run_from_structural(ir, preferences, resolution)

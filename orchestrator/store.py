@@ -65,6 +65,7 @@ def list_snapshots() -> List[Dict[str, Any]]:
             path = os.path.join(RUNS_DIR, name)
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            ctx = data.get("context") or {}
             snapshots.append({
                 "run_id": run_id,
                 "status": data.get("status"),
@@ -72,7 +73,7 @@ def list_snapshots() -> List[Dict[str, Any]]:
                 "created_at": data.get("created_at"),
                 "updated_at": data.get("updated_at"),
                 "task": (data.get("task") or "")[:80],
-                "files": data.get("files"),
+                "files": ctx.get("repo_snapshot"),
                 "error": data.get("error"),
             })
         except Exception as e:

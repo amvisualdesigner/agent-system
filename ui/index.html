@@ -62,6 +62,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .status-ok { color: #22c55e; font-weight: 600; }
 .status-error { color: #ef4444; font-weight: 600; }
 .status-rejected { color: #f59e0b; font-weight: 600; }
+.status-clarification_needed { color: #818cf8; font-weight: 600; }
 .status-noop { color: #64748b; font-weight: 600; }
 
 pre {
@@ -230,11 +231,13 @@ function onNodeEnd(evt) {
   } else if (evt.node === "call_apply") {
     setPanelStatus("panel-execution", "badge-done", "listo");
     const d = evt.data || {};
-    const status = d.execution_status || "ok";
-    const ops = d.operations || [];
+    const exec = d.execution || {};
+    const ctx = d.context || {};
+    const status = exec.status || "ok";
+    const ops = exec.operations || [];
 
     let html = `<div>Status: <span class="status-${status}">${esc(status)}</span>`;
-    if (d.has_commit) html += ' <span class="tag">committed</span>';
+    if (exec.diff) html += ' <span class="tag">committed</span>';
     html += "</div>";
 
     if (ops.length > 0) {
@@ -259,9 +262,10 @@ function onNodeEnd(evt) {
       html += "</ul>";
     }
 
-    if (d.files && d.files.length > 0) {
+    const snapshot = ctx.repo_snapshot || [];
+    if (snapshot.length > 0) {
       html += `<div style="margin-top:8px"><strong>Archivos:</strong><ul class="file-list">`;
-      d.files.forEach(f => { html += `<li>${esc(f)}</li>`; });
+      snapshot.forEach(f => { html += `<li>${esc(f)}</li>`; });
       html += "</ul></div>";
     }
 
@@ -291,6 +295,9 @@ function onResult(evt) {
   link.style.cssText = "margin-left:auto;color:#38bdf8;font-size:0.82rem;text-decoration:none";
   header.appendChild(link);
 
+  const exec = d.execution || {};
+  const ctx = d.context || {};
+
   let html = "";
   if (isError) {
     const errMsg = evt.error || d.error || "unknown error";
@@ -299,15 +306,17 @@ function onResult(evt) {
     html += `<div>Status: <span class="status-${status}">${esc(status.toUpperCase())}</span></div>`;
   }
 
-  if (d.files && d.files.length > 0) {
-    html += `<div style="margin-top:8px"><strong>Archivos generados (${d.files.length})</strong><ul class="file-list">`;
-    d.files.forEach(f => { html += `<li>${esc(f)}</li>`; });
+  const snapshot = ctx.repo_snapshot || [];
+  if (snapshot.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Archivos generados (${snapshot.length})</strong><ul class="file-list">`;
+    snapshot.forEach(f => { html += `<li>${esc(f)}</li>`; });
     html += "</ul></div>";
   }
 
-  if (d.diff) {
+  const diff = exec.diff;
+  if (diff) {
     html += `<div style="margin-top:10px"><span class="diff-toggle" onclick="toggleDiff()">▶ Mostrar diff</span></div>`;
-    html += `<div id="diff-content" style="display:none"><pre>${esc(d.diff)}</pre></div>`;
+    html += `<div id="diff-content" style="display:none"><pre>${esc(diff)}</pre></div>`;
   }
 
   bodyEl("panel-result").innerHTML = html;
@@ -385,7 +394,7 @@ function fetchWorktree(runId) {
   fetch(`${ORCH}/runs/${runId}`)
     .then(r => r.json())
     .then(snapshot => {
-      const workspace = snapshot?.execution?.workspace;
+      const workspace = snapshot?.context?.workspace;
       if (workspace) {
         meta.innerHTML += ` &nbsp;|&nbsp; <span style="color:#64748b">Worktree:</span> <code>${esc(workspace)}</code>`;
       }

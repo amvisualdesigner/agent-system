@@ -154,7 +154,6 @@ def cleanup():
 def get_run(run_id: str):
     import os
     import json
-    import subprocess
 
     validate_run_id(run_id)
 
@@ -179,55 +178,20 @@ def get_run(run_id: str):
                     return json.load(f)
             return None
 
-        def load_text(path):
-            if os.path.exists(path):
-                with open(path) as f:
-                    return f.read()
-            return None
-
         result["plan"] = load_json(f"{artifacts_dir}/plan.json")
         result["execution"] = load_json(f"{artifacts_dir}/execution.json")
-        result["summary"] = load_json(f"{artifacts_dir}/summary.json")
-        result["diff"] = load_text(f"{artifacts_dir}/diff.patch")
+        result["context"] = load_json(f"{artifacts_dir}/context.json")
+        result["meta"] = load_json(f"{artifacts_dir}/meta.json")
 
     # ----------------------------
-    # 2. WORKSPACE
+    # 2. WORKSPACE (ensure present in context)
     # ----------------------------
     if os.path.exists(workspace):
-        result["workspace"] = workspace
-
-        # ----------------------------
-        # 3. GIT STATE (SAFE)
-        # ----------------------------
-
-        def run_git(cmd):
-            return subprocess.run(
-                cmd,
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                check=False
-            ).stdout.strip()
-
-        unstaged = run_git(["git", "diff", "--name-only"])
-        staged = run_git(["git", "diff", "--cached", "--name-only"])
-        last_commit = run_git(["git", "log", "-1", "--name-only", "--pretty=format:"])
-
-        changed = set()
-
-        for block in [unstaged, staged, last_commit]:
-            for line in block.splitlines():
-                line = line.strip()
-                if line:
-                    changed.add(line)
-
-        result["files"] = sorted(changed)
-
-        # ----------------------------
-        # 4. OPTIONAL: commit existence check
-        # ----------------------------
-        commit_exists = run_git(["git", "rev-parse", "--verify", "HEAD"])
-        result["has_commit"] = bool(commit_exists)
+        ctx = result.get("context")
+        if not ctx:
+            result["context"] = {"workspace": workspace, "repo_snapshot": []}
+        elif "workspace" not in ctx:
+            ctx["workspace"] = workspace
 
     return result
 

@@ -1,15 +1,11 @@
-import asyncio
 import logging
 import time
 from state import AgentState
-from backend_client import call_apply as backend_call_apply, get_run as backend_get_run
+from backend_client import call_apply as backend_call_apply
 from sse import emitter
 from models import SSEEvent
 
 logger = logging.getLogger("orchestrator.nodes.call_apply")
-
-RETRY_GETRUN_ATTEMPTS = 3
-RETRY_GETRUN_DELAY_MS = 500
 
 
 async def call_apply_node(state: AgentState) -> dict:
@@ -60,22 +56,18 @@ async def call_apply_node(state: AgentState) -> dict:
         )
         return _error_state(state, run_id, "call_apply", str(e), input_data, latency)
 
-    logger.info("[run_id=%s] call_apply ok latency=%dms status=%s", run_id, latency, apply_result.get("status"))
+    logger.info("[run_id=%s] call_apply ok latency=%dms", run_id, latency)
+
+    exec_block = apply_result.get("execution", {})
+    context_block = apply_result.get("context", {})
+    meta_block = apply_result.get("meta")
 
     output = {
-        "execution_status": apply_result.get("status"),
-        "operations": apply_result.get("operations") or apply_result.get("execution"),
+        "execution": exec_block,
+        "context": context_block,
     }
-
-    run_details = None
-    try:
-        run_details = await _get_run_with_retry(run_id, run_id)
-        if run_details:
-            output["diff"] = run_details.get("diff")
-            output["files"] = run_details.get("files")
-            output["has_commit"] = run_details.get("has_commit")
-    except Exception as e:
-        logger.warning("[run_id=%s] get_run failed after retry, degrading gracefully: %s", run_id, str(e))
+    if meta_block:
+        output["meta"] = meta_block
 
     trace_entry = {"node": "call_apply", "input": input_data, "output": output, "latency_ms": latency}
     trace = (state.get("trace") or []) + [trace_entry]
@@ -88,36 +80,10 @@ async def call_apply_node(state: AgentState) -> dict:
     return {
         **state,
         "execution": apply_result,
-        "run_details": run_details,
         "trace": trace[-50:],
         "phase": phase,
         "_next_node": "return_result",
     }
-
-
-async def _get_run_with_retry(run_id: str, target_run_id: str, attempts: int = RETRY_GETRUN_ATTEMPTS):
-    last_error = None
-    for attempt in range(1, attempts + 1):
-        try:
-            data = await backend_get_run(target_run_id)
-            if data.get("exists"):
-                return data
-            logger.info(
-                "[run_id=%s] get_run attempt=%d/%d run not yet available, retrying",
-                run_id, attempt, attempts,
-            )
-        except Exception as e:
-            last_error = e
-            logger.warning(
-                "[run_id=%s] get_run attempt=%d/%d failed: %s",
-                run_id, attempt, attempts, str(e),
-            )
-        if attempt < attempts:
-            await asyncio.sleep(RETRY_GETRUN_DELAY_MS / 1000)
-
-    if last_error:
-        raise last_error
-    raise RuntimeError(f"get_run not available after {attempts} attempts")
 
 
 def _error_state(state, run_id, node, error, input_data, latency):

@@ -8,4 +8,5 @@ FEATURE_FLAGS = {
     # ── Structural path runtime config ──
     "execution_mode": "graphir",          # Execution mode label
     "trace_level": "full",                # Trace verbosity (minimal | normal | full)
+    "structural_resolver": False,         # Enable Resolver + Ambiguity Gate (Fase 1b)
 }

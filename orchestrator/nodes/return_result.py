@@ -22,34 +22,36 @@ async def return_result_node(state: AgentState) -> dict:
         logger.warning("[run_id=%s] result: error=%s", run_id, error)
         result = RunResult(run_id=run_id, status="error", error=error)
     else:
-        run_details = state.get("run_details") or {}
-        execution = state.get("execution")
+        result_data = state.get("execution") or {}
+        exec_block = result_data.get("execution", {})
+        context_block = result_data.get("context", {})
+        meta_block = result_data.get("meta")
         plan = state.get("plan")
-        status = "ok"
-        if execution and execution.get("status") == "rejected":
-            status = "rejected"
 
-        has_diff = bool(run_details.get("diff"))
-        has_files = bool(run_details.get("files"))
+        exec_status = exec_block.get("status", "ok")
+        status = exec_status
+
+        has_diff = bool(exec_block.get("diff"))
+        has_snapshot = bool(context_block.get("repo_snapshot"))
         logger.info(
-            "[run_id=%s] result: ok has_diff=%s has_files=%s",
-            run_id, has_diff, has_files,
+            "[run_id=%s] result: ok has_diff=%s has_snapshot=%s",
+            run_id, has_diff, has_snapshot,
         )
 
         result = RunResult(
             run_id=run_id,
             plan=plan,
-            execution=execution,
-            diff=run_details.get("diff"),
-            files=run_details.get("files"),
+            execution=exec_block,
+            context=context_block,
+            meta=meta_block,
             status=status,
         )
 
-    phase = "completed" if result.status == "ok" else "error"
+    phase = "completed" if result.status in ("ok", "clarification_needed") else "error"
     if cancelled:
         phase = "cancelled"
 
-    event_type = "result" if result.status == "ok" else "error"
+    event_type = "result" if result.status in ("ok", "clarification_needed") else "error"
 
     snapshot = {
         "run_id": run_id,
@@ -58,8 +60,8 @@ async def return_result_node(state: AgentState) -> dict:
         "status": result.status,
         "plan": result.plan,
         "execution": result.execution,
-        "diff": result.diff,
-        "files": result.files,
+        "context": result.context,
+        "meta": result.meta,
         "trace": state.get("trace"),
         "error": result.error,
         "planner_meta": state.get("planner_meta"),

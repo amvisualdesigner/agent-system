@@ -94,20 +94,19 @@ async def agent_review(run_id: str):
     r.raise_for_status()
     data = r.json()
 
-    summary = data.get("summary", {})
     execution = data.get("execution", {})
+    context = data.get("context", {})
 
     return {
         "run_id": run_id,
         "exists": data.get("exists"),
         "plan": data.get("plan"),
         "execution": execution,
-        "summary": summary,
-        "diff": data.get("diff"),
-        "files_changed": data.get("files"),
-        "workspace": data.get("workspace"),
+        "diff": execution.get("diff"),
+        "files_changed": context.get("repo_snapshot"),
+        "workspace": context.get("workspace"),
         "operations": execution.get("operations"),
-        "status": summary.get("status"),
+        "status": execution.get("status"),
     }
 
 
