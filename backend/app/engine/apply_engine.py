@@ -506,6 +506,21 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                     len(canon_trace.non_structural),
                 )
 
+            # Early exit: no structural ops → resolver has nothing to resolve
+            if not canon_trace.has_structural():
+                return {
+                    "execution": {
+                        "status": "clarification_needed",
+                        "reason": "no_structural_intents",
+                        "detail": "No structural intents detected.",
+                        "diff": None, "operations": [],
+                    },
+                    "context": {
+                        "repo_snapshot": [],
+                        "canonicalization_trace": canon_trace.to_dict(),
+                    },
+                }
+
             resolution = resolve(structural_ir, registry)
             logger.info(
                 "StructuralResolver: confidence=%.2f reason=%s",

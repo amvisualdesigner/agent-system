@@ -32,8 +32,8 @@ def resolve(
       - "no_resolvable_operations": sin ops CREATE/MODIFY
 
     Raises:
-        AmbiguousStructuralTargetError: solo si hay candidatos pero
-            score < GLOBAL_THRESHOLD (ambigüedad real, no cobertura).
+        AmbiguousStructuralTargetError: si hay múltiples candidatos
+            (>1) para una misma capability, o si score < GLOBAL_THRESHOLD.
     """
     contract_id = structural_ir.contract_id
     capability_to_path: dict[str, str] = {}
@@ -65,6 +65,14 @@ def resolve(
                 f"op:{action}:{target} → no structural target in registry (skipped)"
             )
             continue
+
+        if len(candidates) > 1:
+            paths = [c.component_instance_path for c in candidates]
+            raise AmbiguousStructuralTargetError(
+                f"Multiple structural candidates for '{target}' "
+                f"(action={action}). Found {len(candidates)} candidates: "
+                f"{paths}. Cannot deterministically select."
+            )
 
         # Scoring simple: el candidato del contrato tiene score = 1.0
         best = candidates[0]
