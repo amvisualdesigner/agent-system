@@ -88,9 +88,14 @@ class GraphIRNode:
       - file_path hints
       - layout positions
       - framework-specific keys
+
+    component_instance_path is a deterministic structural address
+    in the format: {page}.{section}.{instance}.{component_type}.
+    Derived during GraphIR construction — NOT a UUID, NOT persistent.
     """
     id: str
     type: str
+    component_instance_path: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 

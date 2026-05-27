@@ -101,7 +101,7 @@ class TestGraphIRNode(unittest.TestCase):
             data={"metrics": ["revenue", "growth"]},
             metadata={"priority": "high"},
         )
-        self.assertEqual(node.data["metrics"], ["revenue", "growth"])
+        self.assertEqual(node.data["metrics"], ("revenue", "growth"))
         self.assertEqual(node.metadata["priority"], "high")
 
     def test_node_is_immutable(self):

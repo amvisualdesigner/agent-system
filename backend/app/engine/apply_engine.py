@@ -23,6 +23,7 @@ from app.contracts.skill_ir import SkillIR
 from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_registry import get_contract
+from app.engine.errors import AmbiguousStructuralTargetError
 from app.engine.structural_completion import (
     complete_structure,
     StructuralIR,
@@ -244,6 +245,7 @@ def _build_audit(
             bound_nodes[node_id] = {
                 "type": getattr(node, 'type', 'unknown'),
                 "data": dict(node.data),
+                "component_instance_path": node.component_instance_path,
             }
 
     semantic_loss = _compute_semantic_loss(
@@ -472,6 +474,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # ── Step 2: GraphIR pipeline (build_from_structural + layout + validate) ──
     try:
         graph, graph_layout = GraphIRPipeline.run_from_structural(structural_ir)
+    except AmbiguousStructuralTargetError as e:
+        return {
+            "status": "clarification_needed",
+            "reason": "ambiguous_target",
+            "detail": str(e),
+        }
     except ValueError as e:
         return {"status": "rejected", "reason": f"graphir:{e}"}
 

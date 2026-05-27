@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from app.engine.errors import AmbiguousStructuralTargetError
 from app.graphir.intent import (
     Intent,
     is_capability_metadata,
@@ -43,6 +44,35 @@ class GraphIRBuilder:
         "CONTAINS": EdgeRole.CONTAINS,
     }
 
+    # ── Component instance path derivation ─────────────────────────
+
+    @classmethod
+    def _derive_component_instance_path(
+        cls,
+        contract_id: str | None,
+        capability: str,
+    ) -> str | None:
+        """Derive deterministic structural address.
+
+        Format: {contract_id}.{short_name}
+
+        Examples:
+          layout.page + "dashboard.sales_overview"
+            → "dashboard.sales_overview"
+          presentation.kpi_row + "dashboard.sales_overview"
+            → "dashboard.sales_overview.kpi_row"
+          presentation.timeseries + "dashboard.sales_overview"
+            → "dashboard.sales_overview.timeseries"
+
+        Deterministic, derivable, reproducible, no persistence required.
+        """
+        if not contract_id:
+            return None
+        if capability == "layout.page":
+            return contract_id
+        short_name = capability.rsplit(".", 1)[-1]
+        return f"{contract_id}.{short_name}"
+
     # ── Phase 2: Node materialization helpers ──────────────────────
 
     @classmethod
@@ -66,6 +96,7 @@ class GraphIRBuilder:
         cls,
         draft: GraphIRDraft,
         intent: Intent,
+        contract_id: str | None = None,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
@@ -79,9 +110,14 @@ class GraphIRBuilder:
         graphir_type = cls._resolve_graphir_type(intent, 0)
         node_id = cls._node_id_for_capability(graphir_type, intent.capability)
 
+        component_instance_path = cls._derive_component_instance_path(
+            contract_id, intent.capability,
+        )
+
         node = GraphIRNode(
             id=node_id,
             type=graphir_type,
+            component_instance_path=component_instance_path,
             data=dict(intent.params),
             metadata={
                 "intent_id": intent.id,
@@ -128,9 +164,17 @@ class GraphIRBuilder:
         Rules (in order):
           1. layout.page (type="Page") wins — structural container
           2. Fallback: first registered node (legacy behavior)
+
+        Raises:
+            AmbiguousStructuralTargetError: if draft is empty (no nodes
+                to elect a root from — all operations were DELETE/KEEP).
         """
         if not draft.nodes:
-            raise ValueError("GraphIRBuilder: cannot select root from empty draft")
+            raise AmbiguousStructuralTargetError(
+                "GraphIRBuilder: cannot select root from empty draft — "
+                "no structural target was resolved. All operations were "
+                "DELETE/KEEP or no capabilities produced nodes."
+            )
 
         for nid, node in draft.nodes.items():
             if node.type == "Page":
@@ -200,6 +244,7 @@ class GraphIRBuilder:
 
         Raises:
             OperationError: if operation plan violates spec invariants.
+            AmbiguousStructuralTargetError: if draft is empty (no CREATE/MODIFY ops).
             ValueError: if graph invariants fail or capability type unresolvable.
         """
         from app.engine.structural_completion import (
@@ -235,7 +280,7 @@ class GraphIRBuilder:
             intents.append(intent)
 
         for intent in intents:
-            cls._add_intent_node(draft, intent)
+            cls._add_intent_node(draft, intent, contract_id=ir.contract_id)
 
         root_id = cls._select_root(draft)
 

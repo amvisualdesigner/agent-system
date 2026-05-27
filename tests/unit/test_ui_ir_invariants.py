@@ -53,7 +53,7 @@ class TestUIIRCompiler(unittest.TestCase):
         graph = _make_graph({"table1": node}, root="table1")
         tree = UIIRCompiler.compile(graph, graph.layout)
 
-        self.assertEqual(tree.root.props["columns"], ["A", "B"])
+        self.assertEqual(tree.root.props["columns"], ("A", "B"))
         self.assertIsNone(tree.root.props["loading"])
         self.assertEqual(tree.root.props["page_size"], 50)
         # Verify all keys present
@@ -78,8 +78,8 @@ class TestUIIRCompiler(unittest.TestCase):
         tree = UIIRCompiler.compile(graph, graph.layout)
 
         self.assertEqual(set(tree.root.props.keys()), set(data.keys()))
-        for k, v in data.items():
-            self.assertEqual(tree.root.props[k], v)
+        for k in data:
+            self.assertEqual(tree.root.props[k], node.data[k])
 
     def test_multi_node_tree_consistency(self):
         """GraphIR edges → UIComponentNode.children structure."""
