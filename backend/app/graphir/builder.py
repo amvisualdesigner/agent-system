@@ -99,6 +99,7 @@ class GraphIRBuilder:
         intent: Intent,
         contract_id: str | None = None,
         resolution: StructuralResolution | None = None,
+        repo_state: dict | None = None,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
@@ -107,7 +108,7 @@ class GraphIRBuilder:
 
         Si se provee resolution, se usa capability_to_path para
         enriquecer component_instance_path. Si no, fallback a
-        derivación heurística (Fase 1a).
+        repo_state, fallback a derivación heurística (Fase 1a).
         """
         if is_capability_metadata(intent.capability):
             cls._apply_metadata(draft, intent)
@@ -116,14 +117,22 @@ class GraphIRBuilder:
         graphir_type = cls._resolve_graphir_type(intent, 0)
         node_id = cls._node_id_for_capability(graphir_type, intent.capability)
 
-        # Preferir path resuelto por registry, fallback a heurístico
+        # Preferir path resuelto por registry, fallback a repo_state, fallback a heurístico
         resolved_path = (
             resolution.capability_to_path.get(intent.capability)
             if resolution is not None
             else None
         )
+        # repo_state como dict[str, ComponentInstanceInfo] → extraer .path
+        existing_path = None
+        if repo_state and isinstance(repo_state, dict):
+            from app.engine.state_adapter import ComponentInstanceInfo
+            info = repo_state.get(intent.capability)
+            if info is not None and isinstance(info, ComponentInstanceInfo):
+                existing_path = info.path
         component_instance_path = (
             resolved_path
+            or existing_path
             or cls._derive_component_instance_path(contract_id, intent.capability)
         )
 
@@ -297,7 +306,7 @@ class GraphIRBuilder:
             intents.append(intent)
 
         for intent in intents:
-            cls._add_intent_node(draft, intent, contract_id=ir.contract_id, resolution=resolution)
+            cls._add_intent_node(draft, intent, contract_id=ir.contract_id, resolution=resolution, repo_state=repo_state)
 
         root_id = cls._select_root(draft)
 

@@ -470,7 +470,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
 
         # Phase 3: StructuralIR (merges both + slot mapping + lifecycle)
-        repo_state = _discover_repo_capabilities(context.workspace)
+        from app.engine.state_adapter import load_current_state
+        repo_state = load_current_state(context.workspace)
         structural_ir = complete_structure(
             semantic_resolution, contract_resolution, contract, semantic_frame,
             repo_state=repo_state,
@@ -575,7 +576,11 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
-    # ── Step 2a: GraphIR Purity Check ──
+    # ── Step 2a: LayoutResolver — aplica layout_hints de MOVE/REPLACE ──
+    from app.graphir.structure.layout_resolver import resolve_layout
+    graph = resolve_layout(structural_ir, graph)
+
+    # ── Step 2b: GraphIR Purity Check ──
     try:
         enforce_graph_purity(graph)
     except Exception as e:
@@ -661,6 +666,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Phase 6a: DELETE detection via state difference
         deletions = detect_deletions(resolved_mapping, identities, file_nodes)
 
+        # ── Fix 4: Project render_mode from semantic decision ──
+        for dec in decisions.values():
+            if dec.decision in (Decision.CREATE, Decision.SPLIT):
+                dec.render_mode = "create"
+            elif dec.decision in (Decision.UPDATE, Decision.EXTEND):
+                dec.render_mode = "modify"
+
         pipeline_state = PipelineState(
             file_nodes=file_nodes,
             component_nodes=component_nodes,
@@ -696,6 +708,37 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             deleted_fingerprints=deleted_fps,
         )
         memory.save(updated)
+
+        # ── Phase 6a: DELETE — state-diff deletion processing ──
+        from app.graphir.constraint.diff import StructuralDiffEngine
+        from app.graphir.constraint.renderer import RepositoryAwareRenderer
+        _del_executor = RepositoryAwareRenderer()._get_executor(exec_ctx.workspace_root)
+        for del_rec in (deletions or []):
+            fn = file_nodes.get(del_rec.file_path)
+            if fn is None:
+                continue
+            component_count = len(getattr(fn, "component_names", []))
+            allow_full_delete = (component_count <= 1)
+            boundary = next(
+                (b for b in getattr(fn, "component_boundaries", []) if b.name == del_rec.component_name),
+                None,
+            )
+            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path)
+            existing_lines: list[str] = []
+            if os.path.exists(file_path):
+                with open(file_path) as f:
+                    existing_lines = f.read().split("\n")
+            edit = StructuralDiffEngine.compute_delete_edit(
+                del_rec.file_path, existing_lines, boundary,
+                allow_full_delete=allow_full_delete,
+            )
+            if edit is None:
+                logger.warning(
+                    "Skipping unsafe DELETE for %s::%s",
+                    del_rec.file_path, del_rec.component_name,
+                )
+                continue
+            fileops.extend(_del_executor.execute(edit))
     else:
         # Direct BackendRenderer
         ReactBackend.reset_emit_log(run_id)
@@ -717,6 +760,25 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             target = op["target"]
             for fp in cap_files.get(target, []):
                 fileops.append(FileOp(action="delete", path=fp, content=""))
+
+    # ── Translate replace_pairs to file operations ──
+    # StructuralIR.replace_pairs preserva intención semántica.
+    # El renderer ya generó fileops para CREATE del new.
+    # Aquí inyectamos DELETE del old.
+    if structural_ir.replace_pairs:
+        cap_files = _discover_repo_capability_files(context.workspace)
+        for old_cap, _new_cap in structural_ir.replace_pairs:
+            if old_cap in repo_state:
+                for fp in cap_files.get(old_cap, []):
+                    fileops.append(FileOp(action="delete", path=fp, content=""))
+
+    # ── Validate replace_pairs consistency ──
+    from app.engine.structural_completion import validate_replace_consistency
+    replace_warnings = validate_replace_consistency(
+        structural_ir, fileops, repo_state=repo_state,
+    )
+    for w in replace_warnings:
+        logger.warning("replace_consistency: %s", w)
 
     ok, vreason = validate_fileops(fileops)
     if not ok:
@@ -766,13 +828,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         emit_log=_captured_emit_log,
     )
 
-    _write_artifacts(
-        context.artifacts, run_id, clean_plan,
-        [fop.to_dict() for fop in fileops],
-        results, diff or "",
-        audit=audit, fidelity=fidelity,
-    )
-
     # ── Step 5: Build fidelity report ──
     fidelity = {
         "completeness": sreport.completeness,
@@ -782,6 +837,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "execution_mode": FEATURE_FLAGS.get("execution_mode", "graphir"),
         "trace_level": FEATURE_FLAGS.get("trace_level", "full"),
     }
+
+    _write_artifacts(
+        context.artifacts, run_id, clean_plan,
+        [fop.to_dict() for fop in fileops],
+        results, diff or "",
+        audit=audit, fidelity=fidelity,
+    )
 
     write_state(run_id, "apply")
 

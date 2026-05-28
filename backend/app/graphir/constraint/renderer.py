@@ -23,13 +23,15 @@ import logging
 import os
 
 from app.graphir.backends import ReactBackend
+from app.graphir.backends.react_backend import _flatten_tree
 from app.graphir.models import FileOp
 from app.graphir.compiler import UIIRCompiler
 from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
 from app.graphir.constraint.models import (
-    Decision, RefactoringPlan, ComponentBoundary, DeletionRecord, FileOpDecision,
+    Decision, RefactoringPlan, ComponentBoundary,
 )
 from app.graphir.constraint.resolver import IdentityResolver
+from app.graphir.path_resolver import FilePathResolver
 from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.diff import (
     StructuralDiffEngine,
@@ -101,7 +103,6 @@ class RepositoryAwareRenderer:
         file_nodes = execution.file_nodes or {}
         exec_ctx = execution.exec_ctx
 
-        children_by_source = self._children_map(graph)
         use_line_range = context.feature_flags.get("constraint_graph_line_range",
                                                      FEATURE_FLAGS.get("constraint_graph_line_range", False))
 
@@ -111,15 +112,13 @@ class RepositoryAwareRenderer:
 
         fileops: list[FileOp] = []
 
-        for node in graph.nodes.values():
-            ReactBackend.add_trace(node.id, "entered", component=getattr(node, 'type', None))
-            decision = decisions.get(node.id)
+        for uinode in _flatten_tree(ui_tree.root):
+            ReactBackend.add_trace(uinode.id, "entered", component=uinode.component)
+            decision = decisions.get(uinode.id)
             if decision is None:
                 continue
 
-            ui_node = ui_node_map.get(node.id)
-            if ui_node is None:
-                continue
+            ui_node = uinode
 
             # Wrap in adapter — no GraphIRNode reaches generators
             ctx = UIGeneratorContext(
@@ -127,6 +126,8 @@ class RepositoryAwareRenderer:
                 type=ui_node.component,
                 data=dict(ui_node.props),
             )
+
+            file_path = decision.target_file or FilePathResolver.resolve(ctx, config)
 
             # 1) Generate content
             try:
@@ -139,7 +140,7 @@ class RepositoryAwareRenderer:
                 continue
 
             # Phase 6b: Materialize composition — real imports + React tree
-            child_ids = children_by_source.get(ctx.id, [])
+            child_ids = RepositoryAwareRenderer.resolve_children(uinode)
             if child_ids:
                 import_block, mount_block = self._materialize_composition(
                     ctx.id, child_ids, layout, config,
@@ -171,11 +172,11 @@ class RepositoryAwareRenderer:
                 if decision.decision in (Decision.UPDATE, Decision.EXTEND):
                     extend_strategy = self.generator.get_extend_strategy(ctx.type)
                     existing_lines = []
-                    file_path = os.path.join(
+                    abs_path = os.path.join(
                         exec_ctx.workspace_root, decision.target_file,
                     ) if exec_ctx else decision.target_file
-                    if os.path.exists(file_path):
-                        with open(file_path) as f:
+                    if os.path.exists(abs_path):
+                        with open(abs_path) as f:
                             existing_lines = f.read().split("\n")
 
                     edit = StructuralDiffEngine.compute_edit(
@@ -193,74 +194,23 @@ class RepositoryAwareRenderer:
                     continue
 
                 # CREATE and SPLIT fall through to legacy handling
-                if decision.decision in (Decision.CREATE, Decision.SPLIT):
+                if decision.render_mode:
                     ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                     fileops.append(FileOp(
-                        action="create",
-                        path=decision.target_file,
+                        action=decision.render_mode,
+                        path=file_path,
                         content=content,
                     ))
                     continue
 
-            # Legacy path (Phase 1 behavior)
-            if decision.decision == Decision.CREATE:
+            # Legacy path — render_mode ya resuelto por apply_engine
+            if decision.render_mode:
                 ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                 fileops.append(FileOp(
-                    action="create",
-                    path=decision.target_file,
+                    action=decision.render_mode,
+                    path=file_path,
                     content=content,
                 ))
-
-            elif decision.decision in (Decision.UPDATE, Decision.EXTEND):
-                ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
-                fileops.append(FileOp(
-                    action="modify",
-                    path=decision.target_file,
-                    content=content,
-                ))
-
-            elif decision.decision == Decision.SPLIT:
-                ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
-                fileops.append(FileOp(
-                    action="create",
-                    path=decision.target_file,
-                    content=content,
-                ))
-
-        # ── Phase 6a: DELETE — renderer orchestrates only ──
-        for del_rec in (execution.deletions or []):
-            fn = file_nodes.get(del_rec.file_path)
-            if fn is None:
-                continue
-
-            component_count = len(getattr(fn, "component_names", []))
-            allow_full_delete = (component_count <= 1)
-
-            boundary = self._find_boundary(
-                getattr(fn, "component_boundaries", []),
-                del_rec.component_name,
-            )
-
-            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path) if exec_ctx else del_rec.file_path
-            existing_lines: list[str] = []
-            if os.path.exists(file_path):
-                with open(file_path) as f:
-                    existing_lines = f.read().split("\n")
-
-            edit = StructuralDiffEngine.compute_delete_edit(
-                del_rec.file_path, existing_lines, boundary,
-                allow_full_delete=allow_full_delete,
-            )
-            if edit is None:
-                logger.warning(
-                    "Skipping unsafe DELETE for %s::%s",
-                    del_rec.file_path, del_rec.component_name,
-                )
-                continue
-
-            if exec_ctx:
-                executor = self._get_executor(exec_ctx.workspace_root)
-                fileops.extend(executor.execute(edit))
 
         # ── Audit: annotate each FileOp with pipeline route ──
         route = exec_ctx.active_route if exec_ctx else "unknown"
@@ -270,11 +220,8 @@ class RepositoryAwareRenderer:
         return fileops
 
     @staticmethod
-    def _children_map(graph) -> dict[str, list[str]]:
-        children: dict[str, list[str]] = {}
-        for edge in getattr(graph, "edges", []):
-            children.setdefault(edge.source, []).append(edge.target)
-        return children
+    def resolve_children(uinode: UIComponentNode) -> list[str]:
+        return [c.id for c in uinode.children]
 
     @staticmethod
     def _build_flat_map(root: UIComponentNode) -> dict[str, UIComponentNode]:

@@ -19,14 +19,24 @@ from typing import Any
 
 @dataclass
 class UIComponentNode:
-    """A single component in the framework-agnostic UI tree.
+    """INTERNAL CONTRACT — framework-agnostic UI tree node.
 
     Fields:
         id: Instance identity — GraphIRNode.id (unique per node).
         component: Render behavior identity — GraphIRNode.type (e.g. "AnalyticsTable").
         props: Framework-agnostic props — shallow copy of GraphIRNode.data.
         children: Child UIComponentNodes (derived from graph edges).
+                 SOLE source of truth for composition topology.
+                 Renderers MUST NOT read graph.edges directly.
         layout_hints: LayoutConstraint list from LayoutDerivationEngine.
+
+    Contract:
+        - children is the ONLY authoritative child list.
+        - No renderer reads GraphIR.edges after UIComponentTree is built.
+        - No renderer reads UIComponentNode.children for layout — use layout_hints.
+        - id is globally unique within a render run.
+        - component is a framework-agnostic type name (e.g. "KpiRow").
+        - props is a flat dict; no nested component references.
     """
     id: str
     component: str

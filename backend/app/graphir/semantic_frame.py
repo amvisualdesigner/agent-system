@@ -22,10 +22,12 @@ _ACTION_PATTERNS: list[tuple[list[str], str, float]] = [
     (["add", "adding", "include", "insert"], "add", 0.9),
     (["modify", "edit", "update", "change"], "modify", 0.9),
     (["create", "build", "generate", "compose", "design"], "create", 0.9),
-    (["override", "overwrite", "replace", "use instead"], "override", 0.9),
+    (["override", "overwrite", "use instead"], "override", 0.9),
     (["remove", "delete", "destroy"], "remove", 0.9),
     (["show", "display", "demonstrate"], "show", 0.8),
     (["apply", "set", "configure", "enable"], "apply", 0.8),
+    (["move", "reorder", "relocate"], "move", 0.9),
+    (["replace", "swap", "substitute"], "replace", 0.9),
 ]
 
 _OBJECT_KEYWORDS: dict[str, str] = {
@@ -74,6 +76,8 @@ class ExtractedAction:
     direct_object: str
     confidence: float
     task_fragment: str = ""
+    reference: str = ""
+    position: str = ""
 
 
 @dataclass
@@ -118,18 +122,47 @@ def _extract_actions(task_lower: str) -> list[ExtractedAction]:
                     continue
                 seen.add(key)
 
-                # Try to extract the direct object after the verb
-                # e.g., "add tfoot" -> object="tfoot"
                 obj = ""
-                for m in re.finditer(rf"\b{re.escape(kw)}\s+(\w+)", task_lower):
-                    obj = m.group(1)
-                    break
+                reference = ""
+                position = ""
+
+                if verb == "replace":
+                    # "replace table with bar chart" → object="table", reference="bar chart"
+                    m = re.search(rf"\b{re.escape(kw)}\s+(\w+)\s+with\s+(\w+)", task_lower)
+                    if m:
+                        obj = m.group(1)
+                        reference = m.group(2)
+                    else:
+                        # Fallback: just capture the first object
+                        m = re.search(rf"\b{re.escape(kw)}\s+(\w+)", task_lower)
+                        if m:
+                            obj = m.group(1)
+
+                elif verb == "move":
+                    # "move kpi below table" → object="kpi", position="below", reference="table"
+                    m = re.search(rf"\b{re.escape(kw)}\s+(\w+)\s+(below|after|above|before)\s+(\w+)", task_lower)
+                    if m:
+                        obj = m.group(1)
+                        position = m.group(2)
+                        reference = m.group(3)
+                    else:
+                        # Fallback: just capture the first object
+                        m = re.search(rf"\b{re.escape(kw)}\s+(\w+)", task_lower)
+                        if m:
+                            obj = m.group(1)
+
+                else:
+                    for m in re.finditer(rf"\b{re.escape(kw)}\s+(\w+)", task_lower):
+                        obj = m.group(1)
+                        break
 
                 actions.append(ExtractedAction(
                     verb=verb,
                     direct_object=obj,
                     confidence=conf,
                     task_fragment=kw if not obj else f"{kw} {obj}",
+                    reference=reference,
+                    position=position,
                 ))
                 break  # one match per verb type
 

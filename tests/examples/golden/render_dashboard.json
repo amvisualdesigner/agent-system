@@ -1,0 +1,14 @@
+[
+  {
+    "action": "create",
+    "path": "src/KpiRow.tsx"
+  },
+  {
+    "action": "create",
+    "path": "src/Page.tsx"
+  },
+  {
+    "action": "create",
+    "path": "src/Timeseries.tsx"
+  }
+]

@@ -21,6 +21,7 @@ from app.graphir.models import GraphIR, GraphIRLayout, GraphIRNode, LayoutConstr
 from app.graphir.backends.base import BackendRenderer, BackendConfig
 from app.graphir.models import FileOp
 from app.graphir.compiler import UIIRCompiler
+from app.graphir.path_resolver import FilePathResolver
 from app.graphir.ui_ir import UIComponentTree, UIComponentNode, UIGeneratorContext
 
 ComponentGenerator = Callable[
@@ -162,19 +163,14 @@ class ReactBackend(BackendRenderer):
                 composition = ReactBackend._render_children(uinode.children)
                 content = self._inject_composition(content, composition)
 
-            file_path = self._resolve_file_path(ctx, config)
+            file_path = FilePathResolver.resolve(ctx, config)
             fileops.append(FileOp(action="create", path=file_path, content=content))
             ReactBackend.add_trace(uinode.id, "emitted", component=uinode.component, props=dict(uinode.props))
 
         return fileops
 
-    def _resolve_file_path(self, node: GraphIRNode | UIGeneratorContext, config: BackendConfig) -> str:
-        if node.type in config.path_map:
-            override = config.path_map[node.type]
-            base = config.output_base_path.rstrip("/")
-            return os.path.normpath(f"{base}/{override}")
-        base = config.output_base_path.rstrip("/")
-        return os.path.normpath(f"{base}/{node.type}{config.file_extension}")
+    def _resolve_file_path(self, node, config: BackendConfig) -> str:
+        return FilePathResolver.resolve(node, config)
 
     @staticmethod
     def _render_children(children: list[UIComponentNode]) -> str:

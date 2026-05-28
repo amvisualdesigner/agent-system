@@ -27,13 +27,27 @@ class Decision(str, Enum):
     DELETE  = "delete"
 
 
-@dataclass(frozen=True)
+@dataclass
 class FileOpDecision:
-    """The result of matching a single intent to a file.
+    """INTERNAL CONTRACT — matched intent-to-file binding.
 
     Produced by IntentFileMatcher. Consumed by RepositoryAwareRenderer.
     MUST_NOT_MODIFY_SEMANTICS is always True — ConstraintGraph only
     decides physical mapping, never semantic content.
+
+    Fields:
+        decision: Semantic decision (CREATE/UPDATE/EXTEND/SPLIT).
+                  Intact for semantic consumers (SPLIT redirect, diff engine, audit).
+        target_file: Resolved target file path (relative to workspace root).
+        render_mode: Projection set by apply_engine before render.
+                     "create" for CREATE/SPLIT, "modify" for UPDATE/EXTEND.
+                     Renderer MUST read this, NOT decision.decision, for FileOp.action.
+
+    Contract:
+        - render_mode is the ONLY field the renderer reads for FileOp.action.
+        - decision.decision is NEVER read by the renderer for action routing.
+        - target_file is ALWAYS set (renderer may fall back to FilePathResolver).
+        - confidence and rationale are diagnostic only; never drive logic.
     """
     intent_id: str
     graphir_node_id: str
@@ -42,6 +56,7 @@ class FileOpDecision:
     confidence: float = 0.0
     rationale: str = ""
     must_not_modify_semantics: bool = True
+    render_mode: str = ""
 
 
 # ── MemoryRecord (used in Phase 6a memory upgrade) ────────────────
