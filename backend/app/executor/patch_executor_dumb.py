@@ -1,3 +1,10 @@
+"""DEPRECATED — use FileOpApplier instead.
+
+This module is preserved for reference but no longer imported.
+FileOpApplier in graphir/constraint/executor.py is the SOLE
+mutation authority since the A3 refactor (post-audit 2026-05-28).
+"""
+
 import os
 import logging
 

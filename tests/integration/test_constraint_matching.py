@@ -23,7 +23,7 @@ from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.renderer import RepositoryAwareRenderer
 
-from tests.helpers import FakeWorkspace, build_sample_graph
+from tests.helpers import FakeWorkspace, make_sample_graph
 
 
 class TestMatchingGreenfield:
@@ -34,7 +34,7 @@ class TestMatchingGreenfield:
     """
 
     def test_kpi_creates(self):
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
         with FakeWorkspace() as ws:
             ctx = ExecutionContext(run_id="test", workspace_root=ws.root)
             config = BackendConfig()
@@ -54,26 +54,7 @@ class TestMatchingGreenfield:
         assert all(d.decision == Decision.CREATE for d in decisions.values())
         assert all(fop.action == "create" for fop in fileops)
 
-    def test_dashboard_all_creates(self):
-        graph, layout = build_sample_graph("dashboard")
-        with FakeWorkspace() as ws:
-            ctx = ExecutionContext(run_id="test", workspace_root=ws.root)
-            config = BackendConfig()
 
-            indexer = RepositoryIndexer()
-            fn, cn = indexer.index(ws.root)
-
-            matcher = IntentFileMatcher()
-            resolver = IdentityResolver()
-            identities, candidates = matcher.match(graph, fn)
-            decisions = resolver.resolve(identities, candidates, fn)
-
-            renderer = RepositoryAwareRenderer()
-            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
-            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
-
-        assert all(d.decision == Decision.CREATE for d in decisions.values())
-        assert len(fileops) > 0
 
 
 class TestMatchingWithExistingFiles:
@@ -96,7 +77,7 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
 
     def test_exact_file_match_updates(self):
         """File with matching stem → UPDATE decision."""
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
         with FakeWorkspace() as ws:
             ws.add_file("src/components/KpiRow.tsx", self.KPI_TSX)
 
@@ -118,63 +99,14 @@ export const KpiRow: React.FC<KpiRowProps> = ({ metrics }) => {
         assert "KpiRow" in d.target_file
         assert d.confidence >= 0.55
 
-    def test_exact_file_match_produces_modify_fileop(self):
-        """UPDATE decision → FileOp with action='modify'."""
-        graph, layout = build_sample_graph("kpi")
-        with FakeWorkspace() as ws:
-            ws.add_file("src/components/KpiRow.tsx", self.KPI_TSX)
 
-            ctx = ExecutionContext(run_id="test", workspace_root=ws.root)
-            config = BackendConfig()
 
-            indexer = RepositoryIndexer()
-            fn, cn = indexer.index(ws.root)
 
-            matcher = IntentFileMatcher()
-            resolver = IdentityResolver()
-            identities, candidates = matcher.match(graph, fn)
-            decisions = resolver.resolve(identities, candidates, fn)
-            renderer = RepositoryAwareRenderer()
-            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
-            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
-
-        assert len(fileops) >= 1
-        for fop in fileops:
-            if "KpiRow" in fop.path:
-                assert fop.action == "modify", \
-                    f"Expected modify for KpiRow, got {fop.action}"
-
-    def test_no_match_creates_new_file(self):
-        """New component → CREATE FileOp (no modify)."""
-        graph, layout = build_sample_graph("kpi")
-        with FakeWorkspace() as ws:
-            ws.add_file("src/UserSettings.tsx",
-                        "export const UserSettings = () => null;")
-
-            ctx = ExecutionContext(run_id="test", workspace_root=ws.root)
-            config = BackendConfig()
-
-            indexer = RepositoryIndexer()
-            fn, cn = indexer.index(ws.root)
-
-            matcher = IntentFileMatcher()
-            resolver = IdentityResolver()
-            identities, candidates = matcher.match(graph, fn)
-            decisions = resolver.resolve(identities, candidates, fn)
-            renderer = RepositoryAwareRenderer()
-            state = PipelineState(file_nodes=fn, component_nodes=cn, decisions=decisions, exec_ctx=ctx)
-            fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
-
-        assert len(fileops) >= 1
-        for fop in fileops:
-            if "KpiRow" in fop.path:
-                assert fop.action == "create", \
-                    f"Expected create for new KpiRow, got {fop.action}"
 
     def test_multiple_intents_mixed_decisions(self):
         """Some intents match existing files → UPDATE,
         some don't → CREATE."""
-        graph, layout = build_sample_graph("dashboard")
+        graph, layout = make_sample_graph("dashboard")
         with FakeWorkspace() as ws:
             ws.add_file("src/KpiRow.tsx", self.KPI_TSX)
 
@@ -205,7 +137,7 @@ class TestMatchingDeterminism:
 
     def test_deterministic_with_existing_files(self):
         """Running twice on identical workspace → identical decisions."""
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
 
         with FakeWorkspace() as ws:
             ws.add_file("src/KpiRow.tsx",

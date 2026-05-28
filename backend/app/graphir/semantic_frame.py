@@ -33,6 +33,8 @@ _ACTION_PATTERNS: list[tuple[list[str], str, float]] = [
 _OBJECT_KEYWORDS: dict[str, str] = {
     "table": "table",
     "tabular": "table",
+    "column": "table",
+    "columns": "table",
     "data table": "table",
     "analytics table": "table",
     "kpi": "kpi_row",
@@ -116,7 +118,7 @@ def _extract_actions(task_lower: str) -> list[ExtractedAction]:
 
     for keywords, verb, conf in _ACTION_PATTERNS:
         for kw in keywords:
-            if kw in task_lower:
+            if re.search(rf'(?<!\w){re.escape(kw)}', task_lower):
                 key = f"{verb}:{kw}"
                 if key in seen:
                     continue
@@ -128,31 +130,33 @@ def _extract_actions(task_lower: str) -> list[ExtractedAction]:
 
                 if verb == "replace":
                     # "replace table with bar chart" → object="table", reference="bar chart"
-                    m = re.search(rf"\b{re.escape(kw)}\s+(\w+)\s+with\s+(\w+)", task_lower)
+                    m = re.search(rf"\b{re.escape(kw)}\s+(?:(?:a|an|the)\s+)?(\w+)\s+with\s+(?:(?:a|an|the)\s+)?(\w+)", task_lower)
                     if m:
                         obj = m.group(1)
                         reference = m.group(2)
                     else:
                         # Fallback: just capture the first object
-                        m = re.search(rf"\b{re.escape(kw)}\s+(\w+)", task_lower)
+                        m = re.search(rf"\b{re.escape(kw)}\s+(?:(?:a|an|the)\s+)?(\w+)", task_lower)
                         if m:
                             obj = m.group(1)
 
                 elif verb == "move":
                     # "move kpi below table" → object="kpi", position="below", reference="table"
-                    m = re.search(rf"\b{re.escape(kw)}\s+(\w+)\s+(below|after|above|before)\s+(\w+)", task_lower)
+                    m = re.search(rf"\b{re.escape(kw)}\s+(?:(?:a|an|the)\s+)?(\w+)\s+(below|after|above|before)\s+(?:(?:a|an|the)\s+)?(\w+)", task_lower)
                     if m:
                         obj = m.group(1)
                         position = m.group(2)
                         reference = m.group(3)
                     else:
                         # Fallback: just capture the first object
-                        m = re.search(rf"\b{re.escape(kw)}\s+(\w+)", task_lower)
+                        m = re.search(rf"\b{re.escape(kw)}\s+(?:(?:a|an|the)\s+)?(\w+)", task_lower)
                         if m:
                             obj = m.group(1)
 
                 else:
-                    for m in re.finditer(rf"\b{re.escape(kw)}\s+(\w+)", task_lower):
+                    # Skip articles ("a", "an", "the") between verb and object:
+                    #   "remove a column" → obj="column", not "a"
+                    for m in re.finditer(rf"\b{re.escape(kw)}\s+(?:(?:a|an|the)\s+)?(\w+)", task_lower):
                         obj = m.group(1)
                         break
 

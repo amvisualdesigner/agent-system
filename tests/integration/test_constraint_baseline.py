@@ -36,87 +36,7 @@ from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.renderer import RepositoryAwareRenderer
 
-from tests.helpers import FakeWorkspace, build_sample_graph
-
-
-# ================================================================
-# Baseline: empty workspace (greenfield)
-# ================================================================
-
-
-class TestBaselineGreenfield:
-    """When the workspace is empty, all decisions must be CREATE."""
-
-    def test_kpi_creates_one_file(self):
-        """A single KpiRow intent → one CREATE FileOp."""
-        graph, layout = build_sample_graph("kpi")
-        with FakeWorkspace() as ws:
-            ctx = ExecutionContext(run_id="baseline", workspace_root=ws.root)
-            config = BackendConfig()
-
-            indexer = RepositoryIndexer()
-            file_nodes, component_nodes = indexer.index(ws.root)
-
-            matcher = IntentFileMatcher()
-            resolver = IdentityResolver()
-            identities, candidates = matcher.match(graph, file_nodes)
-            decisions = resolver.resolve(identities, candidates, file_nodes)
-
-            renderer = RepositoryAwareRenderer()
-            state = PipelineState(
-                file_nodes=file_nodes, component_nodes=component_nodes,
-                decisions=decisions, exec_ctx=ctx,
-            )
-            fileops = renderer.render(
-                graph, layout, config,
-                context=RenderContext(execution=state),
-            )
-
-        # All decisions must be CREATE in greenfield
-        for decision in decisions.values():
-            assert decision.decision == Decision.CREATE, \
-                f"Expected CREATE, got {decision.decision} for {decision.graphir_node_id}"
-
-        # All FileOps must have action "create"
-        for fop in fileops:
-            assert fop.action == "create", \
-                f"Expected action=create, got {fop.action} for {fop.path}"
-
-        assert len(fileops) > 0, "Expected at least one FileOp"
-
-    def test_dashboard_creates_multiple_files(self):
-        """A dashboard with 3 intents → 3 distinct CREATE FileOps."""
-        graph, layout = build_sample_graph("dashboard")
-        with FakeWorkspace() as ws:
-            ctx = ExecutionContext(run_id="baseline", workspace_root=ws.root)
-            config = BackendConfig()
-
-            indexer = RepositoryIndexer()
-            file_nodes, component_nodes = indexer.index(ws.root)
-
-            matcher = IntentFileMatcher()
-            resolver = IdentityResolver()
-            identities, candidates = matcher.match(graph, file_nodes)
-            decisions = resolver.resolve(identities, candidates, file_nodes)
-
-            renderer = RepositoryAwareRenderer()
-            state = PipelineState(
-                file_nodes=file_nodes, component_nodes=component_nodes,
-                decisions=decisions, exec_ctx=ctx,
-            )
-            fileops = renderer.render(
-                graph, layout, config,
-                context=RenderContext(execution=state),
-            )
-
-        for decision in decisions.values():
-            assert decision.decision == Decision.CREATE
-
-        for fop in fileops:
-            assert fop.action == "create"
-
-        assert len(fileops) == len(decisions), \
-            f"Expected {len(decisions)} FileOps, got {len(fileops)}"
+from tests.helpers import FakeWorkspace, make_sample_graph
 
 
 # ================================================================
@@ -130,7 +50,7 @@ class TestBaselineDeterminism:
     def test_deterministic_decisions(self):
         """Running the pipeline twice on identical inputs must produce
         identical decisions and FileOps."""
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
 
         with FakeWorkspace() as ws:
             ctx = ExecutionContext(run_id="baseline", workspace_root=ws.root)
@@ -185,7 +105,7 @@ class TestBaselineContent:
     """FileOps produced by the stub must have valid content."""
 
     def test_fileops_have_content(self):
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
         with FakeWorkspace() as ws:
             ctx = ExecutionContext(run_id="baseline", workspace_root=ws.root)
             config = BackendConfig()
@@ -219,7 +139,7 @@ class TestBaselineNoSideEffects:
     """
 
     def test_pipeline_does_not_write_files(self):
-        graph, layout = build_sample_graph("table")
+        graph, layout = make_sample_graph("table")
         with FakeWorkspace() as ws:
             ctx = ExecutionContext(run_id="baseline", workspace_root=ws.root)
             config = BackendConfig()

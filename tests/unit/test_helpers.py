@@ -1,12 +1,11 @@
 """Tests for the shared test helpers.
 
-Validates FakeWorkspace and build_sample_graph produce
-consistent results.
+Validates FakeWorkspace, make_sample_graph, and RepoFixture.
 """
 
 import os
 
-from tests.helpers import FakeWorkspace, build_sample_graph
+from tests.helpers import FakeWorkspace, make_sample_graph
 
 
 class TestFakeWorkspace:
@@ -46,23 +45,23 @@ class TestFakeWorkspace:
         assert not os.path.exists(root)
 
 
-class TestBuildSampleGraph:
+class TestMakeSampleGraph:
     def test_kpi_returns_graph_and_layout(self):
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
         assert len(graph.nodes) > 0
         assert layout.root in graph.nodes
 
     def test_dashboard_has_multiple_nodes(self):
-        graph, layout = build_sample_graph("dashboard")
+        graph, layout = make_sample_graph("dashboard")
         assert len(graph.nodes) >= 3  # Page + KpiRow + Timeseries
 
     def test_table_has_correct_types(self):
-        graph, layout = build_sample_graph("table")
+        graph, layout = make_sample_graph("table")
         types = [n.type for n in graph.nodes.values()]
         assert "Page" in types
         assert "AnalyticsTable" in types
 
     def test_graph_is_valid(self):
         from app.graphir.validator import GraphIRValidator
-        graph, layout = build_sample_graph("dashboard")
+        graph, layout = make_sample_graph("dashboard")
         GraphIRValidator.validate(graph)  # should not raise

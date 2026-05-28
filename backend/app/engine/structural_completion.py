@@ -703,25 +703,18 @@ def complete_structure(
         ))
 
     # Paso 1: scope bootstrap según modo
-    # Operational mode (con acciones): actions + repo definen scope
-    # Declarative mode (sin acciones): contrato define scope
-    if semantic_resolution.actions:
-        capabilities = []
-    else:
-        capabilities = _infer_capabilities_from_contract(contract)
+    # Siempre se parte de las capabilities del contrato como base.
+    # Operational mode: contract + action_map definen scope final.
+    # Declarative mode: contract + augmentation definen scope final.
+    capabilities = _infer_capabilities_from_contract(contract)
+    if not semantic_resolution.actions:
         capabilities = _augment_capabilities(
             capabilities, semantic_resolution, contract_resolution, frame_dict,
         )
 
     # Paso 2b: Step A — match actions from semantic layer to capabilities
-    # El universo de matching SIEMPRE es repo ∪ contract
-    # (necesitamos contract_caps para resolver nombres de capability aunque
-    # en operational mode el scope de iteración sea distinto)
-    contract_caps_for_matching = (
-        _infer_capabilities_from_contract(contract)
-        if semantic_resolution.actions
-        else capabilities
-    )
+    # El universo de matching es el scope actual (contract caps ± augmentation)
+    contract_caps_for_matching = capabilities
     action_map = _match_actions_to_capabilities(
         semantic_resolution.actions, contract_caps_for_matching, contract,
         repo_state=repo_state,

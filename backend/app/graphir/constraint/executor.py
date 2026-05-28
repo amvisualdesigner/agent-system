@@ -1,12 +1,12 @@
-"""FileOpExecutor — IO layer for applying EditOperations.
+"""FileOpExecutor — pure EditOperation → FileOp computation.
+FileOpApplier — sole mutation authority, writes FileOps to disk.
 
-State Layer: reads filesystem, writes filesystem.
-NO decision logic, NO content generation, NO structural diff.
+Architecture:
+  FileOpExecutor (PURE): EditOperation + optional existing_content → FileOp[]
+    NO filesystem reads, NO writes. Pure computation only.
 
-Responsibility: convert EditOperation → FileOp by reading existing
-file content and applying surgical replacements.
-
-Atomicity: writes to temp file then renames to prevent partial writes.
+  FileOpApplier (IO): FileOp[] → filesystem writes.
+    SOLE mutation authority in the system. Atomic writes via tempfile + rename.
 """
 
 from __future__ import annotations
@@ -22,30 +22,30 @@ logger = logging.getLogger(__name__)
 
 
 class FileOpExecutor:
-    """IO layer: applies EditOperations to produce FileOps.
+    """PURE: converts EditOperations to FileOps. Does NOT read or write.
 
     Args:
-        workspace_root: Absolute path to workspace root.
+        workspace_root: Absolute path to workspace root (for path joining).
     """
 
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
         self.errors: list[str] = []
 
-    def execute(self, edit: EditOperation) -> list[FileOp]:
-        """Convert an EditOperation to one or more FileOps.
-
-        Reads existing file content for surgical edits.
-        Returns empty list on errors (logged, not raised).
+    def execute(
+        self, edit: EditOperation,
+        existing_content: str | None = None,
+    ) -> list[FileOp]:
+        """Convert an EditOperation to FileOps. Pure — no IO.
 
         Args:
             edit: EditOperation from StructuralDiffEngine.
+            existing_content: Existing file content for surgical edits.
+                When None, treats missing files as greenfield (create).
 
         Returns:
             list[FileOp] with the edit applied.
         """
-        file_path = os.path.join(self.workspace_root, edit.source_file)
-
         if edit.action == "create":
             return [FileOp(action="create", path=edit.source_file, content=edit.content)]
 
@@ -56,63 +56,33 @@ class FileOpExecutor:
             return [FileOp(action="modify", path=edit.source_file, content=edit.content)]
 
         if edit.action == "replace_range":
-            return self._surgical_replace(edit, file_path)
+            return self._compute_surgical(edit, existing_content or "")
 
         if edit.action == "insert_range":
-            return self._surgical_insert(edit, file_path)
+            return self._compute_insert(edit, existing_content or "")
 
         logger.warning("Unknown edit action: %s (file=%s)", edit.action, edit.source_file)
         self.errors.append(f"Unknown edit action: {edit.action}")
         return []
 
-    def _surgical_replace(
-        self, edit: EditOperation, file_path: str,
+    def _compute_surgical(
+        self, edit: EditOperation, existing_content: str,
     ) -> list[FileOp]:
-        """Replace range [range_start, range_end] with edit.content."""
-        if not os.path.exists(file_path):
-            logger.warning(
-                "File not found for replace_range: %s — treating as create",
-                file_path,
-            )
+        """Compute content for range replacement. Pure — no IO."""
+        if not existing_content:
             return [FileOp(action="create", path=edit.source_file, content=edit.content)]
 
-        try:
-            with open(file_path) as f:
-                existing = f.read()
-        except (IOError, OSError) as e:
-            logger.error("Failed to read file %s: %s", file_path, e)
-            self.errors.append(f"read_error:{file_path}:{e}")
-            return []
-
-        patched = self._apply_surgical(existing, edit)
-
-        self._atomic_write(file_path, patched)
-
+        patched = self._apply_surgical(existing_content, edit)
         return [FileOp(action="modify", path=edit.source_file, content=patched)]
 
-    def _surgical_insert(
-        self, edit: EditOperation, file_path: str,
+    def _compute_insert(
+        self, edit: EditOperation, existing_content: str,
     ) -> list[FileOp]:
-        """Insert edit.content at line range_start."""
-        if not os.path.exists(file_path):
-            logger.warning(
-                "File not found for insert_range: %s — treating as create",
-                file_path,
-            )
+        """Compute content for range insertion. Pure — no IO."""
+        if not existing_content:
             return [FileOp(action="create", path=edit.source_file, content=edit.content)]
 
-        try:
-            with open(file_path) as f:
-                existing = f.read()
-        except (IOError, OSError) as e:
-            logger.error("Failed to read file %s: %s", file_path, e)
-            self.errors.append(f"read_error:{file_path}:{e}")
-            return []
-
-        patched = self._apply_surgical(existing, edit)
-
-        self._atomic_write(file_path, patched)
-
+        patched = self._apply_surgical(existing_content, edit)
         return [FileOp(action="modify", path=edit.source_file, content=patched)]
 
     @staticmethod
@@ -139,6 +109,51 @@ class FileOpExecutor:
         if trailing_newline and not result.endswith("\n"):
             result += "\n"
         return result
+
+
+class FileOpApplier:
+    """SOLE mutation authority. Writes FileOps to disk atomically.
+
+    Args:
+        workspace_root: Absolute path to workspace root.
+            All FileOp.path values are relative to this.
+    """
+
+    def __init__(self, workspace_root: str):
+        self.workspace_root = workspace_root
+        self.errors: list[str] = []
+
+    def apply(self, fileops: list[FileOp]) -> list[dict]:
+        """Apply FileOps to disk. Each FileOp is written atomically.
+
+        Returns:
+            list[dict] with status per FileOp.
+        """
+        results: list[dict] = []
+        for fop in fileops:
+            result = self._apply_one(fop)
+            results.append(result)
+        return results
+
+    def _apply_one(self, fop: FileOp) -> dict:
+        """Apply a single FileOp to disk."""
+        path = os.path.normpath(os.path.join(self.workspace_root, fop.path))
+        if not path.startswith(os.path.realpath(self.workspace_root) + os.sep):
+            return {"status": "rejected", "reason": "path_escape", "path": fop.path}
+
+        if fop.action in ("create", "modify"):
+            self._atomic_write(path, fop.content)
+            return {
+                "status": "created" if fop.action == "create" else "modified",
+                "path": path,
+            }
+        elif fop.action == "delete":
+            if os.path.isfile(path):
+                os.remove(path)
+                return {"status": "deleted", "path": path}
+            return {"status": "rejected", "reason": "file_not_found", "path": path}
+
+        return {"status": "rejected", "reason": "unknown_action"}
 
     @staticmethod
     def _atomic_write(file_path: str, content: str) -> None:

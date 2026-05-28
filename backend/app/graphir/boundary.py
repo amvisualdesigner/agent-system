@@ -8,6 +8,31 @@ This module provides:
 - A set of blocked keys that must not appear in GraphIR structures
 - An enforcement function called at pipeline boundaries
 - A custom exception for violations
+
+┌─────────────────────────────────────────────────────────────┐
+│               FROZEN SEMANTIC BOUNDARY RULES                │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  GraphIR NEVER contains:                                    │
+│    - file_path, absolute_path, relative_path                │
+│    - workspace, worktree                                    │
+│    - filesystem state (fs_*, path_*, file_* prefixes)       │
+│                                                             │
+│  UIComponentNode NEVER contains:                            │
+│    - imports, file_path, workspace, worktree                │
+│    - repo metadata of any kind                              │
+│                                                             │
+│  Renderer NEVER:                                            │
+│    - reads disk                                             │
+│    - knows about git                                        │
+│    - resolves worktrees                                     │
+│                                                             │
+│  ExecutionContext NEVER enters:                             │
+│    - GraphIR nodes or metadata                              │
+│    - UIComponentNode trees                                  │
+│    - semantic metadata of any kind                          │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 """
 
 from __future__ import annotations

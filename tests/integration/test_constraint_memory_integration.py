@@ -22,7 +22,7 @@ from app.graphir.constraint.matcher import IntentFileMatcher
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.memory import RepositorySemanticMemory
 
-from tests.helpers import FakeWorkspace, build_sample_graph
+from tests.helpers import FakeWorkspace, make_sample_graph
 
 
 class TestMemoryPersistence:
@@ -32,7 +32,7 @@ class TestMemoryPersistence:
 
     def test_save_and_reload_mapping(self):
         """After first run, memory is written → second run uses mapping."""
-        graph, layout = build_sample_graph("kpi")
+        graph, layout = make_sample_graph("kpi")
 
         with FakeWorkspace() as ws:
             ws.add_file("src/components/KpiRow.tsx", self.KPI_TSX)
@@ -100,7 +100,7 @@ class TestMemoryPersistence:
             })
 
             # Now run a KpiRow intent (different fingerprint)
-            graph, layout = build_sample_graph("kpi")
+            graph, layout = make_sample_graph("kpi")
             indexer = RepositoryIndexer()
             fn, cn = indexer.index(ws.root)
 

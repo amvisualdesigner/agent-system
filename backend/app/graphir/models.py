@@ -232,14 +232,21 @@ class GraphIRDraft:
 
         This is the ONLY enforcement point for graph invariants.
         All checks run here:
+          - Semantic purity: no filesystem keys leak into GraphIR
           - All edges reference existing nodes
           - DAG (no cycles)
           - Exactly one root
           - All nodes reachable from root (inside is_dag)
 
-        Raises ValueError with a specific message on any violation.
+        Raises ValueError or GraphIRBoundaryViolation on violation.
         """
         from app.graphir.validator import GraphIRValidator
+        from app.graphir.boundary import enforce_graphir_purity
+
+        # Semantic purity check — filesystem concepts forbidden in GraphIR
+        for nid, node in self.nodes.items():
+            enforce_graphir_purity(node.data, f"GraphIRNode({nid}).data")
+            enforce_graphir_purity(node.metadata, f"GraphIRNode({nid}).metadata")
 
         GraphIRValidator.check_edges_exist(self.nodes, self.edges)
         GraphIRValidator.is_dag(self.nodes, self.edges)

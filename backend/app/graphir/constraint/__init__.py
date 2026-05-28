@@ -47,7 +47,7 @@ from app.graphir.constraint.diff import (
     ExtendStrategy,
 )
 from app.graphir.constraint.generator import ContentGenerator
-from app.graphir.constraint.executor import FileOpExecutor
+from app.graphir.constraint.executor import FileOpExecutor, FileOpApplier
 from app.graphir.constraint.deletion import detect_deletions
 
 
@@ -83,5 +83,6 @@ __all__ = [
     "ExtendStrategy",
     "ContentGenerator",
     "FileOpExecutor",
+    "FileOpApplier",
     "detect_deletions",
 ]

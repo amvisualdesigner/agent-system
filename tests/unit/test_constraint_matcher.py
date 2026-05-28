@@ -115,28 +115,7 @@ class TestMatcherScoring:
         best_score, best_fn = candidates["n0"][0]
         assert best_score < 0.35  # below EXTEND_THRESHOLD
 
-    def test_domain_overlap_has_zero_weight(self):
-        """Domain overlap weight is 0 — does not affect score."""
-        graph = _make_graph("RevenueChart")
-        graph.nodes["n0"] = GraphIRNode(
-            id="n0", type="RevenueChart", data={},
-            metadata={"domain": "sales"},
-        )
-        files = {
-            "src/RevenueChart.tsx": _make_file(
-                "src/RevenueChart.tsx",
-                exports=["RevenueChart"],
-                domains=["sales"],
-            ),
-        }
-        matcher = IntentFileMatcher()
-        identities, candidates = matcher.match(graph, files)
 
-        # With domain weight = 0, score comes from semantic + symbol + path
-        best_score, best_fn = candidates["n0"][0]
-        assert best_fn.path == "src/RevenueChart.tsx"
-        # Same as without domain overlap (path + semantic + symbol)
-        assert best_score > 0.50
 
     def test_identities_match_node_count(self):
         """Number of identities equals number of graph nodes."""

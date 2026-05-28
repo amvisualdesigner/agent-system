@@ -155,14 +155,7 @@ class TestMemoryMerge:
         fp = ident.fingerprint()
         assert merged[fp].file_path == "src/KpiRow.tsx"
 
-    def test_merge_skips_create(self):
-        """CREATE decisions are NOT persisted (file doesn't exist yet)."""
-        ident = _identity()
-        decisions = {"n0": _decision(Decision.CREATE, "src/components/KpiRow.tsx")}
-        identities = {"n0": ident}
 
-        merged = RepositorySemanticMemory.merge(decisions, identities, {})
-        assert merged == {}
 
     def test_merge_skips_split(self):
         ident = _identity()

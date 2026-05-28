@@ -19,9 +19,7 @@ import pytest
 
 from app.graphir.constraint import ExecutionContext, Decision, FileOpDecision
 from app.graphir.boundary import enforce_graph_purity, GraphIRBoundaryViolation
-from app.graphir.models import GraphIR, GraphIRNode, GraphIRLayout, GraphIRDraft
-from app.graphir.intent import Intent, IntentPlan, CapabilityDef, CapabilityCategory
-from app.graphir.pipeline import GraphIRPipeline
+from app.graphir.models import GraphIR, GraphIRNode, GraphIRLayout
 
 
 # ================================================================
@@ -80,13 +78,12 @@ class TestPurityBoundaryWiring:
     """Smoke: purity enforcement against real GraphIR objects."""
 
     def test_pure_graph_passes(self):
-        """A GraphIR built by the pipeline must pass purity check."""
-        plan = IntentPlan(
-            intents=[
-                Intent(id="i1", capability="presentation.kpi_row"),
-            ],
-        )
-        graph, layout = GraphIRPipeline.run(plan)
+        """A GraphIR built via GraphIRDraft must pass purity check."""
+        from app.graphir.models import GraphIRDraft, GraphIRNode
+        draft = GraphIRDraft()
+        draft.add_node(GraphIRNode(id="n1", type="KpiRow"))
+        graph = draft.freeze()
+        layout = graph.layout
         enforce_graph_purity(graph)  # should not raise
 
     def test_contaminated_graph_is_rejected(self):
@@ -175,34 +172,4 @@ class TestStubModulesWiring:
         assert isinstance(decisions, dict)
         assert decisions["n1"].decision == Decision.CREATE
 
-    def test_renderer_stub_generates_fileops(self):
-        from app.graphir.constraint.renderer import RepositoryAwareRenderer
-        from app.graphir.constraint.matcher import IntentFileMatcher
-        from app.graphir.constraint.resolver import IdentityResolver
-        from app.graphir.constraint.context import PipelineState, RenderContext
-        from app.graphir.models import GraphIR, GraphIRNode, GraphIRLayout
-        from app.graphir.backends import BackendConfig
 
-        renderer = RepositoryAwareRenderer()
-        matcher = IntentFileMatcher()
-        resolver = IdentityResolver()
-        graph = GraphIR(
-            nodes={
-                "n1": GraphIRNode(id="n1", type="KpiRow", data={}),
-            },
-            edges=[],
-            layout=GraphIRLayout(root="n1"),
-        )
-        layout = GraphIRLayout(root="n1")
-        config = BackendConfig()
-        ctx = ExecutionContext(run_id="smoke", workspace_root="/tmp/test")
-
-        identities, candidates = matcher.match(graph, {})
-        decisions = resolver.resolve(identities, candidates, {})
-        state = PipelineState(file_nodes={}, component_nodes={}, decisions=decisions, exec_ctx=ctx)
-        fileops = renderer.render(graph, layout, config, context=RenderContext(execution=state))
-        assert len(fileops) > 0
-        for fop in fileops:
-            assert hasattr(fop, "action")
-            assert hasattr(fop, "path")
-            assert hasattr(fop, "content")

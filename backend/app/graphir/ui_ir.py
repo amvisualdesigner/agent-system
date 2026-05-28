@@ -37,12 +37,24 @@ class UIComponentNode:
         - id is globally unique within a render run.
         - component is a framework-agnostic type name (e.g. "KpiRow").
         - props is a flat dict; no nested component references.
+        - PROHIBITED in props: imports, file_path, workspace, worktree, fs_ keys.
     """
     id: str
     component: str
     props: dict[str, Any]
     children: list[UIComponentNode] = field(default_factory=list)
     layout_hints: list[Any] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Enforce UIComponentNode purity: no filesystem keys in props."""
+        BLOCKED = {"imports", "file_path", "workspace", "worktree"}
+        for key in BLOCKED:
+            if key in self.props:
+                raise ValueError(
+                    f"UIComponentNode purity violation: "
+                    f"key '{key}' in props is forbidden. "
+                    f"UIComponentNode must not contain filesystem concepts."
+                )
 
 
 @dataclass

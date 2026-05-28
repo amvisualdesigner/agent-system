@@ -35,7 +35,17 @@ class GraphIRPipeline:
     No caching, no global state, no side effects.
 
     Single entry point: run_from_structural(ir). 1:1 capability→node.
+    GraphIRPipeline.run() does NOT exist — use GraphIRDraft for tests.
     """
+
+    @staticmethod
+    def run(*args, **kwargs):
+        """This method does NOT exist. Use run_from_structural() or GraphIRDraft."""
+        raise RuntimeError(
+            "GraphIRPipeline.run() does not exist. "
+            "Use run_from_structural(StructuralIR) for the full pipeline, "
+            "or build GraphIR directly via GraphIRDraft for tests/builders."
+        )
 
     @staticmethod
     def run_from_structural(

@@ -1,11 +1,11 @@
-"""RepositoryAwareRenderer — produces FileOps from decisions.
+"""RepositoryAwareRenderer — produces FileOps from decisions (PURE).
 
-Execution Layer: receives a matcher (already populated with decisions),
-reads file content for UPDATE/EXTEND merges, produces FileOps.
+PURE function: (GraphIR + UI decisions + content snapshot) → FileOps.
+NO filesystem reads, NO git knowledge, NO worktree concepts.
 
-Content generation is delegated to ContentGenerator.
-Structural merge is delegated to StructuralDiffEngine.
-IO is isolated to reading existing file content for merges.
+Content generation is delegated to ContentGenerator (pure).
+Structural merge is delegated to StructuralDiffEngine (pure).
+All existing file content arrives via existing_content_by_path.
 
 Phase 5a: Feature flag constraint_graph_line_range enables
 line-range merge via ComponentBoundary.
@@ -19,8 +19,8 @@ Phase 6b (Composition Materialization):
 
 from __future__ import annotations
 
-import logging
 import os
+import logging
 
 from app.graphir.backends import ReactBackend
 from app.graphir.backends.react_backend import _flatten_tree
@@ -45,10 +45,10 @@ logger = logging.getLogger(__name__)
 
 
 class RepositoryAwareRenderer:
-    """Execution Layer: produces FileOps from ConstraintGraph decisions.
+    """PURE function: (GraphIR + decisions + snapshot) → FileOps.
 
     Stateless after construction. All pipeline state arrives via
-    RenderContext. No feature flag reads, no indexer calls,
+    RenderContext. No filesystem reads, no indexer calls,
     no memory loading — pure rendering only.
 
     Phase 1: Uses matcher decisions for CREATE/UPDATE/EXTEND.
@@ -76,12 +76,16 @@ class RepositoryAwareRenderer:
         layout,
         config,
         context: RenderContext | None = None,
+        existing_content_by_path: dict[str, str] | None = None,
     ) -> list[FileOp]:
-        """Produce FileOps from GraphIR + RenderContext.
+        """Produce FileOps from GraphIR + RenderContext (PURE).
 
         All pipeline-derived state (file_nodes, decisions, split_plan,
         deletions) arrives through context.execution. The renderer
-        never reads flags, indexes files, or loads memory.
+        never reads files, indexes, or loads memory.
+
+        All existing file content for line-range merges arrives via
+        existing_content_by_path — NO filesystem reads.
 
         Args:
             graph: GraphIR instance
@@ -90,12 +94,17 @@ class RepositoryAwareRenderer:
             context: RenderContext with PipelineState + feature_flags.
                 When None, creates a minimal empty context for backward
                 compat with callers not yet ported.
+            existing_content_by_path: Pre-read file content keyed by
+                relative path. Used for line-range merge. When None or
+                empty, treats all files as empty (greenfield behavior).
 
         Returns:
             list[FileOp] with actions matching decisions
         """
         if context is None:
             context = RenderContext(execution=PipelineState())
+
+        existing_content_by_path = existing_content_by_path or {}
 
         execution = context.execution or PipelineState()
         decisions = execution.decisions or {}
@@ -171,13 +180,8 @@ class RepositoryAwareRenderer:
 
                 if decision.decision in (Decision.UPDATE, Decision.EXTEND):
                     extend_strategy = self.generator.get_extend_strategy(ctx.type)
-                    existing_lines = []
-                    abs_path = os.path.join(
-                        exec_ctx.workspace_root, decision.target_file,
-                    ) if exec_ctx else decision.target_file
-                    if os.path.exists(abs_path):
-                        with open(abs_path) as f:
-                            existing_lines = f.read().split("\n")
+                    raw = existing_content_by_path.get(decision.target_file, "")
+                    existing_lines = raw.split("\n") if raw else []
 
                     edit = StructuralDiffEngine.compute_edit(
                         content, decision.target_file, existing_lines,
@@ -187,7 +191,9 @@ class RepositoryAwareRenderer:
                     )
                     if exec_ctx:
                         executor = self._get_executor(exec_ctx.workspace_root)
-                        new_ops = executor.execute(edit)
+                        new_ops = executor.execute(
+                            edit, existing_content=raw,
+                        )
                         if new_ops:
                             ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                         fileops.extend(new_ops)

@@ -56,7 +56,7 @@ _TASK_PATTERNS: list[tuple[list[str], str, dict[str, Any], str, str]] = [
     # ── Presentation (domain-agnostic visual components) ──
     (["kpi", "metric", "metrics", "key performance"], "presentation.kpi_row", {}, "kpi metrics", "detected"),
     (["timeseries", "time series", "trend", "over time", "chart"], "presentation.timeseries", {}, "timeseries", "detected"),
-    (["table", "tabular", "grid", "data table", "analytics table"], "presentation.table", {}, "table", "detected"),
+    (["table", "tabular", "grid", "data table", "analytics table", "column", "columns"], "presentation.table", {}, "table", "detected"),
     (["filter", "facet", "refine"], "presentation.filter_panel", {}, "filters", "detected"),
     (["bar chart", "bar graph", "bars"], "presentation.chart.bar", {}, "bar chart", "detected"),
     (["metric card", "single metric", "number"], "presentation.metric_card", {}, "metric card", "detected"),
@@ -98,6 +98,9 @@ def _compute_unresolved(task: str, matched_keywords: set[str]) -> list[str]:
                  "was", "were", "be", "been", "being", "create", "have", "has",
                  "had", "do", "does", "did", "will", "would", "could",
                   "should", "showing", "may", "might", "shall", "can", "need",
+                 "delete", "remove", "add", "modify", "update", "move",
+                 "replace", "change", "rename", "edit", "hide", "clear",
+                 "drop", "erase",
                  "da", "que", "en", "el", "la", "los", "las", "un",
                  "una", "con", "para", "por", "al", "del", "lo",
                  "se", "no", "es", "como", "más", "pero", "sus",

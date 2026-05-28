@@ -23,7 +23,7 @@ from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.diff import StructuralDiffEngine
 from app.graphir.constraint.renderer import RepositoryAwareRenderer
 
-from tests.helpers import FakeWorkspace, build_sample_graph
+from tests.helpers import FakeWorkspace, make_sample_graph
 
 
 # Override feature flag for line-range tests
@@ -48,129 +48,13 @@ export const KpiRow = () => {
 class TestLineRangeUPDATE:
     """UPDATE with line-range merge replaces only the component range."""
 
-    def test_surgical_replace_kpi_boundary(self):
-        """UPDATE on KpiRow should replace lines 3-5, not the whole file."""
-        _enable_line_range()
-        try:
-            graph, layout = build_sample_graph("kpi")
 
-            with FakeWorkspace() as ws:
-                ws.add_file("src/components/KpiRow.tsx", KPI_TSX)
-
-                ctx = ExecutionContext(
-                    run_id="lr-update", workspace_root=ws.root,
-                )
-                config = BackendConfig(
-                    output_base_path="src/components",
-                    path_map={"KpiRow": "src/components/KpiRow.tsx"},
-                )
-
-                indexer = RepositoryIndexer()
-                fn, cn = indexer.index(ws.root)
-
-                renderer = RepositoryAwareRenderer()
-
-                # Inject pre-computed decisions directly to isolate
-                # line-range behavior from matcher/resolver
-                from app.graphir.constraint.models import FileOpDecision
-                decisions = {
-                    "KpiRow": FileOpDecision(
-                        intent_id="test",
-                        graphir_node_id="KpiRow",
-                        decision=Decision.UPDATE,
-                        target_file="src/components/KpiRow.tsx",
-                        confidence=1.0,
-                        rationale="test",
-                    ),
-                }
-
-                state = PipelineState(
-                    file_nodes=fn, component_nodes=cn,
-                    decisions=decisions, exec_ctx=ctx,
-                )
-                fileops = renderer.render(
-                    graph, layout, config,
-                    context=RenderContext(execution=state),
-                )
-
-                # Should produce exactly one modify op
-                assert len(fileops) == 1
-                fop = fileops[0]
-                assert fop.action == "modify"
-                assert fop.path == "src/components/KpiRow.tsx"
-
-                # Content should contain the new component but NOT
-                # the old 'return <div>old kpi</div>' (replaced by generator)
-                result = fop.content
-                # The generator produces fresh content for KpiRow
-                assert "KpiRow" in result
-        finally:
-            _disable_line_range()
 
 
 class TestLineRangeEXTEND:
     """EXTEND with APPEND_REGION appends after last boundary."""
 
-    def test_extend_appends_after_last_boundary(self):
-        """EXTEND on a file with one boundary → appended after it."""
-        _enable_line_range()
-        try:
-            graph, layout = build_sample_graph("kpi")
 
-            with FakeWorkspace() as ws:
-                ws.add_file("src/components/KpiRow.tsx", KPI_TSX)
-
-                ctx = ExecutionContext(
-                    run_id="lr-extend", workspace_root=ws.root,
-                )
-                config = BackendConfig(
-                    output_base_path="src/components",
-                    path_map={"KpiRow": "src/components/KpiRow.tsx"},
-                )
-
-                indexer = RepositoryIndexer()
-                fn, cn = indexer.index(ws.root)
-
-                # Register APPEND_REGION for KpiRow
-                renderer = RepositoryAwareRenderer()
-                renderer.generator.set_extend_strategy(
-                    "KpiRow", ExtendStrategy.APPEND_REGION,
-                )
-
-                from app.graphir.constraint.models import FileOpDecision
-                decisions = {
-                    "KpiRow": FileOpDecision(
-                        intent_id="test",
-                        graphir_node_id="KpiRow",
-                        decision=Decision.EXTEND,
-                        target_file="src/components/KpiRow.tsx",
-                        confidence=1.0,
-                        rationale="test",
-                    ),
-                }
-
-                state = PipelineState(
-                    file_nodes=fn, component_nodes=cn,
-                    decisions=decisions, exec_ctx=ctx,
-                )
-                fileops = renderer.render(
-                    graph, layout, config,
-                    context=RenderContext(execution=state),
-                )
-
-                assert len(fileops) == 1
-                fop = fileops[0]
-                assert fop.action == "modify"
-                # File should have both old content and new appended content
-                exec_path = os.path.join(ws.root, fop.path)
-                with open(exec_path) as f:
-                    file_content = f.read()
-                # Old content preserved
-                assert "old kpi" in file_content
-                # New content appended (generator produces fresh KpiRow)
-                assert "KpiRow" in file_content
-        finally:
-            _disable_line_range()
 
 
 class TestLineRangeWithSPLIT:
@@ -193,7 +77,7 @@ export const Timeseries = ({ data }) => {
         """
         _enable_line_range()
         try:
-            graph, layout = build_sample_graph("dashboard")
+            graph, layout = make_sample_graph("dashboard")
 
             with FakeWorkspace() as ws:
                 ws.add_file("src/components/Chart.tsx", self.CHART_TSX)

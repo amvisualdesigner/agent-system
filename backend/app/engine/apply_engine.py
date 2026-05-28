@@ -12,7 +12,7 @@ import hashlib
 import subprocess
 import logging
 
-from app.executor.patch_executor_dumb import apply_dumb as apply_dumb_op
+from app.graphir.constraint.executor import FileOpApplier
 from app.policy.policy import validate_plan_policy, validate_operation
 from app.utils.state import write_state
 from app.executor.diff_generator import generate_diff
@@ -619,7 +619,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         from app.graphir.constraint.crl import ConflictResolutionLayer
         from app.graphir.constraint.split_analyzer import SPLITAnalyzer
         from app.graphir.constraint.deletion import detect_deletions
-        from app.graphir.constraint.models import MemoryRecord
+        from app.graphir.constraint.models import MemoryRecord, Decision
         from app.graphir.constraint.context import PipelineState, RenderContext
 
         indexer = RepositoryIndexer()
@@ -689,9 +689,22 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
         ReactBackend.reset_emit_log(run_id)
         ReactBackend.reset_traces(run_id)
+
+        # Build content snapshot for pure renderer (A2)
+        existing_content: dict[str, str] = {}
+        for dec in decisions.values():
+            if dec.decision in (Decision.UPDATE, Decision.EXTEND):
+                target = dec.target_file
+                if target and target not in existing_content:
+                    abs_path = os.path.join(exec_ctx.workspace_root, target)
+                    if os.path.exists(abs_path):
+                        with open(abs_path) as f:
+                            existing_content[target] = f.read()
+
         fileops = renderer.render(
             graph, graph_layout, backend_config,
             context=render_ctx,
+            existing_content_by_path=existing_content,
         )
 
         # Collect constraint vars for audit
@@ -724,10 +737,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 None,
             )
             file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path)
+            existing_content: str = ""
             existing_lines: list[str] = []
             if os.path.exists(file_path):
                 with open(file_path) as f:
-                    existing_lines = f.read().split("\n")
+                    existing_content = f.read()
+                    existing_lines = existing_content.split("\n")
             edit = StructuralDiffEngine.compute_delete_edit(
                 del_rec.file_path, existing_lines, boundary,
                 allow_full_delete=allow_full_delete,
@@ -738,7 +753,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                     del_rec.file_path, del_rec.component_name,
                 )
                 continue
-            fileops.extend(_del_executor.execute(edit))
+            fileops.extend(
+                _del_executor.execute(edit, existing_content=existing_content),
+            )
     else:
         # Direct BackendRenderer
         ReactBackend.reset_emit_log(run_id)
@@ -787,10 +804,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
-    results = []
-    for fop in fileops:
-        result = apply_dumb_op(fop, context.workspace)
-        results.append(result)
+    applier = FileOpApplier(context.workspace)
+    results = applier.apply(fileops)
 
     logger.info(
         "apply: contract_id=%s version=%d params=%s fileops_count=%d",
