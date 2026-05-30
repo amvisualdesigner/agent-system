@@ -29,4 +29,5 @@ class StructuralResolution:
     capability_to_path: dict[str, str]
     confidence: float
     trace: list[str]
+    instance_mapping: dict[str, str] = field(default_factory=dict)
     reason: Optional[str] = None

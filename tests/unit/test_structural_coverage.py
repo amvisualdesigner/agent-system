@@ -16,6 +16,13 @@ from app.graphir.structural_coverage import (
 from app.contracts.skill_registry import SkillContract
 
 
+def _find_node_by_type(graph, node_type: str):
+    for nid, node in graph.nodes.items():
+        if node.type == node_type:
+            return node
+    return None
+
+
 def make_resolution(contract_id="dashboard.sales_overview", params=None, provenance=None, confidence=0.8):
     """Minimal SemanticResolution + ContractResolution factory for test isolation."""
     from app.contracts.semantic_resolution import SemanticResolution
@@ -279,8 +286,9 @@ class TestPipelineInvariantsExtended:
 
         # Verify output is purely structural
         assert graph.nodes is not None
-        assert "KpiRow" in graph.nodes
-        assert graph.nodes["KpiRow"].data == {"metrics": ("net_revenue",)}
+        kpi_node = _find_node_by_type(graph, "KpiRow")
+        assert kpi_node is not None
+        assert kpi_node.data == {"metrics": ("net_revenue",)}
 
     def test_no_intent_plan_created_in_structural_path(self, dashboard_contract):
         """Structural path NO crea IntentPlan — usa StructuralIR directamente."""
@@ -302,7 +310,7 @@ class TestPipelineInvariantsExtended:
         graph, layout = GraphIRPipeline.run_from_structural(structural_ir)
 
         # Verify node data comes from structural_ir, not an intermediate IntentPlan
-        kpi = graph.nodes.get("KpiRow")
+        kpi = _find_node_by_type(graph, "KpiRow")
         assert kpi is not None
         assert dict(kpi.data) == {"metrics": ("net_revenue",)}
 

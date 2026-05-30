@@ -45,95 +45,50 @@ class GraphIRBuilder:
         "CONTAINS": EdgeRole.CONTAINS,
     }
 
-    # ── Component instance path derivation ─────────────────────────
-
-    @classmethod
-    def _derive_component_instance_path(
-        cls,
-        contract_id: str | None,
-        capability: str,
-    ) -> str | None:
-        """Derive deterministic structural address.
-
-        Format: {contract_id}.{short_name}
-
-        Examples:
-          layout.page + "dashboard.sales_overview"
-            → "dashboard.sales_overview"
-          presentation.kpi_row + "dashboard.sales_overview"
-            → "dashboard.sales_overview.kpi_row"
-          presentation.timeseries + "dashboard.sales_overview"
-            → "dashboard.sales_overview.timeseries"
-
-        Deterministic, derivable, reproducible, no persistence required.
-        """
-        if not contract_id:
-            return None
-        if capability == "layout.page":
-            return contract_id
-        short_name = capability.rsplit(".", 1)[-1]
-        return f"{contract_id}.{short_name}"
-
     # ── Phase 2: Node materialization helpers ──────────────────────
 
     @classmethod
-    def _node_id_for_capability(cls, graphir_type: str, capability: str) -> str:
-        """Stable node identity from capability name, not positional index.
+    def _node_id_for_capability(
+        cls, graphir_type: str, instance_id: str,
+    ) -> str:
+        """Stable node identity from instance_id.
 
-        La misma capability produce siempre el mismo node_id,
-        independientemente de qué otras capabilities haya en la lista.
-        Esto evita que DELETE/MODIFY/KEEP cambie identidades.
+        node_id = graphir_type:instance_id
 
-        Para metadata capabilities (domain, style, layout) no se crean nodos.
+        instance_id es proporcionado exclusivamente por el Resolver.
+        El Builder NO deriva ni elige instance_id.
         """
-        # Page es caso especial por ser root
-        if graphir_type == "Page":
-            return graphir_type
-        # Para el resto, el type es único por capability en el structural path
-        return graphir_type
+        return f"{graphir_type}:{instance_id}"
 
     @classmethod
     def _add_intent_node(
         cls,
         draft: GraphIRDraft,
         intent: Intent,
-        contract_id: str | None = None,
         resolution: StructuralResolution | None = None,
-        repo_state: dict | None = None,
     ) -> None:
         """Phase 2: Register a single intent as node or metadata.
 
         No edges, no root logic. Pure inventory stage.
-        Identity estable por capability, no por posición en lista.
-
-        Si se provee resolution, se usa capability_to_path para
-        enriquecer component_instance_path. Si no, fallback a
-        repo_state, fallback a derivación heurística (Fase 1a).
+        instance_id se obtiene exclusivamente de resolution.instance_mapping.
+        El Builder NUNCA deriva ni elige instance_id.
         """
         if is_capability_metadata(intent.capability):
             cls._apply_metadata(draft, intent)
             return
 
         graphir_type = cls._resolve_graphir_type(intent, 0)
-        node_id = cls._node_id_for_capability(graphir_type, intent.capability)
+        instance_id = (
+            resolution.instance_mapping.get(intent.capability)
+            if resolution is not None and resolution.instance_mapping
+            else "0"
+        )
+        node_id = cls._node_id_for_capability(graphir_type, instance_id)
 
-        # Preferir path resuelto por registry, fallback a repo_state, fallback a heurístico
-        resolved_path = (
+        component_instance_path = (
             resolution.capability_to_path.get(intent.capability)
             if resolution is not None
             else None
-        )
-        # repo_state como dict[str, ComponentInstanceInfo] → extraer .path
-        existing_path = None
-        if repo_state and isinstance(repo_state, dict):
-            from app.engine.state_adapter import ComponentInstanceInfo
-            info = repo_state.get(intent.capability)
-            if info is not None and isinstance(info, ComponentInstanceInfo):
-                existing_path = info.path
-        component_instance_path = (
-            resolved_path
-            or existing_path
-            or cls._derive_component_instance_path(contract_id, intent.capability)
         )
 
         node = GraphIRNode(
@@ -212,13 +167,19 @@ class GraphIRBuilder:
         draft: GraphIRDraft,
         intent: Intent,
         root_id: str,
+        resolution: StructuralResolution | None = None,
     ) -> None:
         """Phase 4: Create edge from root to node. Skip metadata and root itself."""
         if is_capability_metadata(intent.capability):
             return
 
         graphir_type = cls._resolve_graphir_type(intent, 0)
-        node_id = cls._node_id_for_capability(graphir_type, intent.capability)
+        instance_id = (
+            resolution.instance_mapping.get(intent.capability)
+            if resolution is not None and resolution.instance_mapping
+            else "0"
+        )
+        node_id = cls._node_id_for_capability(graphir_type, instance_id)
 
         if node_id == root_id:
             return
@@ -242,7 +203,6 @@ class GraphIRBuilder:
     def build_from_structural(
         cls,
         ir: StructuralIR,
-        repo_state: set[str] | None = None,
         resolution: StructuralResolution | None = None,
     ) -> GraphIR:
         """Apply StructuralIR operations → GraphIR (diff plan execution).
@@ -259,8 +219,6 @@ class GraphIRBuilder:
 
         Args:
             ir: StructuralIR con operations explícitas.
-            repo_state: Conjunto de capability names existentes.
-                        Si se provee, valida las operaciones antes de aplicarlas.
             resolution: StructuralResolution opcional del resolver.
                         Si se provee, enriquece component_instance_path
                         con paths resueltos del registry.
@@ -273,20 +231,10 @@ class GraphIRBuilder:
             AmbiguousStructuralTargetError: if draft is empty (no CREATE/MODIFY ops).
             ValueError: if graph invariants fail or capability type unresolvable.
         """
-        from app.engine.structural_completion import (
-            CREATE, MODIFY, validate_operations, OperationError,
-        )
-
-        # Validate operations against repo_state before applying
-        op_warnings = validate_operations(ir.operations, repo_state)
-        if op_warnings:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Operation warnings: %s", op_warnings,
-            )
-
         draft = GraphIRDraft()
         draft.params = {}
+
+        from app.engine.structural_completion import CREATE, MODIFY
 
         intents: list[Intent] = []
         for op in ir.operations:
@@ -306,12 +254,12 @@ class GraphIRBuilder:
             intents.append(intent)
 
         for intent in intents:
-            cls._add_intent_node(draft, intent, contract_id=ir.contract_id, resolution=resolution, repo_state=repo_state)
+            cls._add_intent_node(draft, intent, resolution=resolution)
 
         root_id = cls._select_root(draft)
 
         for intent in intents:
-            cls._add_intent_edge(draft, intent, root_id)
+            cls._add_intent_edge(draft, intent, root_id, resolution=resolution)
 
         orphans = draft.get_orphan_nodes()
         if orphans:

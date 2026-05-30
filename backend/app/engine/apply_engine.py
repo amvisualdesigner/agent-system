@@ -11,6 +11,7 @@ import json
 import hashlib
 import subprocess
 import logging
+from functools import lru_cache
 
 from app.graphir.constraint.executor import FileOpApplier
 from app.policy.policy import validate_plan_policy, validate_operation
@@ -28,6 +29,7 @@ from app.engine.structural_completion import (
     complete_structure,
     StructuralIR,
 )
+from app.engine.structural_index import StructuralIndex
 from app.graphir.structure.models import StructuralResolution
 from app.graphir.structural_coverage import (
     StructuralCoverageValidator,
@@ -149,6 +151,39 @@ def _build_name_map() -> dict[str, str]:
     return name_map
 
 
+def _build_normalized_map(name_map: dict[str, str]) -> dict[str, str]:
+    """Precompute normalized (strip _, -) reverse lookup from name_map."""
+    normalized: dict[str, str] = {}
+    for pattern, cap_name in name_map.items():
+        key = pattern.replace("_", "").replace("-", "")
+        if key not in normalized:
+            normalized[key] = cap_name
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _get_normalized_map() -> dict[str, str]:
+    """Cached normalized map for performance (O(1) per file)."""
+    return _build_normalized_map(_build_name_map())
+
+
+def _match_file_to_capability(name_lower: str, name_map: dict[str, str]) -> str | None:
+    """Match filename (lowercased, no ext) to capability name.
+
+    Two levels:
+      1. exact match
+      2. normalized exact match (strip _, -)
+
+    NO substring matching. NO NLP.
+    """
+    if name_lower in name_map:
+        return name_map[name_lower]
+    normalized = name_lower.replace("_", "").replace("-", "")
+    if normalized in _get_normalized_map():
+        return _get_normalized_map()[normalized]
+    return None
+
+
 def _discover_repo_capabilities(workspace_root: str) -> set[str]:
     """Scan workspace para detectar capabilities existentes.
 
@@ -171,16 +206,9 @@ def _discover_repo_capabilities(workspace_root: str) -> set[str]:
                 continue
             name_lower = name.lower()
 
-            # 1. Direct match in name_map
-            if name_lower in name_map:
-                caps.add(name_map[name_lower])
-                continue
-
-            # 2. Substring match: capability suffix in filename
-            for pattern, cap_name in name_map.items():
-                if pattern in name_lower:
-                    caps.add(cap_name)
-                    break
+            capability = _match_file_to_capability(name_lower, name_map)
+            if capability is not None:
+                caps.add(capability)
 
     return caps
 
@@ -205,16 +233,9 @@ def _discover_repo_capability_files(workspace_root: str) -> dict[str, list[str]]
                 continue
             name_lower = name.lower()
 
-            matched = None
-            if name_lower in name_map:
-                matched = name_map[name_lower]
-            else:
-                for pattern, cap_name in name_map.items():
-                    if pattern in name_lower:
-                        matched = cap_name
-                        break
-            if matched is not None:
-                cap_files.setdefault(matched, []).append(rel_path)
+            capability = _match_file_to_capability(name_lower, name_map)
+            if capability is not None:
+                cap_files.setdefault(capability, []).append(rel_path)
 
     return cap_files
 
@@ -470,13 +491,24 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
 
         # Phase 3: StructuralIR (merges both + slot mapping + lifecycle)
-        from app.engine.state_adapter import load_current_state
-        repo_state = load_current_state(context.workspace)
+        structural_index = StructuralIndex.from_worktree(context.workspace)
         structural_ir = complete_structure(
             semantic_resolution, contract_resolution, contract, semantic_frame,
-            repo_state=repo_state,
+            structural_index=structural_index,
         )
 
+        # ── Early exit: all capabilities resolved to KEEP ──
+        if structural_ir.has_resolved_keep_state:
+            logger.info(
+                "All capabilities resolved to KEEP — no changes needed "
+                "(contract=%s, capabilities=%d)",
+                structural_ir.contract_id, len(structural_ir.capabilities),
+            )
+            return {
+                "execution": {"status": "ok", "diff": None, "operations": []},
+                "context": {"repo_snapshot": []},
+                "meta": {},
+            }
 
         # Gate 2: StructuralCoverageValidator
         sreport = StructuralCoverageValidator.validate(structural_ir, contract)
@@ -522,7 +554,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                     },
                 }
 
-            resolution = resolve(structural_ir, registry)
+            resolution = resolve(structural_ir, registry, structural_index=structural_index)
             logger.info(
                 "StructuralResolver: confidence=%.2f reason=%s",
                 resolution.confidence, resolution.reason,
@@ -785,14 +817,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     if structural_ir.replace_pairs:
         cap_files = _discover_repo_capability_files(context.workspace)
         for old_cap, _new_cap in structural_ir.replace_pairs:
-            if old_cap in repo_state:
+            if structural_index.exists(old_cap):
                 for fp in cap_files.get(old_cap, []):
                     fileops.append(FileOp(action="delete", path=fp, content=""))
 
     # ── Validate replace_pairs consistency ──
     from app.engine.structural_completion import validate_replace_consistency
     replace_warnings = validate_replace_consistency(
-        structural_ir, fileops, repo_state=repo_state,
+        structural_ir, fileops, structural_index=structural_index,
     )
     for w in replace_warnings:
         logger.warning("replace_consistency: %s", w)

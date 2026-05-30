@@ -27,6 +27,13 @@ from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_registry import SkillContract, get_contract
 
 
+def _find_node_by_type(graph, node_type: str):
+    for nid, node in graph.nodes.items():
+        if node.type == node_type:
+            return node
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Fixtures
 # ═══════════════════════════════════════════════════════════════════
@@ -587,11 +594,11 @@ class TestPipelineInvariants:
 
         graph, _ = GraphIRPipeline.run_from_structural(structural_ir)
 
-        kpi_node = graph.nodes.get("KpiRow")
+        kpi_node = _find_node_by_type(graph, "KpiRow")
         assert kpi_node is not None, "Expected KpiRow node in graph"
         assert kpi_node.data == {"metrics": ("net_revenue",)}
 
-        ts_node = graph.nodes.get("Timeseries")
+        ts_node = _find_node_by_type(graph, "Timeseries")
         assert ts_node is not None, "Expected Timeseries node in graph"
         assert ts_node.data["metric"] == "net_revenue"
 
@@ -668,45 +675,67 @@ class TestActionMatching:
 class TestActionLifecycle:
     """_resolve_action — Step B deterministic rules."""
 
+    def _make_index(self, *caps: str):
+        from app.engine.structural_index import StructuralIndex
+        from app.engine.state_adapter import ComponentInstanceInfo
+        mapping = {
+            cap: [ComponentInstanceInfo(capability=cap, path=cap.rsplit(".", 1)[-1])]
+            for cap in caps
+        }
+        return StructuralIndex.from_mapping(mapping)
+
     def test_create_when_not_exists_and_create_verb(self):
         from app.engine.structural_completion import _resolve_action, CREATE, MODIFY, DELETE, KEEP
-        assert _resolve_action("presentation.table", "create", set()) == CREATE
+        assert _resolve_action("presentation.table", "create", None) == CREATE
 
     def test_modify_when_exists_and_modify_verb(self):
         from app.engine.structural_completion import _resolve_action, MODIFY
-        assert _resolve_action("presentation.table", "modify", {"presentation.table"}) == MODIFY
+        idx = self._make_index("presentation.table")
+        assert _resolve_action("presentation.table", "modify", idx) == MODIFY
 
     def test_delete_when_exists_and_delete_verb(self):
         from app.engine.structural_completion import _resolve_action, DELETE
-        assert _resolve_action("presentation.table", "remove", {"presentation.table"}) == DELETE
+        idx = self._make_index("presentation.table")
+        assert _resolve_action("presentation.table", "remove", idx) == DELETE
 
     def test_keep_when_exists_no_verb(self):
         from app.engine.structural_completion import _resolve_action, KEEP
-        assert _resolve_action("presentation.table", None, {"presentation.table"}) == KEEP
+        idx = self._make_index("presentation.table")
+        assert _resolve_action("presentation.table", None, idx) == KEEP
 
     def test_create_when_not_exists_no_verb(self):
         from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", None, set()) == CREATE
+        assert _resolve_action("presentation.table", None, None) == CREATE
 
     def test_modify_not_exists_becomes_create(self):
         from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", "modify", set()) == CREATE
+        assert _resolve_action("presentation.table", "modify", None) == CREATE
 
     def test_delete_not_exists_becomes_keep(self):
         from app.engine.structural_completion import _resolve_action, KEEP
-        assert _resolve_action("presentation.table", "delete", set()) == KEEP
+        assert _resolve_action("presentation.table", "delete", None) == KEEP
 
     def test_add_not_exists_becomes_create(self):
         from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", "add", set()) == CREATE
+        assert _resolve_action("presentation.table", "add", None) == CREATE
 
     def test_unrecognized_verb_on_existing_becomes_modify(self):
         from app.engine.structural_completion import _resolve_action, MODIFY
-        assert _resolve_action("presentation.table", "custom_action", {"presentation.table"}) == MODIFY
+        idx = self._make_index("presentation.table")
+        assert _resolve_action("presentation.table", "custom_action", idx) == MODIFY
 
 
 class TestCompleteStructureWithActions:
-    """complete_structure con actions y repo_state."""
+    """complete_structure con actions y structural_index."""
+
+    def _make_index(self, *caps: str):
+        from app.engine.structural_index import StructuralIndex
+        from app.engine.state_adapter import ComponentInstanceInfo
+        mapping = {
+            cap: [ComponentInstanceInfo(capability=cap, path=cap.rsplit(".", 1)[-1])]
+            for cap in caps
+        }
+        return StructuralIndex.from_mapping(mapping)
 
     def test_create_default_when_no_repo(self, dashboard_contract):
         semantic = SemanticResolution(
@@ -718,7 +747,7 @@ class TestCompleteStructureWithActions:
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
         )
-        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=set())
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=None)
         assert all(c.action == "CREATE" for c in ir.capabilities if c.mode == CompletionMode.SAFE_COMPLETE)
 
     def test_keep_capabilities_in_repo(self, dashboard_contract):
@@ -732,7 +761,7 @@ class TestCompleteStructureWithActions:
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
         keeps = [c for c in ir.capabilities if c.action == "KEEP"]
         assert len(keeps) > 0
         for k in keeps:
@@ -750,7 +779,7 @@ class TestCompleteStructureWithActions:
             MockSkillIR({"metrics": ["growth"]}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
         kpi = next(c for c in ir.capabilities if c.name == "presentation.kpi_row")
         assert kpi.action == "MODIFY"
         assert kpi.params.get("metrics") is not None
@@ -766,7 +795,7 @@ class TestCompleteStructureWithActions:
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
         ts = next(c for c in ir.capabilities if c.name == "presentation.timeseries")
         assert ts.action == "DELETE"
         assert ts.params == {}
@@ -788,7 +817,7 @@ class TestCompleteStructureWithActions:
             "presentation.kpi_row", "presentation.timeseries", "layout.page",
             "presentation.chart.bar",
         }
-        ir = complete_structure(semantic, contract_res, dashboard_contract, repo_state=repo)
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
         names = {c.name: c.action for c in ir.capabilities}
         assert "presentation.chart.bar" in names, (
             f"Repo-only cap not in resolved list: {names}"

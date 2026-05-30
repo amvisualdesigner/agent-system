@@ -9,6 +9,8 @@ class ComponentInstanceInfo:
 
     capability: nombre completo (e.g. "presentation.kpi_row")
     path: component_instance_path (e.g. "dashboard.sales.kpi_row")
+    instance_id: discriminante numérico auto-incremental por capability.
+                 Técnico, no semántico. 0 para la primera instancia.
     anchor: posición layout (opcional, para multi-instancia).
             Cambia cuando MOVE reordena.
             Ej: {"parent": "Page", "index": 0}
@@ -18,21 +20,24 @@ class ComponentInstanceInfo:
     """
     capability: str
     path: str
+    instance_id: str = "0"
     anchor: dict | None = None
     slot_id: str | None = None
 
 
-def load_current_state(workspace_root: str) -> dict[str, ComponentInstanceInfo]:
-    """Scan workspace y retorna {capability: ComponentInstanceInfo}.
+def load_current_state(workspace_root: str) -> dict[str, list[ComponentInstanceInfo]]:
+    """Scan workspace y retorna {capability: [ComponentInstanceInfo, ...]}.
 
-    Mantiene identidad estable entre runs: mismo archivo → mismo path.
+    Soportar múltiples instancias por capability.
+    Cada instancia recibe un instance_id auto-incremental y un path único.
     """
     if not workspace_root or not os.path.isdir(workspace_root):
         return {}
 
     from app.engine.apply_engine import _build_name_map
+    from app.engine.apply_engine import _match_file_to_capability
     name_map = _build_name_map()
-    state: dict[str, ComponentInstanceInfo] = {}
+    state: dict[str, list[ComponentInstanceInfo]] = {}
 
     for root, _dirs, files in os.walk(workspace_root):
         for fn in files:
@@ -41,23 +46,19 @@ def load_current_state(workspace_root: str) -> dict[str, ComponentInstanceInfo]:
                 continue
             name_lower = name.lower()
 
-            capability = None
-            if name_lower in name_map:
-                capability = name_map[name_lower]
-            else:
-                for pattern, cap_name in name_map.items():
-                    if pattern in name_lower:
-                        capability = cap_name
-                        break
-
+            capability = _match_file_to_capability(name_lower, name_map)
             if capability is None:
                 continue
 
             short_name = capability.rsplit(".", 1)[-1]
-            state[capability] = ComponentInstanceInfo(
+            instances = state.setdefault(capability, [])
+            instance_id = str(len(instances))
+            instance_path = short_name if instance_id == 0 else f"{short_name}:{instance_id}"
+            instances.append(ComponentInstanceInfo(
                 capability=capability,
-                path=short_name,
-                slot_id=short_name,
-            )
+                path=instance_path,
+                instance_id=instance_id,
+                slot_id=instance_path,
+            ))
 
     return state

@@ -20,6 +20,17 @@ from app.graphir.models import (
 )
 
 
+def _si(*caps: str):
+    """Build StructuralIndex from capability names (test helper)."""
+    from app.engine.structural_index import StructuralIndex
+    from app.engine.state_adapter import ComponentInstanceInfo
+    mapping = {
+        cap: [ComponentInstanceInfo(capability=cap, path=cap.rsplit(".", 1)[-1])]
+        for cap in caps
+    }
+    return StructuralIndex.from_mapping(mapping)
+
+
 def _make_dashboard_graph(kpi_after_table: bool = True) -> GraphIR:
     """Helper: create a GraphIR with Page root, kpi_row and table children.
 
@@ -98,7 +109,7 @@ def _make_structural_ir(
 def test_add_component_no_existing():
     """Workspace vacío → ADD 'add a table' → CREATE action."""
     action = _resolve_action(
-        "presentation.table", "add", repo_state=None,
+        "presentation.table", "add", structural_index=None,
     )
     assert action == CREATE
 
@@ -106,7 +117,7 @@ def test_add_component_no_existing():
 def test_add_component_existing_upgrades_to_modify():
     """Workspace con table → ADD 'add a table' → MODIFY (upgrade)."""
     action = _resolve_action(
-        "presentation.table", "add", repo_state={"presentation.table"},
+        "presentation.table", "add", structural_index=_si("presentation.table"),
     )
     assert action == MODIFY
 
@@ -116,7 +127,7 @@ def test_add_component_existing_upgrades_to_modify():
 def test_remove_existing_component():
     """Workspace con table → REMOVE 'remove the table' → DELETE."""
     action = _resolve_action(
-        "presentation.table", "remove", repo_state={"presentation.table"},
+        "presentation.table", "remove", structural_index=_si("presentation.table"),
     )
     assert action == DELETE
 
@@ -124,7 +135,7 @@ def test_remove_existing_component():
 def test_remove_nonexistent_component():
     """Workspace vacío → REMOVE 'remove the table' → KEEP (no-op)."""
     action = _resolve_action(
-        "presentation.table", "remove", repo_state=None,
+        "presentation.table", "remove", structural_index=None,
     )
     assert action == KEEP
 
@@ -134,7 +145,7 @@ def test_remove_nonexistent_component():
 def test_modify_existing_component():
     """Workspace con kpi → MODIFY 'change revenue to profit' → MODIFY."""
     action = _resolve_action(
-        "presentation.kpi_row", "change", repo_state={"presentation.kpi_row"},
+        "presentation.kpi_row", "change", structural_index=_si("presentation.kpi_row"),
     )
     assert action == MODIFY
 
@@ -142,7 +153,7 @@ def test_modify_existing_component():
 def test_modify_nonexistent_component():
     """Workspace vacío → MODIFY 'change revenue to profit' → CREATE."""
     action = _resolve_action(
-        "presentation.kpi_row", "change", repo_state=None,
+        "presentation.kpi_row", "change", structural_index=None,
     )
     assert action == CREATE
 
@@ -156,7 +167,7 @@ def test_move_produces_layout_hint():
             "verb": "move", "object": "kpi", "reference": "table",
         }]),
         contract_caps=["presentation.kpi_row", "presentation.table"],
-        repo_state={"presentation.kpi_row", "presentation.table"},
+        structural_index=_si("presentation.kpi_row", "presentation.table"),
     )
     assert "presentation.kpi_row" in hints
     assert hints["presentation.kpi_row"]["move_after"] == "presentation.table"
@@ -237,7 +248,7 @@ def test_replace_produces_pair():
             "verb": "replace", "object": "table", "reference": "bar chart",
         }]),
         contract_caps=["presentation.table", "presentation.chart.bar"],
-        repo_state={"presentation.table"},
+        structural_index=_si("presentation.table"),
     )
     assert len(pairs) == 1
     assert pairs[0] == ("presentation.table", "presentation.chart.bar")
@@ -246,7 +257,7 @@ def test_replace_produces_pair():
 def test_replace_action_is_modify_not_delete():
     """REPLACE verb on existing capability → MODIFY (not DELETE)."""
     action = _resolve_action(
-        "presentation.table", "replace", repo_state={"presentation.table"},
+        "presentation.table", "replace", structural_index=_si("presentation.table"),
     )
     assert action == MODIFY
 
@@ -263,7 +274,7 @@ def test_replace_consistency_valid():
     ]
 
     warnings = validate_replace_consistency(
-        sir, fileops, repo_state={"presentation.table"},
+        sir, fileops, structural_index=_si("presentation.table"),
     )
     assert warnings == []
 
@@ -280,7 +291,7 @@ def test_replace_consistency_missing_delete():
     ]
 
     warnings = validate_replace_consistency(
-        sir, fileops, repo_state={"presentation.table"},
+        sir, fileops, structural_index=_si("presentation.table"),
     )
     assert len(warnings) == 1
     assert "no DELETE fileop" in warnings[0]
@@ -308,10 +319,10 @@ def test_is_replacement_method():
 def test_move_does_not_affect_modify_resolution():
     """MOVE verb → _resolve_action returns MODIFY (same as modify verb)."""
     action_move = _resolve_action(
-        "presentation.kpi_row", "move", repo_state={"presentation.kpi_row"},
+        "presentation.kpi_row", "move", structural_index=_si("presentation.kpi_row"),
     )
     action_modify = _resolve_action(
-        "presentation.kpi_row", "change", repo_state={"presentation.kpi_row"},
+        "presentation.kpi_row", "change", structural_index=_si("presentation.kpi_row"),
     )
     assert action_move == MODIFY
     assert action_modify == MODIFY
@@ -582,7 +593,7 @@ def test_replace_vs_delete_fileops_do_delete():
         FileOp(action="delete", path="src/components/AnalyticsTable.tsx", content=""),
     ]
     warnings = validate_replace_consistency(
-        sir, fileops, repo_state={"presentation.table"},
+        sir, fileops, structural_index=_si("presentation.table"),
     )
     assert warnings == [], f"Replace consistency warnings: {warnings}"
 
@@ -628,8 +639,8 @@ def test_global_regression_5_nodes_0_orphans():
 
     # 0 orphan nodes
     targets = {e.target for e in graph.edges}
-    for nid in graph.nodes:
-        if nid == "Page":
+    for nid, node in graph.nodes.items():
+        if node.type == "Page":
             continue
         assert nid in targets, f"Node {nid} is orphan (no incoming edge)"
 
@@ -637,7 +648,8 @@ def test_global_regression_5_nodes_0_orphans():
     from app.graphir.layout import LayoutDerivationEngine
     layout = LayoutDerivationEngine.derive(graph)
     assert layout is not None
-    assert layout.root == "Page"
+    root_node_id = next(nid for nid, n in graph.nodes.items() if n.type == "Page")
+    assert layout.root == root_node_id
 
 
 def test_global_regression_0_layout_conflicts():
