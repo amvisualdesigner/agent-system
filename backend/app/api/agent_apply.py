@@ -75,6 +75,11 @@ def agent_apply(req: ApplyRequest):
     state = load_run_state(run_id)
 
     if state is None:
+        if req.plan is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No run state and no plan provided. Call /agent/confirm first or pass a plan.",
+            )
         # Backward-compatible path: orchestrator sending legacy plan without
         # prior /agent/interpret or /agent/confirm. Auto-init the run state.
         _auto_init_run_state(run_id, req.plan)
@@ -104,8 +109,11 @@ def agent_apply(req: ApplyRequest):
     context = build_context(run_id)
     context.workspace = create_worktree(run_id)
 
+    # Use persisted plan when none passed (state machine flow)
+    plan = req.plan or state.get("compiled_plan")
+
     try:
-        result = apply_engine(run_id, req.plan, context, dry_run=req.dry_run)
+        result = apply_engine(run_id, plan, context, dry_run=req.dry_run)
         transition_phase(run_id, RunPhase.COMPLETED)
         return result
     except Exception as e:

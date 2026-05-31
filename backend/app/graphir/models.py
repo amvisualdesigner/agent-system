@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 
 class EdgeRole(Enum):
@@ -262,18 +262,24 @@ class GraphIRDraft:
         )
 
 
+PipelineRoute = Literal["constraint", "renderer", "composition_sync", "delete_inject", "unknown"]
+
+
 @dataclass
 class FileOp:
     action: str
     path: str
     content: str
+    pipeline_route: PipelineRoute = "unknown"
     metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        base = {"action": self.action, "path": self.path, "content": self.content}
-        if self.metadata and "pipeline_route" in self.metadata:
-            base["pipeline_route"] = self.metadata["pipeline_route"]
-        return base
+        return {
+            "action": self.action,
+            "path": self.path,
+            "content": self.content,
+            "pipeline_route": self.pipeline_route,
+        }
 
 
 @dataclass

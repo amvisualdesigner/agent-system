@@ -221,7 +221,7 @@ class RepositoryAwareRenderer:
         # ── Audit: annotate each FileOp with pipeline route ──
         route = exec_ctx.active_route if exec_ctx else "unknown"
         for fop in fileops:
-            fop.metadata["pipeline_route"] = route
+            fop.pipeline_route = route
 
         return fileops
 

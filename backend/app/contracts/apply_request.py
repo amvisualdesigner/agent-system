@@ -5,5 +5,5 @@ from pydantic import BaseModel
 
 class ApplyRequest(BaseModel):
     run_id: Optional[str] = None
-    plan: dict
+    plan: dict | None = None
     dry_run: bool = False

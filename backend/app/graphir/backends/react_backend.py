@@ -164,7 +164,7 @@ class ReactBackend(BackendRenderer):
                 content = self._inject_composition(content, composition)
 
             file_path = FilePathResolver.resolve(ctx, config)
-            fileops.append(FileOp(action="create", path=file_path, content=content))
+            fileops.append(FileOp(action="create", path=file_path, content=content, pipeline_route="renderer"))
             ReactBackend.add_trace(uinode.id, "emitted", component=uinode.component, props=dict(uinode.props))
 
         return fileops

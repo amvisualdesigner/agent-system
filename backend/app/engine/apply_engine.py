@@ -482,7 +482,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         workspace_root=context.workspace,
         worktree_id=f"agent-{run_id[:8]}",
         artifacts_dir=context.artifacts,
-        active_route="constraint" if FEATURE_FLAGS.get("constraint_graph", False) else "legacy",
+        active_route="constraint" if FEATURE_FLAGS.get("constraint_graph", False) else "renderer",
     )
 
     skill_ir = plan.get("skill_ir")
@@ -849,7 +849,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         for op in delete_targets:
             target = op["target"]
             for fp in cap_files.get(target, []):
-                fileops.append(FileOp(action="delete", path=fp, content=""))
+                fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
 
     # ── Translate replace_pairs to file operations ──
     # StructuralIR.replace_pairs preserva intención semántica.
@@ -860,7 +860,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         for old_cap, _new_cap in structural_ir.replace_pairs:
             if structural_index.exists(old_cap):
                 for fp in cap_files.get(old_cap, []):
-                    fileops.append(FileOp(action="delete", path=fp, content=""))
+                    fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
 
     # ── Validate replace_pairs consistency ──
     from app.engine.structural_completion import validate_replace_consistency

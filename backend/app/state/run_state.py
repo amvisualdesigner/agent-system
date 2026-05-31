@@ -14,7 +14,7 @@ from app.intent.models import RunPhase, RunState, validate_transition
 
 logger = logging.getLogger(__name__)
 
-STATE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "run_states")
+STATE_DIR = os.environ.get("RUNS_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "run_states"))
 
 
 def _ensure_dir() -> None:

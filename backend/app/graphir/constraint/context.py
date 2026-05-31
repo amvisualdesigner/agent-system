@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-PipelineRoute = Literal["constraint", "legacy", "shadow", "replay", "unknown"]
+PipelineRoute = Literal["constraint", "renderer", "shadow", "replay", "unknown"]
 
 
 def _get_settings():

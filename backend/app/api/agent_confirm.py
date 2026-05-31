@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.config.feature_flags import FEATURE_FLAGS
 from app.intent.models import ConfirmedIntent, IntentAction, RunPhase
 from app.intent.plan_compiler import compile_plan, expand_container_actions
 from app.contracts.skill_registry import SkillContract, get_contract
@@ -161,10 +162,20 @@ def agent_confirm(req: ConfirmRequest):
     gate_blocked = False
     gate = {"blocked": gate_blocked, "reason": None}
 
+    # 3F: Estimate pipeline routes per operation
+    constraint_enabled = FEATURE_FLAGS.get("constraint_graph", False)
+    route_counts: dict[str, int] = {}
+    for op in structural_ops:
+        route = "delete_inject" if op["action"] == "DELETE" else (
+            "constraint" if constraint_enabled else "renderer"
+        )
+        route_counts[route] = route_counts.get(route, 0) + 1
+
     plan_preview = {
         "summary_human": summary,
         "structural_operations": structural_ops,
         "estimated_files": estimated_files,
+        "routes": route_counts.copy(),
     }
 
     result = {
