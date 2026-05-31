@@ -828,6 +828,158 @@ class TestCompleteStructureWithActions:
         assert len(bar_deletes) == 1, f"No DELETE for chart.bar in operations: {ops}"
 
 
+class TestCompositionSync:
+    """3E: Page composition sync — CREATE/DELETE child → parent MODIFY."""
+
+    def _make_index(self, *caps: str):
+        from app.engine.structural_index import StructuralIndex
+        from app.engine.state_adapter import ComponentInstanceInfo
+        mapping = {
+            cap: [ComponentInstanceInfo(capability=cap, path=cap.rsplit(".", 1)[-1])]
+            for cap in caps
+        }
+        return StructuralIndex.from_mapping(mapping)
+
+    def test_build_composition_map_dashboard(self, dashboard_contract):
+        """dashboard.sales_overview has kpi_row and timeseries as children of layout.page."""
+        from app.engine.structural_completion import _build_contract_composition_map
+        cmap = _build_contract_composition_map(dashboard_contract)
+        assert "presentation.kpi_row" in cmap
+        assert "presentation.timeseries" in cmap
+        assert cmap["presentation.kpi_row"] == "layout.page"
+        assert cmap["presentation.timeseries"] == "layout.page"
+
+    def test_build_composition_map_no_page_contract(self, table_contract):
+        """analytics.table has no Page capability → empty map."""
+        from app.engine.structural_completion import _build_contract_composition_map
+        cmap = _build_contract_composition_map(table_contract)
+        assert cmap == {}
+
+    def test_create_child_promotes_parent_to_modify(self, dashboard_contract):
+        """Add trend chart → CREATE timeseries → layout.page must be MODIFY."""
+        semantic = SemanticResolution(
+            semantic_params={"metric": "revenue"},
+            semantic_provenance={"metric": "user_explicit"},
+            confidence=0.9,
+            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"layout.page", "presentation.kpi_row"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        actions = {c.name: c.action for c in ir.capabilities}
+        assert actions.get("presentation.timeseries") == "CREATE", str(actions)
+        assert actions.get("layout.page") == "MODIFY", (
+            f"layout.page should be MODIFY when child is CREATE, got {actions.get('layout.page')}"
+        )
+
+    def test_delete_child_promotes_parent_to_modify(self, dashboard_contract):
+        """Remove KPI row → DELETE kpi_row → layout.page must be MODIFY."""
+        semantic = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.9,
+            actions=[{"verb": "remove", "object": "kpi", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"layout.page", "presentation.kpi_row", "presentation.timeseries"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        actions = {c.name: c.action for c in ir.capabilities}
+        assert actions.get("presentation.kpi_row") == "DELETE", str(actions)
+        assert actions.get("layout.page") == "MODIFY", (
+            f"layout.page should be MODIFY when child is DELETE, got {actions.get('layout.page')}"
+        )
+
+    def test_modify_child_does_not_promote_parent(self, dashboard_contract):
+        """Update KPI metrics → MODIFY kpi_row → layout.page stays KEEP."""
+        semantic = SemanticResolution(
+            semantic_params={"metrics": ["revenue"]},
+            semantic_provenance={"metrics": "user_explicit"},
+            confidence=0.9,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"layout.page", "presentation.kpi_row", "presentation.timeseries"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        actions = {c.name: c.action for c in ir.capabilities}
+        assert actions.get("presentation.kpi_row") == "MODIFY", str(actions)
+        # MODIFY on child should NOT promote parent — no composition change needed
+        assert actions.get("layout.page") in ("KEEP",), (
+            f"layout.page should stay KEEP on child MODIFY, got {actions.get('layout.page')}"
+        )
+
+    def test_no_composition_map_contract(self, table_contract):
+        """analytics.table has no composition map → CREATE doesn't touch parent."""
+        semantic = SemanticResolution(
+            semantic_params={"columns": ["A", "B"]},
+            semantic_provenance={"columns": "user_explicit"},
+            confidence=0.9,
+            actions=[{"verb": "create", "object": "table", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"columns": ["A", "B"]}, "analytics.table"), table_contract,
+        )
+        ir = complete_structure(semantic, contract_res, table_contract, structural_index=None)
+        # Only presentation.table should exist (no page, no composition)
+        caps = [c for c in ir.capabilities if c.action != "KEEP"]
+        # The key assertion: no parent capability gets promoted spuriously
+        page_caps = [c for c in ir.capabilities if "layout." in c.name or "page" in c.name]
+        assert len(page_caps) == 0, (
+            f"No page capability should exist for analytics.table: {[c.name for c in page_caps]}"
+        )
+        assert any(c.name == "presentation.table" for c in ir.capabilities)
+
+    def test_parent_already_modify_no_duplicate(self, dashboard_contract):
+        """When parent is already MODIFY, composition sync doesn't double-promote."""
+        semantic = SemanticResolution(
+            semantic_params={"metric": "revenue"},
+            semantic_provenance={"metric": "user_explicit"},
+            confidence=0.9,
+            actions=[
+                {"verb": "modify", "object": "dashboard", "confidence": 0.9},
+                {"verb": "create", "object": "timeseries", "confidence": 0.9},
+            ],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"layout.page", "presentation.kpi_row"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        actions = {c.name: c.action for c in ir.capabilities}
+        # layout.page should be MODIFY (from "modify dashboard")
+        assert actions.get("layout.page") == "MODIFY", str(actions)
+        # timeseries should be CREATE (from "create timeseries")
+        assert actions.get("presentation.timeseries") == "CREATE", str(actions)
+        # Verify layout.page appears exactly once in operations
+        ops = ir.operations
+        page_ops = [o for o in ops if o["target"] == "layout.page"]
+        assert len(page_ops) == 1, f"Expected exactly 1 layout.page op, got {len(page_ops)}: {page_ops}"
+
+    def test_composition_sync_warning(self, dashboard_contract):
+        """Composition sync should emit a warning in completion_warnings."""
+        semantic = SemanticResolution(
+            semantic_params={"metric": "revenue"},
+            semantic_provenance={"metric": "user_explicit"},
+            confidence=0.9,
+            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        repo = {"layout.page", "presentation.kpi_row"}
+        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        sync_warnings = [w for w in ir.completion_warnings if "composition sync" in w]
+        assert len(sync_warnings) >= 1, (
+            f"Expected composition sync warning, got: {ir.completion_warnings}"
+        )
+        assert "layout.page" in sync_warnings[0]
+
+
 class MockSkillIR:
     """Minimal SkillIR-like object for test compatibility."""
     def __init__(self, params, contract_id, confidence=1.0):

@@ -272,10 +272,10 @@ class TestStructuralGrounding:
         assert graph is not None, "Should produce GraphIR"
 
     def test_existing_page_add_child_creates_child(self, dashboard_contract):
-        """Escenario 5: existing page + 'add kpi' → CREATE for kpi_row, KEEP for page.
+        """Escenario 5: existing page + 'add kpi' → CREATE kpi_row, MODIFY page (3E).
 
-        Only CREATE/MODIFY operations produce GraphIR nodes.
-        KEEP capabilities are filtered out (they exist in worktree, no change).
+        3E composition sync ensures parent page is also MODIFY when a child is
+        CREATED, so the renderer regenerates the page with correct imports/JSX.
         """
         idx = structural_index("layout.page")
         ir, graph = run_pipeline(
@@ -293,12 +293,16 @@ class TestStructuralGrounding:
         assert op_map.get("presentation.kpi_row") == CREATE, (
             f"kpi_row should be CREATE, got: {op_map}"
         )
-        # layout.page es KEEP → no produce nodo
-        assert "layout.page" not in op_map, "Page should be KEEP (no operation)"
+        # 3E: page should be MODIFY when child is CREATED (composition sync)
+        assert op_map.get("layout.page") == MODIFY, (
+            f"Page should be MODIFY on child CREATE (3E), got: {op_map}"
+        )
         assert not isinstance(graph, Exception), (
             f"Builder should succeed: {graph}"
         )
         assert _find_node_by_type(graph, "KpiRow") is not None, "Should have KpiRow node"
+        # Page node should also be present (composition sync)
+        assert _find_node_by_type(graph, "Page") is not None, "Should have Page node from composition sync"
 
     def test_empty_operations_raises_ambiguous(self):
         """Escenario 6: all-KEEP or all-DELETE StructuralIR → AmbiguousStructuralTargetError.

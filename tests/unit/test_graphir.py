@@ -719,5 +719,76 @@ class TestEdgeRolePurityEnforcement(unittest.TestCase):
             GraphIREdge(source="a", target="b", role="HEADER")  # type: ignore
 
 
+class TestFilePathResolver(unittest.TestCase):
+    """FilePathResolver with file_path_overrides."""
+
+    def setUp(self):
+        from app.graphir.backends.base import BackendConfig
+
+        self.base_config = BackendConfig(
+            output_base_path="src/pages/dashboard/",
+            path_map={
+                "Page": "Page.tsx",
+                "KpiRow": "components/KpiRow.tsx",
+            },
+        )
+
+    def _ctx(self, node_type: str):
+        """Create a minimal UIGeneratorContext stub."""
+        from types import SimpleNamespace
+        return SimpleNamespace(type=node_type)
+
+    def test_resolve_uses_path_map_when_no_overrides(self):
+        from app.graphir.path_resolver import FilePathResolver
+        result = FilePathResolver.resolve(self._ctx("Page"), self.base_config)
+        assert "src/pages/dashboard/Page.tsx" in result, f"Got {result}"
+
+    def test_resolve_fallback_when_no_path_map(self):
+        from app.graphir.path_resolver import FilePathResolver
+        result = FilePathResolver.resolve(self._ctx("Unknown"), self.base_config)
+        assert "src/pages/dashboard/Unknown.tsx" in result, f"Got {result}"
+
+    def test_file_path_override_takes_precedence(self):
+        from app.graphir.backends.base import BackendConfig
+        from app.graphir.path_resolver import FilePathResolver
+
+        config = BackendConfig(
+            output_base_path="src/pages/dashboard/",
+            path_map={"Page": "Page.tsx"},
+            file_path_overrides={"Page": "frontend/src/pages/dashboard/SalesOverviewPage.tsx"},
+        )
+        result = FilePathResolver.resolve(self._ctx("Page"), config)
+        assert result == "frontend/src/pages/dashboard/SalesOverviewPage.tsx", f"Got {result}"
+
+    def test_file_path_override_no_contract_path_concatenation(self):
+        """Override path should NOT be concatenated with output_base_path."""
+        from app.graphir.backends.base import BackendConfig
+        from app.graphir.path_resolver import FilePathResolver
+
+        config = BackendConfig(
+            output_base_path="src/pages/dashboard/",
+            path_map={"KpiRow": "components/KpiRow.tsx"},
+            file_path_overrides={"KpiRow": "frontend/src/components/dashboard/KpiRow.tsx"},
+        )
+        result = FilePathResolver.resolve(self._ctx("KpiRow"), config)
+        # Must NOT be "src/pages/dashboard/frontend/src/components/dashboard/KpiRow.tsx"
+        assert "src/pages/dashboard" not in result, f"base_path leaked into override: {result}"
+        assert result == "frontend/src/components/dashboard/KpiRow.tsx", f"Got {result}"
+
+    def test_override_only_applies_to_specified_types(self):
+        from app.graphir.backends.base import BackendConfig
+        from app.graphir.path_resolver import FilePathResolver
+
+        config = BackendConfig(
+            output_base_path="src/pages/dashboard/",
+            path_map={"Page": "Page.tsx", "KpiRow": "components/KpiRow.tsx"},
+            file_path_overrides={"Page": "frontend/src/pages/dashboard/SalesOverviewPage.tsx"},
+        )
+        page_result = FilePathResolver.resolve(self._ctx("Page"), config)
+        kpi_result = FilePathResolver.resolve(self._ctx("KpiRow"), config)
+        assert page_result == "frontend/src/pages/dashboard/SalesOverviewPage.tsx"
+        assert kpi_result == "src/pages/dashboard/components/KpiRow.tsx"
+
+
 if __name__ == "__main__":
     unittest.main()

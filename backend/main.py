@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 from app.api.agent_plan import router as agent_plan_router
 from app.api.agent_apply import router as agent_apply
+from app.api.agent_interpret import router as agent_interpret_router
+from app.api.agent_confirm import router as agent_confirm_router
 from app.utils.state import read_state
 from app.utils.run_id import validate_run_id
 from app.utils.path_guard import guard_within
@@ -24,6 +26,8 @@ def value_error_handler(request, exc):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 app.include_router(agent_plan_router)
 app.include_router(agent_apply)
+app.include_router(agent_interpret_router)
+app.include_router(agent_confirm_router)
 
 # -------- MODELOS --------
 class RepoFile(BaseModel):

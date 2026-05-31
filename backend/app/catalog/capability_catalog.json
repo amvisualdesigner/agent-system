@@ -1,0 +1,470 @@
+{
+  "version": 1,
+  "contracts": {
+    "dashboard.sales_overview": {
+      "label": "Sales dashboard",
+      "description": "KPI row, trend chart, executive layout",
+      "capabilities": [
+        {
+          "id": "presentation.kpi_row",
+          "label": "KPI row",
+          "graphir_type": "KpiRow",
+          "synonyms": [
+            "kpi",
+            "kpi row",
+            "metrics row",
+            "indicators",
+            "metric",
+            "metrics"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete",
+              "hide",
+              "delete kpi",
+              "remove kpi"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "set",
+              "edit",
+              "modify",
+              "update metrics"
+            ]
+          },
+          "params_schema_ref": "metrics"
+        },
+        {
+          "id": "presentation.timeseries",
+          "label": "Trend chart",
+          "graphir_type": "Timeseries",
+          "synonyms": [
+            "timeseries",
+            "line chart",
+            "trend",
+            "line",
+            "linechart"
+          ],
+          "filename_aliases": [
+            "line-chart",
+            "linechart"
+          ],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete",
+              "hide"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "set",
+              "modify"
+            ]
+          },
+          "params_schema_ref": "timeseries_metric"
+        },
+        {
+          "id": "layout.page",
+          "label": "Dashboard page",
+          "graphir_type": "Page",
+          "synonyms": [
+            "page",
+            "dashboard",
+            "overview",
+            "sales overview"
+          ],
+          "filename_aliases": [
+            "sales-overview-page",
+            "salesoverviewpage"
+          ],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        },
+        {
+          "id": "domain.sales",
+          "label": "Sales domain",
+          "graphir_type": "Domain",
+          "synonyms": [
+            "sales",
+            "sales data"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": [
+        {
+          "text": "Remove the KPI row from the sales dashboard",
+          "intent": {
+            "actions": [
+              {
+                "verb": "remove",
+                "target_capability": "presentation.kpi_row"
+              }
+            ]
+          }
+        },
+        {
+          "text": "Update KPI metrics to revenue and growth",
+          "intent": {
+            "actions": [
+              {
+                "verb": "modify",
+                "target_capability": "presentation.kpi_row",
+                "params": {
+                  "metrics": [
+                    "revenue",
+                    "growth"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "text": "Remove the line chart from the sales dashboard",
+          "intent": {
+            "actions": [
+              {
+                "verb": "remove",
+                "target_capability": "presentation.timeseries"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "analytics.table": {
+      "label": "Data table",
+      "description": "Columnar data table with metrics",
+      "capabilities": [
+        {
+          "id": "presentation.table",
+          "label": "Data table",
+          "graphir_type": "AnalyticsTable",
+          "synonyms": [
+            "table",
+            "data table",
+            "tabular",
+            "analytics table",
+            "columns"
+          ],
+          "filename_aliases": [
+            "analytics-table",
+            "analytictable",
+            "data-table",
+            "datatable"
+          ],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete",
+              "hide"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify"
+            ]
+          },
+          "params_schema_ref": "columns"
+        }
+      ],
+      "utterance_examples": [
+        {
+          "text": "Show revenue and growth columns in the table",
+          "intent": {
+            "actions": [
+              {
+                "verb": "modify",
+                "target_capability": "presentation.table",
+                "params": {
+                  "columns": [
+                    "revenue",
+                    "growth"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "analytics.filter": {
+      "label": "Filter panel",
+      "description": "Filter panel for data exploration",
+      "capabilities": [
+        {
+          "id": "presentation.filter_panel",
+          "label": "Filter panel",
+          "graphir_type": "FilterPanel",
+          "synonyms": [
+            "filter",
+            "facet",
+            "filters",
+            "filter panel"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "analytics.chart_bar": {
+      "label": "Bar chart",
+      "description": "Bar chart visualization",
+      "capabilities": [
+        {
+          "id": "presentation.chart.bar",
+          "label": "Bar chart",
+          "graphir_type": "BarChart",
+          "synonyms": [
+            "bar chart",
+            "barchart",
+            "bar graph",
+            "chart"
+          ],
+          "filename_aliases": [
+            "bar-chart",
+            "barchart"
+          ],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": "categories"
+        }
+      ],
+      "utterance_examples": []
+    },
+    "analytics.metric_card": {
+      "label": "Metric card",
+      "description": "Single metric display card",
+      "capabilities": [
+        {
+          "id": "presentation.metric_card",
+          "label": "Metric card",
+          "graphir_type": "MetricCard",
+          "synonyms": [
+            "metric card",
+            "card",
+            "metric"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "embed.external": {
+      "label": "Embedded content",
+      "description": "Embedded external content iframe",
+      "capabilities": [
+        {
+          "id": "presentation.embed",
+          "label": "Embedded content",
+          "graphir_type": "Embed",
+          "synonyms": [
+            "embed",
+            "embedded",
+            "iframe"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "interaction.search": {
+      "label": "Search",
+      "description": "Search bar component",
+      "capabilities": [
+        {
+          "id": "interaction.search",
+          "label": "Search",
+          "graphir_type": "SearchBar",
+          "synonyms": [
+            "search",
+            "search bar"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "interaction.form": {
+      "label": "Form",
+      "description": "Input form component",
+      "capabilities": [
+        {
+          "id": "interaction.form",
+          "label": "Form",
+          "graphir_type": "Form",
+          "synonyms": [
+            "form",
+            "input form"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "data.export": {
+      "label": "Data export",
+      "description": "Data export button",
+      "capabilities": [
+        {
+          "id": "data.export",
+          "label": "Export",
+          "graphir_type": "ExportButton",
+          "synonyms": [
+            "export",
+            "download"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    },
+    "data.drilldown": {
+      "label": "Drilldown",
+      "description": "Drilldown navigation component",
+      "capabilities": [
+        {
+          "id": "data.drilldown",
+          "label": "Drilldown",
+          "graphir_type": "Drilldown",
+          "synonyms": [
+            "drilldown",
+            "drill down"
+          ],
+          "filename_aliases": [],
+          "verbs": {
+            "remove": [
+              "remove",
+              "delete"
+            ],
+            "modify": [
+              "update",
+              "change",
+              "modify",
+              "edit"
+            ]
+          },
+          "params_schema_ref": null
+        }
+      ],
+      "utterance_examples": []
+    }
+  }
+}

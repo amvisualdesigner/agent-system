@@ -18,6 +18,18 @@ class RunResponse(BaseModel):
         return validate_run_id(v)
 
 
+class ConfirmRequest(BaseModel):
+    contract_id: str = ""
+    contract_version: int = 1
+    actions: List[Dict[str, Any]] = []
+    params: Dict[str, Any] = {}
+    user_message: str = ""
+
+
+class ApplyRequest(BaseModel):
+    dry_run: bool = False
+
+
 class SSEEvent(BaseModel):
     type: str
     node: Optional[str] = None

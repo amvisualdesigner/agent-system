@@ -11,7 +11,7 @@ async def validate_plan_node(state: AgentState) -> dict:
     run_id = state["run_id"]
     logger.info("node=validate_plan run_id=%s", run_id)
 
-    phase = state.get("phase", "planning")
+    phase = state.get("phase", "confirming")
 
     if state.get("cancelled"):
         logger.warning("[run_id=%s] validate_plan cancelled", run_id)
@@ -27,8 +27,7 @@ async def validate_plan_node(state: AgentState) -> dict:
     )
 
     plan = state.get("plan")
-    retry_count = state.get("retry_count", 0)
-    input_data = {"plan_exists": plan is not None, "retry_count": retry_count}
+    input_data = {"plan_exists": plan is not None}
 
     if plan is None:
         logger.warning("[run_id=%s] validate_plan: no plan", run_id)
@@ -37,7 +36,8 @@ async def validate_plan_node(state: AgentState) -> dict:
         await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
         return {**state, "trace": trace[-50:], "phase": "error", "error": "no_plan", "_next_node": "return_result"}
 
-    actions = plan.get("actions", [])
+    # Compiled plan from /agent/confirm or legacy plan
+    actions = plan.get("actions") or plan.get("semantic_frame", {}).get("actions", [])
     skill_ir = plan.get("skill_ir")
     has_valid_skill_ir = (
         skill_ir
@@ -45,32 +45,21 @@ async def validate_plan_node(state: AgentState) -> dict:
         and skill_ir.get("contract_id")
         and skill_ir.get("confidence", 0) >= 0.5
     )
-    valid = has_valid_skill_ir or (
-        len(actions) > 0 and all(
-            a.get("file_path") or (a.get("target") and a.get("name"))
-            for a in actions
-        )
-    )
+    valid = has_valid_skill_ir or len(actions) > 0
 
     if valid:
         logger.info("[run_id=%s] validate_plan: valid (%d actions)", run_id, len(actions))
         output = {"valid": True}
         trace = _add_trace(state, "validate_plan", input_data, output, 0)
         await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-        return {**state, "trace": trace[-50:], "_next_node": "call_apply"}
+        # Go to awaiting_apply — user must trigger apply via POST /run/{id}/apply
+        return {**state, "trace": trace[-50:], "phase": "awaiting_apply", "_next_node": "return_result"}
 
-    if retry_count < 1:
-        logger.info("[run_id=%s] validate_plan: retrying (retry_count=%d)", run_id, retry_count)
-        output = {"valid": False, "decision": "retry"}
-        trace = _add_trace(state, "validate_plan", input_data, output, 0)
-        await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-        return {**state, "trace": trace[-50:], "_next_node": "call_plan", "retry_count": retry_count + 1}
-
-    logger.warning("[run_id=%s] validate_plan: max retries exceeded", run_id)
-    output = {"valid": False, "decision": "abort", "reason": "max_retries_exceeded"}
+    logger.warning("[run_id=%s] validate_plan: invalid plan (no actions, no skill_ir)", run_id)
+    output = {"valid": False, "reason": "no_valid_actions"}
     trace = _add_trace(state, "validate_plan", input_data, output, 0)
     await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-    return {**state, "trace": trace[-50:], "_next_node": "return_result", "error": "max_retries_exceeded", "phase": "error"}
+    return {**state, "trace": trace[-50:], "_next_node": "return_result", "error": "no_valid_actions", "phase": "error"}
 
 
 def _add_trace(state, node, input_data, output, latency):

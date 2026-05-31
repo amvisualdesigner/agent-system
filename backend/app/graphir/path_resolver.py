@@ -21,13 +21,18 @@ from app.graphir.ui_ir import UIGeneratorContext
 
 
 class FilePathResolver:
-    """Path resolution — type→path_map→derive with single fallback."""
+    """Path resolution — file_path_overrides → path_map → derive with single fallback."""
 
     @staticmethod
     def resolve(node: UIGeneratorContext, config: BackendConfig) -> str:
+        # 1. Explicit file path overrides (real repo file layout)
+        if config.file_path_overrides and node.type in config.file_path_overrides:
+            return os.path.normpath(config.file_path_overrides[node.type])
+        # 2. path_map + output_base_path (contract template conventions)
         if node.type in config.path_map:
             override = config.path_map[node.type]
             base = config.output_base_path.rstrip("/")
             return os.path.normpath(f"{base}/{override}")
+        # 3. Fallback: output_base_path + type + extension
         base = config.output_base_path.rstrip("/")
         return os.path.normpath(f"{base}/{node.type}{config.file_extension}")

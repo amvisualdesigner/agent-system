@@ -11,10 +11,14 @@ from sse_starlette.sse import EventSourceResponse
 
 from state import AgentState
 from graph import compiled_graph
-from models import RunRequest, RunResponse, SSEEvent
+from models import (
+    RunRequest, RunResponse,
+    ConfirmRequest, ApplyRequest,
+    SSEEvent,
+)
 from run_id import validate_run_id
 from sse import emitter
-from store import list_snapshots, load_snapshot
+from store import save_snapshot, load_snapshot, list_snapshots
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,8 +30,8 @@ logger = logging.getLogger("orchestrator.main")
 background_tasks: dict[str, asyncio.Task] = {}
 
 
-async def run_graph(run_id: str, task: str):
-    initial_state = {
+def _build_initial_state(run_id: str, task: str, start_node: str = "interpret") -> dict:
+    return {
         "task": task,
         "run_id": run_id,
         "plan": None,
@@ -41,11 +45,18 @@ async def run_graph(run_id: str, task: str):
         "backend_run_id": None,
         "planner_meta": None,
         "_next_node": None,
+        "start_node": start_node,
+        "interpretation": None,
+        "confirmed_intent": None,
+        "plan_preview": None,
     }
 
-    logger.info("[run_id=%s] graph started task=%s", run_id, task[:80])
+
+async def run_graph(state: dict):
+    run_id = state["run_id"]
+    logger.info("[run_id=%s] graph started start_node=%s task=%s", run_id, state.get("start_node"), (state.get("task") or "")[:80])
     try:
-        await compiled_graph.ainvoke(initial_state)
+        await compiled_graph.ainvoke(state)
         logger.info("[run_id=%s] graph completed", run_id)
     except asyncio.CancelledError:
         logger.warning("[run_id=%s] graph cancelled", run_id)
@@ -98,10 +109,96 @@ async def create_run(req: RunRequest):
 
     emitter.register(run_id)
 
-    task = asyncio.create_task(run_graph(run_id, req.task))
+    state = _build_initial_state(run_id, req.task, start_node="interpret")
+    task = asyncio.create_task(run_graph(state))
     background_tasks[run_id] = task
 
     return RunResponse(run_id=run_id)
+
+
+@app.post("/run/{run_id}/confirm")
+async def confirm_run(run_id: str, req: ConfirmRequest):
+    validate_run_id(run_id)
+
+    snapshot = load_snapshot(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    phase = snapshot.get("phase", "")
+    if phase != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot confirm in phase '{phase}'. Expected 'awaiting_confirmation'.",
+        )
+
+    if run_id in background_tasks:
+        raise HTTPException(status_code=409, detail="run already in progress")
+
+    logger.info("[run_id=%s] POST /run/%s/confirm", run_id, run_id)
+
+    # Build confirmed_intent from user's confirmation + existing interpretation
+    interpretation = snapshot.get("interpretation", {})
+    confirmed_intent = {
+        "contract_id": req.contract_id or interpretation.get("contract_id", ""),
+        "contract_version": req.contract_version or interpretation.get("contract_version", 1),
+        "actions": req.actions or interpretation.get("proposed_actions", []),
+        "params": req.params or interpretation.get("params_proposed", {}),
+        "user_message": req.user_message,
+    }
+
+    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm")
+    state["interpretation"] = interpretation
+    state["confirmed_intent"] = confirmed_intent
+    state["phase"] = "confirming"
+
+    emitter.register(run_id)
+    task = asyncio.create_task(run_graph(state))
+    background_tasks[run_id] = task
+
+    return {"status": "accepted", "run_id": run_id, "message": "confirming"}
+
+
+@app.post("/run/{run_id}/apply")
+async def apply_run(run_id: str, req: ApplyRequest = ApplyRequest()):
+    validate_run_id(run_id)
+
+    snapshot = load_snapshot(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    phase = snapshot.get("phase", "")
+    if phase not in ("awaiting_apply",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot apply in phase '{phase}'. Expected 'awaiting_apply'.",
+        )
+
+    if run_id in background_tasks:
+        raise HTTPException(status_code=409, detail="run already in progress")
+
+    # Check gate from plan_preview
+    plan_preview = snapshot.get("plan_preview", {})
+    gate = plan_preview.get("gate", {}) if isinstance(plan_preview, dict) else {}
+    if gate.get("blocked", False):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Gate blocked: {gate.get('reason', 'unknown')}",
+        )
+
+    logger.info("[run_id=%s] POST /run/%s/apply dry_run=%s", run_id, run_id, req.dry_run)
+
+    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="apply")
+    state["interpretation"] = snapshot.get("interpretation")
+    state["confirmed_intent"] = snapshot.get("confirmed_intent")
+    state["plan"] = snapshot.get("plan")
+    state["plan_preview"] = plan_preview
+    state["phase"] = "applying"
+
+    emitter.register(run_id)
+    task = asyncio.create_task(run_graph(state))
+    background_tasks[run_id] = task
+
+    return {"status": "accepted", "run_id": run_id, "message": "applying"}
 
 
 @app.get("/stream/{run_id}")

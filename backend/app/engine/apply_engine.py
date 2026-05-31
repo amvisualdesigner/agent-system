@@ -138,8 +138,15 @@ def _normalize(text: str) -> str:
 
 
 def _build_name_map() -> dict[str, str]:
-    """Build reverse lookup: filename pattern → capability name."""
+    """Build reverse lookup: filename pattern → capability name.
+
+    Dos fuentes:
+      1. STRUCTURAL_SCHEMA suffixes (PascalCase, no-underscore, raw)
+      2. FILENAME_ALIASES (mapeos explícitos para archivos reales
+         cuyos nombres no siguen el patrón del schema, ej: LineChart)
+    """
     from app.engine.structural_completion import STRUCTURAL_SCHEMA
+    from app.engine.aliases import FILENAME_ALIASES
     name_map: dict[str, str] = {}
     for cap_name in STRUCTURAL_SCHEMA:
         suffix = cap_name.rsplit(".", 1)[-1]
@@ -148,6 +155,8 @@ def _build_name_map() -> dict[str, str]:
         name_map[pascal.lower()] = cap_name
         name_map[suffix.replace("_", "").lower()] = cap_name
         name_map[suffix.lower()] = cap_name
+    for alias, cap_name in FILENAME_ALIASES.items():
+        name_map[alias.lower()] = cap_name
     return name_map
 
 
@@ -448,6 +457,25 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
     os.makedirs(context.artifacts, exist_ok=True)
 
+    # ── Gate guard: must have confirmed_intent and gate not blocked ──
+    plan_gate = plan.get("gate") if isinstance(plan, dict) else {}
+    if isinstance(plan_gate, dict) and plan_gate.get("blocked", False):
+        return {
+            "execution": {"status": "rejected", "reason": "gate_blocked", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
+
+    if isinstance(plan, dict) and "confirmed_intent" not in plan and "intents" not in plan.get("semantic_frame", {}):
+        # Allow plans that come from CompiledPlan (have intents)
+        pass
+
+    # ── Preflight: semantic_frame must exist and have actions ──
+    if not isinstance(plan, dict) or "semantic_frame" not in plan:
+        return {
+            "execution": {"status": "rejected", "reason": "no_semantic_frame", "diff": None, "operations": []},
+            "context": {"repo_snapshot": []},
+        }
+
     # ── Build ExecutionContext ──
     exec_ctx = ExecutionContext(
         run_id=run_id,
@@ -629,9 +657,22 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         comp = extract_component_name(f["path"])
         if comp:
             path_map[comp] = f["path"]
+
+    # Build file_path_overrides from real repo layout for existing capabilities.
+    # This ensures MODIFY operations go to the correct filesystem paths even when
+    # the contract's renderer paths don't match the actual repo structure
+    # (e.g., SalesOverviewPage.tsx instead of Page.tsx, or frontend/ prefix).
+    cap_files = _discover_repo_capability_files(context.workspace)
+    capabilities_map = contract.ast_template.get("capabilities", {})
+    file_path_overrides: dict[str, str] = {}
+    for comp_type, cap_id in capabilities_map.items():
+        if cap_id in cap_files and cap_files[cap_id]:
+            file_path_overrides[comp_type] = cap_files[cap_id][0]
+
     backend_config = BackendConfig(
         output_base_path=base_path,
         path_map=path_map,
+        file_path_overrides=file_path_overrides,
     )
 
     # ── Audit var holders ──

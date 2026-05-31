@@ -82,6 +82,9 @@ def agent_plan(req: PlanRequest):
         semantic_frame = build_frame_from_decomposition(req.task, dec_result)
         gate_result = confidence_gate(semantic_frame)
 
+        # Build shared actions list from semantic frame
+        plan_actions = [{"verb": a.verb, "object": a.direct_object, "confidence": a.confidence} for a in semantic_frame.actions]
+
         if gate_result.blocked:
             logger.warning(
                 "Pipeline blocked by confidence gate: %s | missing: %s",
@@ -89,7 +92,7 @@ def agent_plan(req: PlanRequest):
             )
             plan = {
                 "skill_ir": skill_ir.to_dict(),
-                "actions": [],
+                "actions": plan_actions,
                 "task": req.task,
                 "intents": intents_data,
                 "decomposition": {
@@ -99,7 +102,7 @@ def agent_plan(req: PlanRequest):
                     "unresolved": dec_result.unresolved,
                 },
                 "semantic_frame": {
-                    "actions": [{"verb": a.verb, "object": a.direct_object, "confidence": a.confidence} for a in semantic_frame.actions],
+                    "actions": plan_actions,
                     "objects": [{"type": o.type, "confidence": o.confidence} for o in semantic_frame.objects],
                     "constraints": [{"param": c.param, "value": c.value, "source": c.source} for c in semantic_frame.constraints],
                     "confidence": semantic_frame.confidence,
@@ -127,7 +130,7 @@ def agent_plan(req: PlanRequest):
 
         plan = {
             "skill_ir": skill_ir.to_dict(),
-            "actions": [],
+            "actions": plan_actions,
             "task": req.task,
             "intents": intents_data,
             "decomposition": {
@@ -137,7 +140,7 @@ def agent_plan(req: PlanRequest):
                 "unresolved": dec_result.unresolved,
             },
             "semantic_frame": {
-                "actions": [{"verb": a.verb, "object": a.direct_object, "confidence": a.confidence} for a in semantic_frame.actions],
+                "actions": plan_actions,
                 "objects": [{"type": o.type, "confidence": o.confidence} for o in semantic_frame.objects],
                 "constraints": [{"param": c.param, "value": c.value, "source": c.source} for c in semantic_frame.constraints],
                 "confidence": semantic_frame.confidence,

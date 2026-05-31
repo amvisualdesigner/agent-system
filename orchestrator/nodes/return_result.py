@@ -14,6 +14,7 @@ async def return_result_node(state: AgentState) -> dict:
 
     error = state.get("error")
     cancelled = state.get("cancelled", False)
+    phase = state.get("phase", "completed")
 
     if cancelled:
         logger.warning("[run_id=%s] result: cancelled", run_id)
@@ -21,6 +22,12 @@ async def return_result_node(state: AgentState) -> dict:
     elif error:
         logger.warning("[run_id=%s] result: error=%s", run_id, error)
         result = RunResult(run_id=run_id, status="error", error=error)
+    elif phase == "awaiting_confirmation":
+        logger.info("[run_id=%s] result: awaiting_confirmation", run_id)
+        result = RunResult(run_id=run_id, status="awaiting_confirmation")
+    elif phase == "awaiting_apply":
+        logger.info("[run_id=%s] result: awaiting_apply", run_id)
+        result = RunResult(run_id=run_id, status="awaiting_apply")
     else:
         result_data = state.get("execution") or {}
         exec_block = result_data.get("execution", {})
@@ -47,16 +54,16 @@ async def return_result_node(state: AgentState) -> dict:
             status=status,
         )
 
-    phase = "completed" if result.status in ("ok", "clarification_needed") else "error"
+    phase_label = "completed" if result.status in ("ok", "clarification_needed") else phase
     if cancelled:
-        phase = "cancelled"
+        phase_label = "cancelled"
 
-    event_type = "result" if result.status in ("ok", "clarification_needed") else "error"
+    event_type = "result" if result.status in ("ok", "clarification_needed", "awaiting_confirmation", "awaiting_apply") else "error"
 
     snapshot = {
         "run_id": run_id,
         "task": state.get("task"),
-        "phase": phase,
+        "phase": phase_label,
         "status": result.status,
         "plan": result.plan,
         "execution": result.execution,
@@ -65,6 +72,10 @@ async def return_result_node(state: AgentState) -> dict:
         "trace": state.get("trace"),
         "error": result.error,
         "planner_meta": state.get("planner_meta"),
+        # UI-3: persist for resume endpoints
+        "interpretation": state.get("interpretation"),
+        "confirmed_intent": state.get("confirmed_intent"),
+        "plan_preview": state.get("plan_preview"),
     }
     try:
         save_snapshot(run_id, snapshot)
@@ -74,11 +85,11 @@ async def return_result_node(state: AgentState) -> dict:
     await emitter.emit(
         run_id,
         SSEEvent(
-            type=event_type, node="return_result", phase=phase,
+            type=event_type, node="return_result", phase=phase_label,
             run_id=run_id,
             data=result.model_dump() if hasattr(result, "model_dump") else result,
             error=result.error,
         ),
     )
 
-    return {**state, "phase": phase}
+    return {**state, "phase": phase_label}

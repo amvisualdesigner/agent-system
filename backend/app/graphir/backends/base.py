@@ -37,12 +37,17 @@ class BackendConfig:
 
     path_map: optional mapping of GraphIRNode.type → relative file path.
               If absent, paths are derived as {output_base_path}/{type}{extension}.
+    file_path_overrides: explicit full paths (relative to workspace) that override
+                         path_map for specific node types. Used when the real repo
+                         file layout differs from the contract templates
+                         (e.g., SalesOverviewPage.tsx instead of Page.tsx).
     """
     framework: str = "react"
     file_extension: str = ".tsx"
     component_style: str = "PascalCase"
     output_base_path: str = "src/"
     path_map: dict[str, str] = field(default_factory=dict)
+    file_path_overrides: dict[str, str] = field(default_factory=dict)
 
 
 class BackendRenderer(ABC):
