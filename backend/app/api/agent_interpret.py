@@ -42,7 +42,8 @@ def agent_interpret(req: InterpretRequest):
         context = build_context(run_id)
         if context and context.workspace:
             idx = StructuralIndex.from_worktree(context.workspace)
-            index_snapshot = idx.resolve_all_paths() if hasattr(idx, 'resolve_all_paths') else {}
+            index_snapshot = {cap: idx.resolve_all_paths(cap) for cap in idx}
+            logger.info("worktree_capabilities index: %d caps", len(index_snapshot))
     except Exception as e:
         logger.warning("Could not load StructuralIndex snapshot: %s", e)
 

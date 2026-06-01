@@ -1,13 +1,6 @@
 """Intent — semantic intent model for the GraphIR pipeline.
 
-Intent is the SINGLE source of truth for user intent through the entire pipeline:
-  - Created during Intent Decomposition (Gate 1)
-  - Consumed by Coverage Solve (Gate 2)
-  - Referenced by GraphIRNode.metadata (Gate 3)
-  - Revalidated in Coverage Revalidation (Gate 4)
-
-IntentNode is preserved as a deprecated alias for backward compatibility
-during the migration. Do NOT use IntentNode in new code.
+Intent is the SINGLE source of truth for user intent through the entire pipeline.
 """
 
 from __future__ import annotations
@@ -366,48 +359,8 @@ class Intent:
         )
 
 
-# ── Legacy IntentNode (deprecated) ───────────────────────────────
-
-
-@dataclass(frozen=True)
-class IntentNode:
-    type: str
-    params: dict[str, Any] = field(default_factory=dict)
-    description: str | None = None
-
-
-# ── IntentType enum (kept for backward compat) ───────────────────
-
-
-class IntentType(Enum):
-    PAGE = "Page"
-    KPIGROUP = "KPIGroup"
-    CHART = "Chart"
-    DATATABLE = "DataTable"
-    FILTERPANEL = "FilterPanel"
-    EMBED = "Embed"
-
-
-_INTENT_TO_GRAPHIR_TYPE = {
-    IntentType.PAGE: "Page",
-    IntentType.KPIGROUP: "KpiRow",
-    IntentType.CHART: "Timeseries",
-    IntentType.DATATABLE: "AnalyticsTable",
-    IntentType.FILTERPANEL: "FilterPanel",
-    IntentType.EMBED: "Embed",
-}
-
-_INTENT_TO_EDGE_ROLE = {
-    IntentType.KPIGROUP: "PRIMARY",
-    IntentType.CHART: "SUPPORTING",
-    IntentType.DATATABLE: "SUPPORTING",
-    IntentType.FILTERPANEL: "SUPPORTING",
-    IntentType.EMBED: "CONTAINS",
-}
-
-# Capability → GraphIRNode.type mapping (includes both new and old IDs)
+# Capability → GraphIRNode.type mapping
 _CAPABILITY_TO_GRAPHIR_TYPE: dict[str, str] = {
-    # New canonical IDs
     "presentation.kpi_row": "KpiRow",
     "presentation.timeseries": "Timeseries",
     "presentation.table": "AnalyticsTable",
@@ -420,16 +373,9 @@ _CAPABILITY_TO_GRAPHIR_TYPE: dict[str, str] = {
     "interaction.search": "SearchBar",
     "interaction.form": "Form",
     "layout.page": "Page",
-    # Deprecated aliases (backward compat)
-    "display.kpi_row": "KpiRow",
-    "display.timeseries": "Timeseries",
-    "display.analytics_table": "AnalyticsTable",
-    "display.filter_panel": "FilterPanel",
-    "embed.external": "Embed",
 }
 
 _CAPABILITY_TO_EDGE_ROLE: dict[str, str] = {
-    # New canonical IDs
     "presentation.kpi_row": "PRIMARY",
     "presentation.timeseries": "SUPPORTING",
     "presentation.table": "SUPPORTING",
@@ -441,65 +387,7 @@ _CAPABILITY_TO_EDGE_ROLE: dict[str, str] = {
     "data.drilldown": "SUPPORTING",
     "interaction.search": "SUPPORTING",
     "interaction.form": "SUPPORTING",
-    # Deprecated aliases (backward compat)
-    "display.kpi_row": "PRIMARY",
-    "display.timeseries": "SUPPORTING",
-    "display.analytics_table": "SUPPORTING",
-    "display.filter_panel": "SUPPORTING",
-    "embed.external": "CONTAINS",
 }
-
-
-# ── IntentExtensionRegistry (deprecated, kept for compat) ────────
-
-
-class IntentExtensionRegistry:
-    _extensions: dict[str, dict] = {}
-
-    @classmethod
-    def register(cls, name: str, config: dict) -> None:
-        required = {"graphir_type", "edge_role"}
-        missing = required - set(config.keys())
-        if missing:
-            raise ValueError(
-                f"IntentExtension '{name}' missing required keys: {missing}"
-            )
-        if config["edge_role"] not in ("CONTAINS", "PRIMARY", "SUPPORTING"):
-            raise ValueError(
-                f"IntentExtension '{name}': edge_role must be one of "
-                f"CONTAINS/PRIMARY/SUPPORTING, got '{config['edge_role']}'"
-            )
-        cls._extensions[name] = dict(config)
-
-    @classmethod
-    def unregister(cls, name: str) -> None:
-        cls._extensions.pop(name, None)
-
-    @classmethod
-    def is_valid(cls, name: str) -> bool:
-        return name in IntentType.__members__ or name in cls._extensions
-
-    @classmethod
-    def resolve_graphir_type(cls, name: str) -> str | None:
-        if name in IntentType.__members__:
-            return _INTENT_TO_GRAPHIR_TYPE.get(IntentType[name])
-        ext = cls._extensions.get(name)
-        return ext.get("graphir_type") if ext else None
-
-    @classmethod
-    def resolve_edge_role(cls, name: str) -> str | None:
-        if name in IntentType.__members__:
-            return _INTENT_TO_EDGE_ROLE.get(IntentType[name])
-        ext = cls._extensions.get(name)
-        return ext.get("edge_role") if ext else None
-
-    @classmethod
-    def list_extensions(cls) -> dict[str, dict]:
-        return dict(cls._extensions)
-
-    @classmethod
-    def clear(cls) -> None:
-        cls._extensions.clear()
 
 
 # ── Node vs metadata distinction ─────────────────────────────────
@@ -563,14 +451,7 @@ class IntentPlan:
         if not plan.intents:
             raise ValueError("IntentPlan must have at least one Intent")
         for i, intent in enumerate(plan.intents):
-            if isinstance(intent, IntentNode):
-                if not IntentExtensionRegistry.is_valid(intent.type):
-                    raise ValueError(
-                        f"IntentPlan.intents[{i}]: unknown intent type "
-                        f"'{intent.type}'. Must be in IntentType or "
-                        f"registered in IntentExtensionRegistry."
-                    )
-            elif isinstance(intent, Intent):
+            if isinstance(intent, Intent):
                 cap = intent.capability
                 # Truly unknown capabilities (not in registry at all) should fail
                 if not resolve_capability_def(cap):

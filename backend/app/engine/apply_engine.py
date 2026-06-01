@@ -61,7 +61,8 @@ def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | Non
 
 
 def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str,
-                     audit: dict | None = None, fidelity: dict | None = None):
+                     audit: dict | None = None, fidelity: dict | None = None,
+                     verify: dict | None = None):
     with open(f"{artifacts_dir}/plan.json", "w") as f:
         json.dump(plan, f, indent=2)
     with open(f"{artifacts_dir}/execution.json", "w") as f:
@@ -83,6 +84,8 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
             payload["audit"] = audit
         if fidelity:
             payload["fidelity"] = fidelity
+        if verify:
+            payload["verify"] = verify
         json.dump(payload, f, indent=2)
     with open(f"{artifacts_dir}/diff.patch", "w") as f:
         f.write(diff)
@@ -885,12 +888,30 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         skill_ir_obj.contract_id, skill_ir_obj.version, skill_ir_obj.params, len(fileops),
     )
 
-    diff, err = _run_git_flow(context.workspace, run_id, dry_run)
-    if err:
-        return {
-            "execution": {"status": "rejected", "reason": "git_commit_failed", "detail": err, "diff": None, "operations": []},
-            "context": {"repo_snapshot": []},
-        }
+    # ── Fase 4: Verify BEFORE git commit ────────────────────────────
+    verify_result = None
+    if not dry_run and FEATURE_FLAGS.get("verify_worktree", True):
+        try:
+            from app.engine.verify_worktree import verify_worktree
+            verify_result = verify_worktree(context.workspace)
+        except Exception as e:
+            logger.warning("[verify] verify_worktree failed: %s", e)
+            verify_result = {"status": "error", "check": "none", "errors": [str(e)], "output": ""}
+
+    # Git flow — skip commit if verify failed, still capture diff
+    execution_status = "ok"
+    if verify_result and verify_result.get("status") in ("failed", "error"):
+        execution_status = "verify_failed"
+        subprocess.run(["git", "add", "-A"], cwd=context.workspace, check=False)
+        diff = generate_diff(context.workspace)
+        logger.warning("[apply] verify failed — skipping git commit, status=verify_failed")
+    else:
+        diff, err = _run_git_flow(context.workspace, run_id, dry_run)
+        if err:
+            return {
+                "execution": {"status": "rejected", "reason": "git_commit_failed", "detail": err, "diff": None, "operations": []},
+                "context": {"repo_snapshot": []},
+            }
 
     # ── Step 4: Filter plan for artifacts (strip decomposition fields) ──
     clean_plan = {k: v for k, v in plan.items() if k not in ("intents", "decomposition")}
@@ -930,14 +951,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         context.artifacts, run_id, clean_plan,
         [fop.to_dict() for fop in fileops],
         results, diff or "",
-        audit=audit, fidelity=fidelity,
+        audit=audit, fidelity=fidelity, verify=verify_result,
     )
 
     write_state(run_id, "apply")
 
     return {
         "execution": {
-            "status": "ok",
+            "status": execution_status,
             "diff": diff or None,
             "operations": [fop.to_dict() for fop in fileops],
         },
@@ -952,5 +973,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "meta": {
             "fidelity": fidelity,
             "audit": audit,
+            "verify": verify_result,
         },
     }

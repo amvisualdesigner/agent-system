@@ -32,50 +32,15 @@ from app.graphir.models import (
 
 from app.graphir.intent import (
     Intent,
-    IntentType,
-    IntentExtensionRegistry,
-    IntentNode,
     IntentPlan,
     make_intent_id,
     resolve_graphir_type_from_capability,
     resolve_edge_role_from_capability,
 )
 
-from app.graphir.intent_decomposition import decompose_task
-
-from app.graphir.intent_coverage import (
-    CapabilityMatch,
-    MissingIntent,
-    CoverageReport,
-    IntentCoverageValidator,
-    IntentCoverageError,
-)
-
 from app.graphir.validator import GraphIRValidator
 
 from app.graphir.layout import LayoutDerivationEngine
-
-from app.graphir.intent_embedding import (
-    EmbeddingIndex,
-    cosine_similarity,
-    compute_embedding,
-    rank_capabilities,
-    get_embedding_index,
-    reset_embedding_index,
-)
-
-from app.graphir.intent_governance import (
-    OrphanReport,
-    UnresolvedReport,
-    UnresolvedTracker,
-    CoOccurrenceReport,
-    CoOccurrenceTracker,
-    ContractCoverageReport,
-    ContractCoverageGapDetector,
-    EmbeddingFPTracker,
-    FPReport,
-    detect_orphans,
-)
 
 from app.graphir.debug import visualize
 
@@ -92,19 +57,10 @@ __all__ = [
     "GraphIR",
     "GraphIRDraft",
     "Intent",
-    "IntentType",
-    "IntentExtensionRegistry",
-    "IntentNode",
     "IntentPlan",
     "make_intent_id",
     "resolve_graphir_type_from_capability",
     "resolve_edge_role_from_capability",
-    "decompose_task",
-    "CapabilityMatch",
-    "MissingIntent",
-    "CoverageReport",
-    "IntentCoverageValidator",
-    "IntentCoverageError",
     "GraphIRValidator",
     "LayoutDerivationEngine",
     "visualize",
@@ -112,20 +68,4 @@ __all__ = [
     "build_from_structural",
     "GraphIRPipeline",
     "run_from_structural",
-    "EmbeddingIndex",
-    "cosine_similarity",
-    "compute_embedding",
-    "rank_capabilities",
-    "get_embedding_index",
-    "reset_embedding_index",
-    "OrphanReport",
-    "UnresolvedReport",
-    "UnresolvedTracker",
-    "CoOccurrenceReport",
-    "CoOccurrenceTracker",
-    "ContractCoverageReport",
-    "ContractCoverageGapDetector",
-    "EmbeddingFPTracker",
-    "FPReport",
-    "detect_orphans",
 ]

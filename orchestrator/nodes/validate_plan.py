@@ -36,8 +36,8 @@ async def validate_plan_node(state: AgentState) -> dict:
         await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
         return {**state, "trace": trace[-50:], "phase": "error", "error": "no_plan", "_next_node": "return_result"}
 
-    # Compiled plan from /agent/confirm or legacy plan
-    actions = plan.get("actions") or plan.get("semantic_frame", {}).get("actions", [])
+    # Compiled plan from /agent/confirm
+    actions = plan.get("actions", [])
     skill_ir = plan.get("skill_ir")
     has_valid_skill_ir = (
         skill_ir

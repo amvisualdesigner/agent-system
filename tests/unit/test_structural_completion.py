@@ -20,7 +20,6 @@ from app.engine.structural_completion import (
     _augment_capabilities,
     _resolve_completion_mode,
     complete_structure,
-    graphir_ready_to_intent_plan,
 )
 from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.contract_resolution import ContractResolution
@@ -508,18 +507,6 @@ class TestStructuralIR:
         assert rc.mode == CompletionMode.SAFE_SKIP
         assert rc.params == {}
 
-    def test_graphir_ready_to_intent_plan_skips_safe_skip(self, dashboard_contract):
-        """SAFE_SKIP capabilities are excluded from the IntentPlan."""
-        semantic = make_semantic(
-            params={"metrics": ["net_revenue"]},
-            confidence=0.5,
-        )
-        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
-        ready = complete_structure(semantic, contract, dashboard_contract)
-        plan = graphir_ready_to_intent_plan(ready)
-        assert not any(i.capability == "domain.sales" for i in plan.intents)
-        assert any(i.capability == "presentation.kpi_row" for i in plan.intents)
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Tests: STRUCTURAL_SCHEMA integrity
@@ -587,7 +574,6 @@ class TestPipelineInvariants:
 
         # ── 3. No flattening leak ──
         assert not hasattr(structural_ir, "flat_params")
-        assert graphir_ready_to_intent_plan(structural_ir).params == {}
 
         # ── 4a. UI IR purity: run via new path, verify node data matches capability params ──
         from app.graphir.pipeline import GraphIRPipeline

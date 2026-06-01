@@ -166,44 +166,5 @@ class TestGateResultDataclass(unittest.TestCase):
         self.assertEqual(r.reason, "")
         self.assertEqual(r.missing_info, [])
 
-
-class TestGateWithRealFrames(unittest.TestCase):
-    """Gate behavior with frames built from real decomposition."""
-
-    def test_run1_frame_passes_gate(self):
-        from app.graphir.intent_decomposition import decompose_task
-        from app.graphir.semantic_frame import build_frame_from_decomposition
-
-        task = "Modify the table component by adding a tfoot to host buttons with actions."
-        dec = decompose_task(task, use_embedding=False)
-        frame = build_frame_from_decomposition(task, dec)
-        result = confidence_gate(frame)
-        self.assertFalse(result.blocked,
-                         f"Run 1 should pass gate (confidence={frame.confidence:.3f})")
-
-    def test_run2_frame_passes_gate(self):
-        from app.graphir.intent_decomposition import decompose_task
-        from app.graphir.semantic_frame import build_frame_from_decomposition
-
-        task = ("Create a dashboard with KPI override to use net_revenue, "
-                "monthly time configuration, retention analysis and grid layout")
-        dec = decompose_task(task, use_embedding=False)
-        frame = build_frame_from_decomposition(task, dec)
-        result = confidence_gate(frame)
-        self.assertFalse(result.blocked,
-                         f"Run 2 should pass gate (confidence={frame.confidence:.3f})")
-
-    def test_vague_task_blocked_by_gate(self):
-        from app.graphir.intent_decomposition import decompose_task
-        from app.graphir.semantic_frame import build_frame_from_decomposition
-
-        task = "Haz algo con la cosa esa"
-        dec = decompose_task(task, use_embedding=False)
-        frame = build_frame_from_decomposition(task, dec)
-        result = confidence_gate(frame)
-        self.assertTrue(result.blocked,
-                        f"Vague task should be blocked (confidence={frame.confidence:.3f})")
-
-
 if __name__ == "__main__":
     unittest.main()

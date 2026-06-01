@@ -39,7 +39,8 @@ class InMemoryEventEmitter(EventEmitter):
     async def subscribe(self, run_id: str) -> AsyncIterator[SSEEvent]:
         for event in self._buffers.get(run_id, []):
             yield event
-            if event.type in ("result", "error"):
+            # Only terminate on error — keep alive through interpret→confirm→apply
+            if event.type == "error":
                 return
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -48,7 +49,8 @@ class InMemoryEventEmitter(EventEmitter):
             while True:
                 event = await queue.get()
                 yield event
-                if event.type == "result" or event.type == "error":
+                # Only terminate on error; let client close on terminal result
+                if event.type == "error":
                     break
         finally:
             self._queues.pop(run_id, None)

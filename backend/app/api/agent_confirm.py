@@ -48,6 +48,18 @@ class ConfirmRequest(BaseModel):
 
 @router.post("/agent/confirm")
 def agent_confirm(req: ConfirmRequest):
+    try:
+        return _agent_confirm(req)
+    except Exception as e:
+        logger.exception("confirm failed: %s", e)
+        return {
+            "status": "rejected",
+            "reason": str(e),
+            "gate": {"blocked": True, "reason": "confirm_exception"},
+        }
+
+
+def _agent_confirm(req: ConfirmRequest):
     if not req.run_id:
         raise HTTPException(status_code=400, detail="run_id is required")
     if not req.contract_id:
@@ -83,11 +95,12 @@ def agent_confirm(req: ConfirmRequest):
             "reason": f"Contract '{req.contract_id}' not found",
         }
 
-    # Build ConfirmedIntent
+    # Build ConfirmedIntent — only pass fields IntentAction accepts
+    _ia_fields = {"verb", "target_capability", "params", "confidence"}
     confirmed = ConfirmedIntent(
         contract_id=req.contract_id,
         contract_version=req.contract_version,
-        actions=[IntentAction(**a) for a in req.actions],
+        actions=[IntentAction(**{k: v for k, v in a.items() if k in _ia_fields}) for a in req.actions],
         params=req.params,
         user_message=req.user_message,
         interpretation_id=req.interpretation_id,

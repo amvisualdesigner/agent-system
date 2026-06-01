@@ -10,7 +10,7 @@ body {
   font-family: system-ui, -apple-system, sans-serif;
   background: #0f172a;
   color: #e2e8f0;
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 20px;
 }
@@ -20,11 +20,17 @@ textarea {
   background: #1e293b; color: #e2e8f0; font-size: 1rem; resize: vertical;
   font-family: inherit;
 }
+textarea:focus { outline: none; border-color: #38bdf8; }
 button {
-  padding: 10px 24px; border-radius: 8px; border: none; background: #38bdf8;
-  color: #0f172a; font-weight: 600; cursor: pointer; font-size: 1rem;
+  padding: 10px 24px; border-radius: 8px; border: none; font-weight: 600;
+  cursor: pointer; font-size: 0.95rem; transition: opacity 0.15s;
 }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: #38bdf8; color: #0f172a; }
+.btn-success { background: #22c55e; color: #052e16; }
+.btn-danger { background: #ef4444; color: #450a0a; }
+.btn-outline { background: transparent; border: 1px solid #334155; color: #e2e8f0; }
+.btn-outline:hover { background: #1e293b; }
 #meta {
   display: flex; gap: 16px; margin-top: 8px; font-size: 0.8rem; color: #64748b;
   min-height: 1.5em; flex-wrap: wrap;
@@ -52,18 +58,22 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .badge-error { background: #ef4444; color: #450a0a; }
 .badge-skip { background: #64748b; color: #f1f5f9; }
 .badge-idle { background: #334155; color: #94a3b8; }
+.badge-waiting { background: #f59e0b; color: #451a03; }
 
-.phase-planning { border-left: 3px solid #818cf8; }
-.phase-validating { border-left: 3px solid #f59e0b; }
-.phase-executing { border-left: 3px solid #f97316; }
+.phase-interpreting { border-left: 3px solid #818cf8; }
+.phase-awaiting_confirmation { border-left: 3px solid #f59e0b; }
+.phase-confirming { border-left: 3px solid #f97316; }
+.phase-awaiting_apply { border-left: 3px solid #22c55e; }
+.phase-applying { border-left: 3px solid #f97316; }
 .phase-completed { border-left: 3px solid #22c55e; }
 .phase-error { border-left: 3px solid #ef4444; }
 
 .status-ok { color: #22c55e; font-weight: 600; }
 .status-error { color: #ef4444; font-weight: 600; }
 .status-rejected { color: #f59e0b; font-weight: 600; }
-.status-clarification_needed { color: #818cf8; font-weight: 600; }
-.status-noop { color: #64748b; font-weight: 600; }
+.status-verify_failed { color: #f59e0b; font-weight: 600; }
+.status-awaiting_confirmation { color: #f59e0b; font-weight: 600; }
+.status-awaiting_apply { color: #22c55e; font-weight: 600; }
 
 pre {
   background: #0f172a; padding: 8px 10px; border-radius: 4px;
@@ -97,28 +107,100 @@ code { font-size: 0.8rem; }
 .tag-reject { background: #3b1e1e; color: #fca5a5; }
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #6366f1; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.action-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 20px; font-size: 0.85rem;
+  background: #0f172a; border: 1px solid #334155; margin: 3px;
+}
+.action-chip .verb { font-weight: 600; }
+.action-chip .verb-create { color: #bbf7d0; }
+.action-chip .verb-modify { color: #fde68a; }
+.action-chip .verb-remove { color: #fecaca; }
+.action-chip .target { color: #93c5fd; }
+
+.phase-bar {
+  display: flex; gap: 0; margin: 12px 0; align-items: center;
+}
+.phase-step {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 20px; font-size: 0.82rem;
+  background: #1e293b; color: #64748b;
+}
+.phase-step.active { background: #38bdf8; color: #0f172a; font-weight: 600; }
+.phase-step.done { background: #22c55e; color: #052e16; }
+.phase-step.error { background: #ef4444; color: #450a0a; }
+.phase-connector {
+  width: 24px; height: 2px; background: #334155; margin: 0 4px;
+}
+.phase-connector.done { background: #22c55e; }
+.phase-connector.active { background: #38bdf8; }
+
+.action-bar {
+  display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
+}
 </style>
 </head>
 <body>
 <h1>Agent Runtime</h1>
+
+<div id="phaseBar" class="phase-bar" style="display:none">
+  <span class="phase-step" id="step-interpret">1. Interpretar</span>
+  <span class="phase-connector" id="conn-interpret"></span>
+  <span class="phase-step" id="step-confirm">2. Confirmar</span>
+  <span class="phase-connector" id="conn-confirm"></span>
+  <span class="phase-step" id="step-apply">3. Aplicar</span>
+</div>
+
 <form id="form">
   <textarea id="task" rows="3" placeholder='Ej: "Create a sales dashboard showing revenue and growth metrics with timeseries"'></textarea>
-  <div style="margin-top:8px;text-align:right">
-    <button id="runBtn" type="submit">▶ Run</button>
+  <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+    <label style="color:#94a3b8;font-size:0.85rem;display:flex;align-items:center;gap:4px">
+      <input type="checkbox" id="dryRunCheck" checked>
+      Dry run
+    </label>
+    <button id="runBtn" class="btn-primary" type="submit">▶ Run</button>
   </div>
 </form>
+
+<!-- v2: buttons INSIDE panel-body. Hard refresh (Cmd+Shift+R) si ves "Status: AWAITING_CONFIRMATION" -->
+
 <div id="meta"></div>
 <div id="panels"></div>
 
 <script>
-const ORCH = "http://127.0.0.1:9000";
+const ORCH = location.origin.includes("5173") ? "http://127.0.0.1:9000" : location.origin;
 const form = document.getElementById("form");
 const task = document.getElementById("task");
 const runBtn = document.getElementById("runBtn");
+const dryRunCheck = document.getElementById("dryRunCheck");
 const panels = document.getElementById("panels");
 const meta = document.getElementById("meta");
+const phaseBar = document.getElementById("phaseBar");
 
 let runId = null;
+let currentInterpretation = null;
+let evtSource = null;
+
+// ---- phase bar ----
+function updatePhaseBar(active) {
+  phaseBar.style.display = "flex";
+  const steps = ["interpret", "confirm", "apply"];
+  const conns = ["conn-interpret", "conn-confirm"];
+  const idx = steps.indexOf(active);
+  steps.forEach((s, i) => {
+    const el = document.getElementById("step-" + s);
+    el.className = "phase-step";
+    if (i < idx) el.classList.add("done");
+    else if (i === idx) el.classList.add("active");
+  });
+  conns.forEach((c, i) => {
+    const el = document.getElementById(c);
+    el.className = "phase-connector";
+    if (i < idx) el.classList.add("done");
+    else if (i === idx) el.classList.add("active");
+  });
+}
 
 // ---- panel management ----
 function addPanel(id, title, phaseClass) {
@@ -126,7 +208,7 @@ function addPanel(id, title, phaseClass) {
   if (existing) return existing;
   const div = document.createElement("div");
   div.id = id;
-  div.className = `panel ${phaseClass}`;
+  div.className = "panel " + phaseClass;
   div.innerHTML = `
     <div class="panel-header">
       <span class="arrow">▼</span> ${title}
@@ -143,7 +225,7 @@ function addPanel(id, title, phaseClass) {
 
 function setPanelStatus(id, badgeClass, text) {
   const el = document.getElementById(id + "-status");
-  if (el) { el.className = `badge ${badgeClass}`; el.textContent = text; }
+  if (el) { el.className = "badge " + badgeClass; el.textContent = text; }
 }
 
 function bodyEl(id) {
@@ -154,123 +236,183 @@ function esc(s) {
   return (s == null ? "" : String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
-// ---- SSE event handlers ----
-function onNodeStart(evt) {
-  if (evt.node === "call_plan") {
-    addPanel("panel-planning", "📋 Planning", "phase-planning");
-    bodyEl("panel-planning").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Thinking...</div>';
-  } else if (evt.node === "validate_plan") {
-    addPanel("panel-validation", "🔍 Validation", "phase-validating");
-    bodyEl("panel-validation").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Validating...</div>';
-  } else if (evt.node === "call_apply") {
-    addPanel("panel-execution", "⚡ Execution", "phase-executing");
-    bodyEl("panel-execution").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Executing...</div>';
-  }
-}
+// ---- interpretation_ready ----
+function onInterpretationReady(draft) {
+  setPanelStatus("panel-interpret", "badge-done", "listo");
+  updatePhaseBar("confirm");
 
-function onToolCall(evt) {
-  if (evt.node === "call_plan") {
-    const b = bodyEl("panel-planning");
-    if (b) b.innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Calling LLM...</div>';
-  } else if (evt.node === "call_apply") {
-    const b = bodyEl("panel-execution");
-    if (b) b.innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Applying changes...</div>';
-  }
-}
+  currentInterpretation = draft;
+  const actions = draft.proposed_actions || [];
+  const params = draft.params_proposed || {};
+  const wc = draft.worktree_capabilities || [];
+  const contractId = draft.contract_id || "";
+  const contractVersion = draft.contract_version || 1;
 
-function onNodeEnd(evt) {
-  if (evt.node === "call_plan") {
-    setPanelStatus("panel-planning", "badge-done", "listo");
-    const d = evt.data || {};
-    const plan = d.plan || {};
-    const skillIr = plan.skill_ir || {};
-    const plannerMeta = d.planner_meta || {};
-    const contractId = skillIr.contract_id || "—";
-    const confidence = skillIr.confidence != null ? skillIr.confidence.toFixed(3) : "—";
-    const params = skillIr.params || {};
-    const version = skillIr.version || "—";
+  let html = `<div class="kv"><dt>Contrato:</dt><dd>${esc(contractId)} v${contractVersion}</dd></div>`;
 
-    const isNoop = !contractId || contractId === "noop" || contractId === "None";
-
-    let html = '<dl class="kv">';
-    html += `<dt>Contract</dt><dd>${isNoop ? '<span class="tag tag-reject">noop</span> <span style="color:#64748b">no ejecucion</span>' : esc(contractId) + ' <span class="tag tag-match">v' + esc(version) + '</span>'}</dd>`;
-    html += `<dt>Confianza</dt><dd>${esc(confidence)} ${!isNoop && confidence < 0.5 ? '<span class="tag tag-reject">bajo umbral</span>' : ''}</dd>`;
-
-    if (!isNoop && Object.keys(params).length > 0) {
-      for (const [k, v] of Object.entries(params)) {
-        html += `<dt>${esc(k)}</dt><dd>${esc(JSON.stringify(v))}</dd>`;
-      }
-    }
-
-    if (plannerMeta.task_mode) {
-      html += `<dt>Modo</dt><dd>${esc(plannerMeta.task_mode)} <span class="tag">score: ${plannerMeta.semantic_score ?? "—"}</span></dd>`;
-    }
-    if (plannerMeta.matched_patterns?.length) {
-      html += `<dt>Patrones</dt><dd>${plannerMeta.matched_patterns.map(p => '<span class="tag">' + esc(p) + '</span>').join(" ")}</dd>`;
-    }
-    html += "</dl>";
-
-    if (isNoop) {
-      html += '<div style="margin-top:8px;color:#64748b;font-size:0.85rem">No hay contrato que cubra esta tarea. El sistema no ejecutara nada.</div>';
-    }
-
-    bodyEl("panel-planning").innerHTML = html;
-
-  } else if (evt.node === "validate_plan") {
-    const d = evt.data || {};
-    const valid = d.valid;
-    if (valid) {
-      setPanelStatus("panel-validation", "badge-done", "✓ valido");
-      bodyEl("panel-validation").innerHTML = '<div><span class="status-ok">✓ Plan valido</span></div>';
-    } else {
-      const reason = d.reason || d.decision || "invalido";
-      setPanelStatus("panel-validation", "badge-error", "✗ invalido");
-      bodyEl("panel-validation").innerHTML = `<div><span class="status-error">✗ Invalido</span> <span style="color:#94a3b8;font-size:0.85rem">${esc(reason)}</span></div>`;
-    }
-
-  } else if (evt.node === "call_apply") {
-    setPanelStatus("panel-execution", "badge-done", "listo");
-    const d = evt.data || {};
-    const exec = d.execution || {};
-    const ctx = d.context || {};
-    const status = exec.status || "ok";
-    const ops = exec.operations || [];
-
-    let html = `<div>Status: <span class="status-${status}">${esc(status)}</span>`;
-    if (exec.diff) html += ' <span class="tag">committed</span>';
+  if (actions.length > 0) {
+    html += '<div style="margin-top:8px"><strong>Acciones propuestas</strong></div><div style="margin-top:4px">';
+    actions.forEach((a, i) => {
+      const vc = a.verb === "create" ? "verb-create" : a.verb === "modify" ? "verb-modify" : a.verb === "remove" ? "verb-remove" : "";
+      html += `<span class="action-chip">
+        <span class="verb ${vc}">${esc(a.verb)}</span>
+        <span class="target">${esc(a.target_capability)}</span>
+        <span style="color:#64748b;font-size:0.75rem">${esc(a.label || "")}</span>
+        <span style="color:#64748b;font-size:0.7rem">${Math.round((a.confidence || 0) * 100)}%</span>
+      </span>`;
+    });
     html += "</div>";
+  }
 
-    if (ops.length > 0) {
-      html += `<div style="margin-top:8px"><strong>Operaciones (${ops.length})</strong></div>`;
-      html += '<ul class="ops-list">';
-      for (let i = 0; i < ops.length; i++) {
-        const op = ops[i];
-        const action = op.action || "?";
-        const path = op.path || op.file_path || "?";
-        const content = op.content || "";
-        const actionClass = action === "create" ? "op-create" : action === "modify" ? "op-modify" : action === "delete" ? "op-delete" : "";
-        const fileLabel = path.split("/").pop();
-        html += `<li onclick="toggleOp(${i})">
-          <span class="op-action ${actionClass}">${esc(action)}</span>
-          <span title="${esc(path)}">${esc(fileLabel)}</span>
-          <div id="op-content-${i}" class="op-content">
-            <span style="color:#64748b;font-size:0.75rem">${esc(path)}</span>
-            ${content ? '<pre>' + esc(content.slice(0, 600)) + '</pre>' : ''}
-          </div>
-        </li>`;
-      }
+  if (Object.keys(params).length > 0) {
+    html += '<div style="margin-top:8px"><strong>Parámetros</strong></div><div class="kv" style="margin-top:4px">';
+    for (const [k, v] of Object.entries(params)) {
+      html += `<dt>${esc(k)}</dt><dd>${esc(Array.isArray(v) ? v.join(", ") : String(v))}</dd>`;
+    }
+    html += "</div>";
+  }
+
+  if (wc.length > 0) {
+    html += '<div style="margin-top:8px"><strong>Worktree</strong></div><div class="kv" style="margin-top:4px">';
+    wc.forEach(c => {
+      const statusColor = c.present ? "#22c55e" : "#64748b";
+      const statusText = c.present ? "✓" : "✗";
+      html += `<dt style="color:${statusColor}">${esc(c.label || c.id)}</dt><dd>${statusText} ${c.paths.length > 0 ? esc(c.paths.join(", ")) : ""}</dd>`;
+    });
+    html += "</div>";
+  }
+
+  html += `<div class="action-bar" style="margin-top:12px;padding-top:10px;border-top:1px solid #334155">
+    <button onclick="handleConfirm(this)" class="btn-success">✓ Confirmar</button>
+    <button onclick="handleCancel(this)" class="btn-outline">✗ Cancelar</button>
+  </div>`;
+
+  bodyEl("panel-interpret").innerHTML = html;
+
+  runBtn.disabled = false;
+  runBtn.textContent = "▶ Run";
+}
+
+// ---- plan_preview_ready ----
+function onPlanPreviewReady(data) {
+  setPanelStatus("panel-confirm", "badge-done", "listo");
+  updatePhaseBar("apply");
+
+  const plan = data.plan || {};
+  const preview = data.plan_preview || {};
+  const gate = data.gate || {};
+  const summary = preview.summary_human || "";
+  const ops = preview.structural_operations || [];
+  const files = preview.estimated_files || [];
+  const routes = preview.routes || {};
+
+  if (gate.blocked) {
+    bodyEl("panel-confirm").innerHTML = `<div><span class="status-rejected">✗ Gate bloqueado</span> ${esc(gate.reason || "")}</div>`;
+    return;
+  }
+
+  let html = summary ? `<div style="font-size:1.1rem;margin-bottom:8px">${esc(summary)}</div>` : "";
+
+  if (ops.length > 0) {
+    html += `<div><strong>Operaciones estructurales (${ops.length})</strong></div><ul class="ops-list">`;
+    ops.forEach(op => {
+      const ac = op.action === "CREATE" ? "op-create" : op.action === "MODIFY" ? "op-modify" : op.action === "DELETE" ? "op-delete" : "";
+      html += `<li><span class="op-action ${ac}">${esc(op.action)}</span> ${esc(op.target)}</li>`;
+    });
+    html += "</ul>";
+  }
+
+  if (files.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Archivos estimados (${files.length})</strong></div><ul class="file-list">`;
+    files.forEach(f => { html += `<li>${esc(f)}</li>`; });
+    html += "</ul>";
+  }
+
+  if (Object.keys(routes).length > 0) {
+    html += '<div style="margin-top:8px"><strong>Rutas</strong></div><div class="kv" style="margin-top:4px">';
+    for (const [k, v] of Object.entries(routes)) {
+      html += `<dt>${esc(k)}</dt><dd>${esc(String(v))}</dd>`;
+    }
+    html += "</div>";
+  }
+
+  html += `<div class="action-bar" style="margin-top:12px;padding-top:10px;border-top:1px solid #334155">
+    <button onclick="handleApply(this)" class="btn-primary">⚡ Apply</button>
+    <button onclick="handleRejectApply(this)" class="btn-outline">✗ Rechazar</button>
+  </div>`;
+
+  bodyEl("panel-confirm").innerHTML = html;
+}
+
+// ---- node_end: call_apply ----
+function onApplyResult(data) {
+  setPanelStatus("panel-apply", "badge-done", "listo");
+  updatePhaseBar("apply");
+
+  const exec = data.execution || {};
+  const ctx = data.context || {};
+  const metaBlock = data.meta || {};
+  const status = exec.status || "ok";
+  const ops = exec.operations || [];
+
+  let html = `<div>Status: <span class="status-${status}">${esc(status.toUpperCase())}</span>`;
+  if (exec.diff) html += ' <span class="tag">committed</span>';
+  html += "</div>";
+
+  if (ops.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Operaciones (${ops.length})</strong></div><ul class="ops-list">`;
+    ops.forEach((op, i) => {
+      const action = op.action || "?";
+      const path = op.path || op.file_path || "?";
+      const route = op.pipeline_route || "";
+      const content = op.content || "";
+      const actionClass = action === "create" ? "op-create" : action === "modify" ? "op-modify" : action === "delete" ? "op-delete" : "";
+      const fileLabel = path.split("/").pop();
+      html += `<li onclick="toggleOp(${i})">
+        <span class="op-action ${actionClass}">${esc(action)}</span>
+        <span title="${esc(path)}">${esc(fileLabel)}</span>
+        ${route ? `<span class="tag">${esc(route)}</span>` : ""}
+        <div id="op-content-${i}" class="op-content">
+          <span style="color:#64748b;font-size:0.75rem">${esc(path)}</span>
+          ${content ? "<pre>" + esc(content.slice(0, 600)) + "</pre>" : ""}
+        </div>
+      </li>`;
+    });
+    html += "</ul>";
+  }
+
+  // Verify result
+  const verify = metaBlock.verify;
+  if (verify) {
+    const vStatus = verify.status || "?";
+    const vColor = vStatus === "passed" ? "#22c55e" : vStatus === "failed" ? "#ef4444" : "#64748b";
+    html += `<div style="margin-top:8px"><strong>Verify:</strong> <span style="color:${vColor}">${esc(vStatus)}</span>`;
+    if (verify.check && verify.check !== "none") html += ` <span class="tag">${esc(verify.check)}</span>`;
+    if (verify.errors && verify.errors.length > 0) {
+      html += `<ul class="file-list">`;
+      verify.errors.forEach(e => { html += `<li style="color:#ef4444">${esc(typeof e === "string" ? e : e.message || JSON.stringify(e))}</li>`; });
       html += "</ul>";
     }
-
-    const snapshot = ctx.repo_snapshot || [];
-    if (snapshot.length > 0) {
-      html += `<div style="margin-top:8px"><strong>Archivos:</strong><ul class="file-list">`;
-      snapshot.forEach(f => { html += `<li>${esc(f)}</li>`; });
-      html += "</ul></div>";
-    }
-
-    bodyEl("panel-execution").innerHTML = html;
+    html += "</div>";
   }
+
+  // Fidelity
+  const fidelity = metaBlock.fidelity;
+  if (fidelity) {
+    html += `<div style="margin-top:8px"><strong>Fidelidad:</strong> `;
+    html += `${fidelity.completeness || 0}% completeness, `;
+    html += `${fidelity.safe_skip_count || 0} safe-skips`;
+    html += `</div>`;
+  }
+
+  const snapshot = ctx.repo_snapshot || [];
+  if (snapshot.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Archivos:</strong><ul class="file-list">`;
+    snapshot.forEach(f => { html += "<li>" + esc(f) + "</li>"; });
+    html += "</ul></div>";
+  }
+
+  bodyEl("panel-apply").innerHTML = html;
 }
 
 function toggleOp(i) {
@@ -278,7 +420,72 @@ function toggleOp(i) {
   if (el) el.classList.toggle("show");
 }
 
-function onResult(evt) {
+// ---- SSE handler ----
+function handleSSE(evt) {
+  switch (evt.type) {
+    case "node_start":
+      if (evt.node === "interpret") {
+        addPanel("panel-interpret", "🧠 Interpretación", "phase-interpreting");
+        bodyEl("panel-interpret").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Interpretando...</div>';
+        updatePhaseBar("interpret");
+      } else if (evt.node === "confirm") {
+        addPanel("panel-confirm", "📋 Plan", "phase-confirming");
+        bodyEl("panel-confirm").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Compilando plan...</div>';
+        updatePhaseBar("confirm");
+      } else if (evt.node === "validate_plan") {
+        setPanelStatus("panel-confirm", "badge-thinking", "validando");
+      } else if (evt.node === "call_apply") {
+        addPanel("panel-apply", "⚡ Aplicación", "phase-applying");
+        bodyEl("panel-apply").innerHTML = '<div style="color:#94a3b8"><span class="spinner"></span> Aplicando cambios...</div>';
+        updatePhaseBar("apply");
+      }
+      break;
+
+    case "interpretation_ready":
+      addPanel("panel-interpret", "🧠 Interpretación", "phase-awaiting_confirmation");
+      onInterpretationReady(evt.data || {});
+      break;
+
+    case "plan_preview_ready":
+      addPanel("panel-confirm", "📋 Plan", "phase-awaiting_apply");
+      onPlanPreviewReady(evt.data || {});
+      break;
+
+    case "node_end":
+      if (evt.node === "validate_plan") {
+        const d = evt.data || {};
+        if (d.valid) {
+          setPanelStatus("panel-confirm", "badge-done", "✓ válido");
+        } else {
+          setPanelStatus("panel-confirm", "badge-error", "✗ inválido");
+        }
+      } else if (evt.node === "call_apply") {
+        onApplyResult(evt.data || {});
+      }
+      break;
+
+    case "result":
+      const resultData = evt.data || {};
+      const rs = (resultData.status || "").toLowerCase();
+      if (rs === "awaiting_confirmation") {
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
+      } else if (rs === "awaiting_apply") {
+        // Already handled by plan_preview_ready
+      } else {
+        finalizeResult(evt);
+      }
+      break;
+
+    case "error":
+      runBtn.disabled = false;
+      runBtn.textContent = "▶ Run";
+      showError(evt.error || "Error desconocido");
+      break;
+  }
+}
+
+function finalizeResult(evt) {
   const d = evt.data || {};
   const status = d.status || "ok";
   const isError = evt.type === "error";
@@ -309,7 +516,7 @@ function onResult(evt) {
   const snapshot = ctx.repo_snapshot || [];
   if (snapshot.length > 0) {
     html += `<div style="margin-top:8px"><strong>Archivos generados (${snapshot.length})</strong><ul class="file-list">`;
-    snapshot.forEach(f => { html += `<li>${esc(f)}</li>`; });
+    snapshot.forEach(f => { html += "<li>" + esc(f) + "</li>"; });
     html += "</ul></div>";
   }
 
@@ -328,19 +535,10 @@ function toggleDiff() {
   if (el) el.style.display = el.style.display === "none" ? "block" : "none";
 }
 
-// ---- SSE event router ----
-function handleSSE(evt) {
-  switch (evt.type) {
-    case "node_start": onNodeStart(evt); break;
-    case "tool_call": onToolCall(evt); break;
-    case "node_end": onNodeEnd(evt); break;
-    case "result":
-    case "error":
-      onResult(evt);
-      runBtn.disabled = false;
-      runBtn.textContent = "▶ Run";
-      break;
-  }
+function showError(msg) {
+  addPanel("panel-error", "❌ Error", "phase-error");
+  setPanelStatus("panel-error", "badge-error", "error");
+  bodyEl("panel-error").innerHTML = `<div><span class="status-error">ERROR</span> ${esc(msg)}</div>`;
 }
 
 // ---- form submission ----
@@ -350,6 +548,7 @@ form.onsubmit = async (e) => {
 
   runBtn.disabled = true;
   runBtn.textContent = "Ejecutando...";
+  if (evtSource) evtSource.close();
   panels.innerHTML = "";
   meta.innerHTML = "";
 
@@ -364,25 +563,34 @@ form.onsubmit = async (e) => {
     meta.innerHTML = `<span style="color:#64748b">Run ID:</span> <code>${esc(runId)}</code> <span style="color:#64748b">Task:</span> "${esc(task.value)}"` +
       ` &nbsp;|&nbsp; <a href="${ORCH}/runs/${runId}" target="_blank" style="color:#38bdf8">📄 Snapshot</a>`;
 
-    const evtSource = new EventSource(`${ORCH}/stream/${runId}`);
-    evtSource.onmessage = (event) => {
-      try {
-        const evt = JSON.parse(event.data);
-        handleSSE(evt);
-        if (evt.type === "result" || evt.type === "error") {
-          evtSource.close();
-          // fetch full snapshot for worktree info
-          fetchWorktree(runId);
+    function connectSSE(runId) {
+      const evtSource = new EventSource(`${ORCH}/stream/${runId}`);
+      evtSource.onmessage = (event) => {
+        try {
+          const evt = JSON.parse(event.data);
+          console.log("SSE:", evt.type, evt.node || "", evt.phase, evt.data?.status || "");
+          handleSSE(evt);
+          const terminal = ["completed", "failed", "cancelled", "verify_failed", "error"];
+          if (evt.type === "error") {
+            evtSource.close();
+            fetchWorktree(runId);
+          } else if (evt.type === "result" && terminal.includes(evt.data?.status)) {
+            evtSource.close();
+            fetchWorktree(runId);
+          }
+        } catch (err) {
+          console.error("SSE parse error", err);
         }
-      } catch (err) {
-        console.error("SSE parse error", err);
-      }
-    };
-    evtSource.onerror = () => {
-      evtSource.close();
-      runBtn.disabled = false;
-      runBtn.textContent = "▶ Run";
-    };
+      };
+      evtSource.onerror = () => {
+        evtSource.close();
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
+      };
+      return evtSource;
+    }
+
+    evtSource = connectSSE(runId);
   } catch (err) {
     panels.innerHTML = `<div class="panel phase-error"><div class="panel-header">❌ Error</div><div class="panel-body"><span class="status-error">ERROR</span> ${esc(String(err))}</div></div>`;
     runBtn.disabled = false;
@@ -390,6 +598,95 @@ form.onsubmit = async (e) => {
   }
 };
 
+// ---- confirm handler ----
+async function handleConfirm(btn) {
+  if (!runId || !currentInterpretation) return;
+
+  btn.disabled = true;
+  btn.textContent = "Confirmando...";
+  const parent = btn.closest(".action-bar");
+  if (parent) parent.style.display = "none";
+
+  const interpretation = currentInterpretation;
+  const actions = (interpretation.proposed_actions || []).map(a => ({
+    verb: a.verb,
+    target_capability: a.target_capability,
+    label: a.label || "",
+    confidence: a.confidence || 1.0,
+  }));
+
+  const payload = {
+    contract_id: interpretation.contract_id || "",
+    contract_version: interpretation.contract_version || 1,
+    actions: actions,
+    params: interpretation.params_proposed || {},
+    user_message: task.value,
+  };
+
+  try {
+    const resp = await fetch(`${ORCH}/run/${runId}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || "confirm failed");
+    }
+    // SSE will handle the rest (plan_preview_ready)
+  } catch (err) {
+    showError("Confirm error: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "✓ Confirmar";
+    const parent = btn.closest(".action-bar");
+    if (parent) parent.style.display = "flex";
+  }
+};
+
+// ---- cancel handler ----
+function handleCancel(btn) {
+  const parent = btn.closest(".panel");
+  if (parent) parent.style.display = "none";
+  showError("Cancelado por el usuario");
+}
+
+// ---- apply handler ----
+async function handleApply(btn) {
+  if (!runId) return;
+
+  btn.disabled = true;
+  btn.textContent = "Aplicando...";
+  const parent = btn.closest(".action-bar");
+  if (parent) parent.style.display = "none";
+
+  try {
+    const resp = await fetch(`${ORCH}/run/${runId}/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRunCheck.checked }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || "apply failed");
+    }
+    // SSE handles the execution events
+  } catch (err) {
+    showError("Apply error: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "⚡ Apply";
+    const parent = btn.closest(".action-bar");
+    if (parent) parent.style.display = "flex";
+  }
+}
+
+// ---- reject apply ----
+function handleRejectApply(btn) {
+  const parent = btn.closest(".panel");
+  if (parent) parent.style.display = "none";
+  showError("Aplicación rechazada");
+}
+
+// ---- fetch worktree info ----
 function fetchWorktree(runId) {
   fetch(`${ORCH}/runs/${runId}`)
     .then(r => r.json())

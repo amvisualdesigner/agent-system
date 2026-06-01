@@ -29,7 +29,7 @@ from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.engine.structural_index import StructuralIndex
-from app.graphir.intent import Intent, IntentPlan, make_intent_id
+
 
 
 class CompletionMode(Enum):
@@ -1083,37 +1083,6 @@ def complete_structure(
         replace_pairs_index=replace_pairs_index,
     )
 
-
-def graphir_ready_to_intent_plan(ir: StructuralIR) -> IntentPlan:
-    """Convert StructuralIR → IntentPlan (execution artifact).
-
-    StructuralIR ya tiene ownership resuelto. Esta conversión existe
-    solo como execution artifact para compatibilidad legacy y serialización.
-    NO participa en decisiones semánticas.
-    """
-    contract = get_contract(ir.contract_id, ir.contract_version)
-    if contract is None:
-        raise ValueError(
-            f"Contract not found: "
-            f"{ir.contract_id}@{ir.contract_version}"
-        )
-
-    intents = []
-    for rc in ir.capabilities:
-        if rc.mode == CompletionMode.SAFE_SKIP:
-            continue
-        intents.append(Intent(
-            id=make_intent_id(f"completion:{rc.name}", rc.name, "structural"),
-            capability=rc.name,
-            params=dict(rc.params),
-            source="structural_completion",
-        ))
-
-    return IntentPlan(
-        intents=intents,
-        contracts=[contract],
-        params={},
-    )
 
 
 # ── Replace consistency validation ─────────────────────

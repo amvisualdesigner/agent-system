@@ -9,4 +9,7 @@ FEATURE_FLAGS = {
     "execution_mode": "graphir",          # Execution mode label
     "trace_level": "full",                # Trace verbosity (minimal | normal | full)
     "structural_resolver": False,         # Enable Resolver + Ambiguity Gate (Fase 1b)
+
+    # ── Fase 4: Production shell ──
+    "verify_worktree": True,              # Post-apply build verification (tsc --noEmit / npm run build)
 }

@@ -54,11 +54,13 @@ async def return_result_node(state: AgentState) -> dict:
             status=status,
         )
 
-    phase_label = "completed" if result.status in ("ok", "clarification_needed") else phase
+    terminal_ok = {"ok", "clarification_needed", "verify_failed"}
+    phase_label = "completed" if result.status in terminal_ok else phase
     if cancelled:
         phase_label = "cancelled"
 
-    event_type = "result" if result.status in ("ok", "clarification_needed", "awaiting_confirmation", "awaiting_apply") else "error"
+    result_types = {"ok", "clarification_needed", "verify_failed", "awaiting_confirmation", "awaiting_apply"}
+    event_type = "result" if result.status in result_types else "error"
 
     snapshot = {
         "run_id": run_id,

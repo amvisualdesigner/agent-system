@@ -6,16 +6,19 @@ from app.config.settings import settings
 STATE_PATH =f"{settings.RUNS_DIR}/state.json"
 
 def write_state(run_id: str, status: str):
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
 
-    state = {
-        "last_run_id": run_id,
-        "status": status,
-        "timestamp": time.time()
-    }
+        state = {
+            "last_run_id": run_id,
+            "status": status,
+            "timestamp": time.time()
+        }
 
-    with open(STATE_PATH, "w") as f:
-        json.dump(state, f, indent=2)
+        with open(STATE_PATH, "w") as f:
+            json.dump(state, f, indent=2)
+    except PermissionError:
+        pass  # Non-critical — global bookkeeping only
 
 
 def read_state():
