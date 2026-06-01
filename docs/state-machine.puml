@@ -1,0 +1,56 @@
+@startuml
+!pragma layout smetana
+!theme plain
+skinparam backgroundColor #fafafa
+skinparam shadowing false
+skinparam defaultFontName Fira Code
+skinparam defaultFontSize 11
+skinparam stateBorderColor #333333
+skinparam stateBorderThickness 2
+skinparam arrowColor #555555
+skinparam arrowThickness 2
+
+title RunPhase — Máquina de Estados
+
+state interpreting : LLM interpretando intención
+state awaiting_confirmation : Draft listo, esperando\nconfirmación humana
+state confirmed : Plan compilado,\nlisto para aplicar
+state applying : ApplyEngine\nejecutándose
+state completed : Apply exitoso
+state failed : Apply falló
+state cancelled : Usuario canceló
+
+[*] --> interpreting : POST /agent/interpret
+interpreting --> awaiting_confirmation : interpretation_draft OK
+interpreting --> cancelled : usuario cancela
+
+awaiting_confirmation --> confirmed : POST /agent/confirm
+awaiting_confirmation --> cancelled : usuario cancela
+
+confirmed --> applying : POST /agent/apply
+confirmed --> cancelled : usuario cancela
+
+applying --> completed : apply OK
+applying --> failed : apply error
+applying --> cancelled : usuario cancela
+
+completed --> [*]
+failed --> [*]
+cancelled --> [*]
+
+note right of interpreting
+  Self-transition permitida:
+  max 2 retries por clarification
+end note
+
+note right of confirmed
+  Idempotente:
+  re-confirm devuelve cache
+end note
+
+note right of applying
+  Gate check:
+  gate.blocked=False requerido
+end note
+
+@enduml

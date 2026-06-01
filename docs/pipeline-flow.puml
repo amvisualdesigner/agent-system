@@ -1,0 +1,80 @@
+@startuml
+!theme plain
+skinparam backgroundColor #fafafa
+skinparam shadowing false
+skinparam defaultFontName Fira Code
+skinparam defaultFontSize 12
+skinparam arrowColor #555555
+skinparam arrowThickness 2
+
+title Flujo del Pipeline — Interpret → Confirm → Apply
+
+' ============================================================
+' PARTICIPANTES (solo tipos válidos en sequence diagram)
+' ============================================================
+actor Usuario as USER
+collections "UI / CLI" as UI
+
+participant "Orchestrator\n(LangGraph)" as OG #E8F4FD
+participant "IntentInterpreter\n(LLM)" as II #FFF3CD
+participant "PlanCompiler\n(determinista)" as PC #D4EDDA
+participant "ApplyEngine\n(mezclador)" as AE #F8D7DA
+
+database "capability_catalog.json\n(vocabulario)" as CAT #FFF3CD
+database "StructuralIndex\n(realidad)" as SI #F8D7DA
+database "RunState\n(persistencia)" as RS #E8F4FD
+
+participant "complete_structure()\n(conciliador)" as CS #F8D7DA
+participant "GraphIRBuilder\n+ Renderer" as GR #D4EDDA
+participant "FileOpApplier\n+ Verify" as FO #F8D7DA
+
+' ============================================================
+' FLUJO PRINCIPAL
+' ============================================================
+USER --> UI : "remove KPI row"
+UI --> OG : POST /run
+
+== Fase 1: Interpretar ==
+OG --> II : interpret(message)
+II --> CAT : leer vocabulario
+CAT --> II : capabilities, sinónimos
+II --> II : LLM mapea lenguaje → capability/verbo
+II --> OG : InterpretationDraft
+OG --> RS : save(phase=awaiting_confirmation)
+OG --> USER : SSE: interpretation_ready
+
+USER --> OG : POST /run/{id}/confirm
+
+== Fase 2: Compilar Plan ==
+OG --> PC : confirm(intent)
+PC --> PC : ConfirmedIntent + contrato → CompiledPlan
+PC --> OG : plan (skill_ir, semantic_frame, actions)
+OG --> RS : save(phase=confirmed)
+OG --> USER : SSE: plan_preview_ready
+
+USER --> OG : POST /run/{id}/apply
+
+== Fase 3: Aplicar (solo ApplyEngine) ==
+OG --> AE : apply(confirmed_intent, plan)
+AE --> SI : StructuralIndex.from_worktree()
+SI --> AE : repo_snapshot
+AE --> CS : complete_structure(semantic, contract, index)
+CS --> CS : lifecycle: CREATE / MODIFY / DELETE / KEEP
+CS --> AE : StructuralIR
+AE --> GR : StructuralIR → GraphIR → FileOps
+GR --> FO : FileOp[]
+FO --> FO : ejecutar + git commit + diff
+FO --> FO : verify (tsc --noEmit)
+FO --> AE : resultado
+AE --> RS : save(phase=completed)
+AE --> OG : result + diff
+OG --> USER : SSE: result
+
+legend right
+  <#FFF3CD> <b>Intención</b> (qué quiere el usuario)
+  <#F8D7DA> <b>Realidad</b> (qué hay en disco)
+  <#E8F4FD> <b>Coordinación</b>
+  <#D4EDDA> <b>Transformación</b>
+endlegend
+
+@enduml
