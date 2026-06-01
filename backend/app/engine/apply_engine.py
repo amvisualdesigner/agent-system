@@ -570,46 +570,37 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                     len(canon_trace.non_structural),
                 )
 
-            # Early exit: no structural ops → resolver has nothing to resolve
+            # No CREATE/MODIFY ops → skip resolver, proceed with fallback
             if not canon_trace.has_structural():
-                return {
-                    "execution": {
-                        "status": "clarification_needed",
-                        "reason": "no_structural_intents",
-                        "detail": "No structural intents detected.",
-                        "diff": None, "operations": [],
-                    },
-                    "context": {
-                        "repo_snapshot": [],
-                        "canonicalization_trace": canon_trace.to_dict(),
-                    },
-                }
+                logger.info("No structural intents — proceeding without resolver")
+                resolution = None
+                # fall through to builder (resolution=None is current default)
+            else:
+                resolution = resolve(structural_ir, registry, structural_index=structural_index)
+                logger.info(
+                    "StructuralResolver: confidence=%.2f reason=%s",
+                    resolution.confidence, resolution.reason,
+                )
 
-            resolution = resolve(structural_ir, registry, structural_index=structural_index)
-            logger.info(
-                "StructuralResolver: confidence=%.2f reason=%s",
-                resolution.confidence, resolution.reason,
-            )
-
-            if resolution.reason is not None:
-                return {
-                    "execution": {
-                        "status": "clarification_needed",
-                        "reason": resolution.reason,
-                        "detail": (
-                            f"No structural targets resolved. "
-                            f"Canonicalization: {len(canon_trace.structural_valid)} valid, "
-                            f"{len(canon_trace.structural_unknown)} unknown, "
-                            f"{len(canon_trace.non_structural)} non_structural"
-                        ),
-                        "diff": None,
-                        "operations": [],
-                    },
-                    "context": {
-                        "repo_snapshot": [],
-                        "canonicalization_trace": canon_trace.to_dict(),
-                    },
-                }
+                if resolution.reason is not None:
+                    return {
+                        "execution": {
+                            "status": "clarification_needed",
+                            "reason": resolution.reason,
+                            "detail": (
+                                f"No structural targets resolved. "
+                                f"Canonicalization: {len(canon_trace.structural_valid)} valid, "
+                                f"{len(canon_trace.structural_unknown)} unknown, "
+                                f"{len(canon_trace.non_structural)} non_structural"
+                            ),
+                            "diff": None,
+                            "operations": [],
+                        },
+                        "context": {
+                            "repo_snapshot": [],
+                            "canonicalization_trace": canon_trace.to_dict(),
+                        },
+                    }
         except AmbiguousStructuralTargetError as e:
             return {
                 "execution": {
