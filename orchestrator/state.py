@@ -15,7 +15,6 @@ class AgentState(TypedDict):
     execution: Optional[Dict[str, Any]]
     run_details: Optional[Dict[str, Any]]
     error: Optional[str]
-    retry_count: int
     trace: List[TraceEntry]
     phase: str
     cancelled: bool

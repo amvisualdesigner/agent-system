@@ -7,8 +7,6 @@ from models import SSEEvent
 
 logger = logging.getLogger("orchestrator.nodes.interpret")
 
-MAX_CLARIFICATION_RETRIES = 2
-
 
 async def interpret_node(state: AgentState) -> dict:
     assert state.get("run_id"), "run_id must be set and non-empty"
@@ -64,23 +62,22 @@ async def interpret_node(state: AgentState) -> dict:
 
     status = draft.get("status", "ok")
     if status == "needs_clarification":
-        retry_count = state.get("retry_count", 0)
-        if retry_count < MAX_CLARIFICATION_RETRIES:
-            logger.info("[run_id=%s] interpret: needs_clarification, retry %d", run_id, retry_count)
-            return {
-                **state,
-                "interpretation": draft,
-                "trace": trace[-50:],
-                "retry_count": retry_count + 1,
-                "_next_node": "interpret",
-            }
-        logger.warning("[run_id=%s] interpret: max clarification retries", run_id)
+        # No retry — emit interpretation_ready with clarification question so user can refine
+        logger.info("[run_id=%s] interpret: needs_clarification: %s", run_id,
+                     draft.get("clarification_question", "unspecified"))
+        await emitter.emit(
+            run_id,
+            SSEEvent(
+                type="interpretation_ready", node="interpret", phase="awaiting_confirmation",
+                run_id=run_id, data=draft,
+            ),
+        )
         return {
             **state,
             "interpretation": draft,
-            "error": "max_clarification_retries",
+            "plan": None,
             "trace": trace[-50:],
-            "phase": "error",
+            "phase": "awaiting_confirmation",
             "_next_node": "return_result",
         }
 

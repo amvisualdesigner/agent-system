@@ -38,7 +38,6 @@ def _build_initial_state(run_id: str, task: str, start_node: str = "interpret") 
         "execution": None,
         "run_details": None,
         "error": None,
-        "retry_count": 0,
         "trace": [],
         "phase": "planning",
         "cancelled": False,

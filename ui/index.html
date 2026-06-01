@@ -239,16 +239,32 @@ function esc(s) {
 // ---- interpretation_ready ----
 function onInterpretationReady(draft) {
   setPanelStatus("panel-interpret", "badge-done", "listo");
-  updatePhaseBar("confirm");
-
   currentInterpretation = draft;
+
+  const isClarification = draft.status === "needs_clarification";
   const actions = draft.proposed_actions || [];
   const params = draft.params_proposed || {};
   const wc = draft.worktree_capabilities || [];
   const contractId = draft.contract_id || "";
   const contractVersion = draft.contract_version || 1;
 
-  let html = `<div class="kv"><dt>Contrato:</dt><dd>${esc(contractId)} v${contractVersion}</dd></div>`;
+  let html = "";
+
+  if (isClarification) {
+    updatePhaseBar("interpret");
+    const q = draft.clarification_question || "Could you provide more detail?";
+    html += `<div style="color:#f59e0b;font-weight:600;margin-bottom:8px">ℹ️ Necesito más información</div>`;
+    html += `<div style="color:#e2e8f0;margin-bottom:12px">${esc(q)}</div>`;
+    html += `<div style="color:#94a3b8;font-size:0.85rem;margin-bottom:8px">Refina tu mensaje arriba y vuelve a ejecutar.</div>`;
+    bodyEl("panel-interpret").innerHTML = html;
+    runBtn.disabled = false;
+    runBtn.textContent = "▶ Run";
+    return;
+  }
+
+  updatePhaseBar("confirm");
+
+  html = `<div class="kv"><dt>Contrato:</dt><dd>${esc(contractId)} v${contractVersion}</dd></div>`;
 
   if (actions.length > 0) {
     html += '<div style="margin-top:8px"><strong>Acciones propuestas</strong></div><div style="margin-top:4px">';
