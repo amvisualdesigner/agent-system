@@ -48,6 +48,7 @@ class BackendConfig:
     output_base_path: str = "src/"
     path_map: dict[str, str] = field(default_factory=dict)
     file_path_overrides: dict[str, str] = field(default_factory=dict)
+    component_signatures: dict[str, dict] = field(default_factory=dict)
 
 
 class BackendRenderer(ABC):

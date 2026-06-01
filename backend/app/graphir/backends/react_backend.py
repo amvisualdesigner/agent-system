@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -160,7 +161,7 @@ class ReactBackend(BackendRenderer):
             content = generator(ctx, uinode.layout_hints, self, config)
 
             if uinode.children:
-                composition = ReactBackend._render_children(uinode.children)
+                composition = ReactBackend._render_children(uinode.children, config)
                 content = self._inject_composition(content, composition)
 
             file_path = FilePathResolver.resolve(ctx, config)
@@ -173,17 +174,28 @@ class ReactBackend(BackendRenderer):
         return FilePathResolver.resolve(node, config)
 
     @staticmethod
-    def _render_children(children: list[UIComponentNode]) -> str:
+    def _known_prop_names(component_type: str, config: BackendConfig) -> set[str] | None:
+        """Return set of known prop names from a component's signature, or None if unknown."""
+        sig = (config.component_signatures or {}).get(component_type, {})
+        pn = sig.get("prop_names")
+        return set(pn) if pn else None
+
+    @staticmethod
+    def _render_children(children: list[UIComponentNode], config: BackendConfig) -> str:
         """UIComponentNode list → mounted JSX string.
 
-        Uses _emit() for props. Applies layout wrappers from layout_hints.
+        Uses _emit() for props. Filters unknown props when child has a known signature.
+        Applies layout wrappers from layout_hints.
         """
         parts: list[str] = []
         for child in children:
             ReactBackend._emit_log.setdefault(ReactBackend._current_run, []).append(
                 {"component": child.component, "props": dict(child.props), "node_id": child.id}
             )
-            props_str = ReactBackend._emit(child.props)
+            # Filter props against known signature to avoid type mismatches
+            known = ReactBackend._known_prop_names(child.component, config)
+            filtered_props = {k: v for k, v in child.props.items() if known is None or k in known} if child.props else child.props
+            props_str = ReactBackend._emit(filtered_props)
             child_tag = (
                 f"<{child.component} {props_str} />" if props_str
                 else f"<{child.component} />"
@@ -240,6 +252,66 @@ class ReactBackend(BackendRenderer):
 # ── Built-in Component Generators ──────────────────────────────────────
 
 
+def _sig_iface_name(sig: dict) -> str | None:
+    """Extract interface/type name from a signature props block."""
+    if not sig or not sig.get("props"):
+        return None
+    m = re.search(r'\b(?:interface|type)\s+(\w+)', sig["props"])
+    return m.group(1) if m else None
+
+
+def _build_signature_prefix(node_type: str, config: BackendConfig) -> tuple[str | None, str | None, list[str] | None]:
+    """Return (props_block, iface_name, extra_types_lines) from config signatures, or (None, None, None)."""
+    sig = (config.component_signatures or {}).get(node_type, {})
+    if sig and sig.get("props"):
+        iface = _sig_iface_name(sig)
+        extra: list[str] = []
+        for t in sig.get("extra_types", []):
+            extra.append(t)
+            extra.append("")
+        return sig["props"], iface, extra
+    return None, None, None
+
+
+def _render_signature(node_type: str, config: BackendConfig, body_lines: list[str]) -> str | None:
+    """Build full file content from signature override, or None if not available.
+
+    Produces: imports + blank + extra_types + props_block + export_with_body
+    """
+    sig = (config.component_signatures or {}).get(node_type, {})
+    if not sig or not sig.get("props"):
+        return None
+    iface = _sig_iface_name(sig)
+    if not iface:
+        return None
+
+    lines: list[str] = []
+    imps = sig.get("imports", [])
+    # Only keep imports that the stub body actually uses: React, type imports.
+    # Drop CSS modules (<...>.css), local component imports, and unused bindings.
+    kept_imports: list[str] = []
+    for imp in imps:
+        if "from 'react'" in imp or 'from "react"' in imp:
+            kept_imports.append(imp)
+        elif imp.startswith("import type"):
+            kept_imports.append(imp)
+    if not kept_imports:
+        kept_imports.append("import React from 'react';")
+    if kept_imports:
+        lines.extend(kept_imports)
+        lines.append("")
+    for t in sig.get("extra_types", []):
+        lines.append(t)
+        lines.append("")
+    lines.append(sig["props"])
+    lines.append("")
+    lines.append(f"export const {node_type}: React.FC<{iface}> = (_props) => {{")
+    lines.extend(f"  {l}" if l else "" for l in body_lines)
+    lines.append("};")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _generate_page(
     node: GraphIRNode,
     constraints: list[LayoutConstraint],
@@ -247,6 +319,17 @@ def _generate_page(
     config: BackendConfig,
 ) -> str:
     open_tag, close_tag = ReactBackend._layout_to_wrapper(constraints)
+    body = [
+        "  return (",
+        f"    {open_tag}",
+        "      __COMPOSITION__",
+        f"    {close_tag}",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "",
@@ -268,6 +351,17 @@ def _generate_kpi_row(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="kpi-row">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     map_block = (
         '{metrics.map((m) => (\n'
         '      <Card key={m}>\n'
@@ -304,6 +398,17 @@ def _generate_timeseries(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="timeseries-wrapper">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -332,6 +437,17 @@ def _generate_analytics_table(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="analytics-table-wrapper">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -375,6 +491,17 @@ def _generate_filter_panel(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="filter-panel">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React, { useState } from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -417,6 +544,17 @@ def _generate_bar_chart(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="bar-chart">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -454,6 +592,17 @@ def _generate_metric_card(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="metric-card">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -484,6 +633,17 @@ def _generate_embed(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="embed-container">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "",
@@ -510,6 +670,17 @@ def _generate_search_bar(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="search-bar">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React, { useState } from 'react';",
         "",
@@ -543,6 +714,17 @@ def _generate_form(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="form-wrapper">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React, { useState } from 'react';",
         "import { Card } from '@/components/ui/Card';",
@@ -583,6 +765,17 @@ def _generate_export_button(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="export-button">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "",
@@ -609,6 +802,17 @@ def _generate_drilldown(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
+    body = [
+        "  return (",
+        '    <div className="drilldown-link">',
+        "      __COMPOSITION__",
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body)
+    if sig:
+        return sig
+
     lines = [
         "import React from 'react';",
         "",

@@ -663,10 +663,21 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         if cap_id in cap_files and cap_files[cap_id]:
             file_path_overrides[comp_type] = cap_files[cap_id][0]
 
+    # Phase 4.5: extract component signatures from worktree
+    component_signatures: dict[str, dict] = {}
+    try:
+        if context and context.workspace:
+            from app.signature.extractor import extract_signatures
+            component_signatures = extract_signatures(context.workspace)
+            logger.info("Component signatures: %d extracted", len(component_signatures))
+    except Exception as e:
+        logger.warning("Could not extract component signatures: %s", e)
+
     backend_config = BackendConfig(
         output_base_path=base_path,
         path_map=path_map,
         file_path_overrides=file_path_overrides,
+        component_signatures=component_signatures,
     )
 
     # ── Audit var holders ──

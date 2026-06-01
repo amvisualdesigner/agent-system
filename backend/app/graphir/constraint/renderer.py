@@ -295,7 +295,10 @@ class RepositoryAwareRenderer:
 
             imports.append(f"import {{{ui_node.component}}} from '{rel_path}';")
 
-            props_str = ReactBackend._emit(ui_node.props)
+            # Filter props against known signature to avoid type mismatches
+            known = ReactBackend._known_prop_names(ui_node.component, config)
+            filtered_props = {k: v for k, v in ui_node.props.items() if known is None or k in known} if ui_node.props else ui_node.props
+            props_str = ReactBackend._emit(filtered_props)
             child_constraints = layout.constraints.get(cid, [])
 
             child_tag = (
