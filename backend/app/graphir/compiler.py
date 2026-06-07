@@ -3,8 +3,9 @@
 Deterministic, no-loss transformation. Single source of truth for rendering.
 
 Rules:
-  - props = dict(node.data) — shallow copy (fallback without PropMapper)
-  - With Phase 5 PropMapper: props = resolve_props(contract_params, component_signature)
+  - props = {} (default) — BindingResolver is the ONLY source of UI props.
+    compiler MUST NOT read node.data for UI props (HARD RULE — Binding v4 STEP 2).
+  - resolved_bindings from BindingResolver → UIComponentNode.props
   - NO schema pruning, NO default injection, NO conditional logic
   - GraphIR edges → UIComponentNode.children (identical topology)
   - LayoutConstraint → UIComponentNode.layout_hints
@@ -15,9 +16,10 @@ Phase 6 — Composition Data Flow:
   - Children do NOT receive workspace (no data_access.json resolution).
   - validate_node() enforces: non-Page nodes must NOT have data_imports.
 
-Invariant enforced at construction:
-  forall node in GraphIR:
-    node.data.keys() ⊆ UIComponentNode.props.keys() (only when PropMapper NOT used)
+Binding v4 invariants (enforced post-KILL_SWITCH):
+  - forall component: props is sourced from ResolvedBindings, NOT from node.data
+  - node.data contains INTENT (contract params), NOT UI props
+  - Missing binding for a required prop → MISSING_REQUIRED_PROPS (not silent empty)
 
 Compilation gate (CRITICAL):
   MISSING_REQUIRED_PROPS — raised when a component has required props that
@@ -173,16 +175,17 @@ class UIIRCompiler:
         sig = (component_signatures or {}).get(node.type)
 
         # ── Props resolution ──
-        # Get pre-resolved props from BindingResolver if available.
-        # No resolve_props() call — BindingResolver already translated
-        # contract_params → component_props.
+        # HARD RULE: compiler MUST NOT access node.data for UI props.
+        # node.data is intent layer (semantic params like "metrics", "metric").
+        # Only BindingResolver output (component_props) is valid for UI props.
+        # Intent params are consumed by BindingResolver BEFORE compile() is called.
         if resolved_bindings and node.type in resolved_bindings.component_props:
             resolved = resolved_bindings.component_props[node.type]
             props = dict(resolved)
             data_imports = tuple(resolved_bindings.imports)
             binding_missing = ()
         else:
-            props = dict(node.data)
+            props = {}  # no fallback — BindingResolver is the only source
             data_imports = ()
             binding_missing = ()
 
@@ -231,11 +234,6 @@ class UIIRCompiler:
 
         instance_only = node.metadata.get("instance_only", False) if node.metadata else False
 
-        # fallback_props: preserve original node.data.
-        # Read-only snapshot — NOT a resolution source for required props.
-        # Only used for optional props.
-        fallback_props = dict(node.data)
-
         return UIComponentNode(
             id=node.id,
             component=node.type,
@@ -243,7 +241,6 @@ class UIIRCompiler:
             data_imports=data_imports,
             instance_only=instance_only,
             binding_missing_props=binding_missing,
-            fallback_props=fallback_props,
             children=children,
             layout_hints=layout.constraints.get(node_id, []),
         )

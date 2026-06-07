@@ -45,7 +45,7 @@ class TestUIIRCompiler(unittest.TestCase):
     """UIIRCompiler — GraphIR → UIComponentTree invariants."""
 
     def test_propagation_invariant(self):
-        """All node.data keys must appear in UIComponentNode.props."""
+        """Without BindingResolver, props = {} (intent is not UI props)."""
         node = GraphIRNode(
             id="table1", type="AnalyticsTable",
             data={"columns": ["A", "B"], "loading": None, "page_size": 50},
@@ -53,17 +53,12 @@ class TestUIIRCompiler(unittest.TestCase):
         graph = _make_graph({"table1": node}, root="table1")
         tree = UIIRCompiler.compile(graph, graph.layout)
 
-        self.assertEqual(tree.root.props["columns"], ("A", "B"))
-        self.assertIsNone(tree.root.props["loading"])
-        self.assertEqual(tree.root.props["page_size"], 50)
-        # Verify all keys present
-        self.assertEqual(
-            set(tree.root.props.keys()),
-            {"columns", "loading", "page_size"},
-        )
+        # BindingResolver is the ONLY source of UI props.
+        # Without it, props is empty — node.data is intent, not UI.
+        self.assertEqual(tree.root.props, {})
 
     def test_no_loss_multi_key(self):
-        """5+ keys of mixed types — all present after compile."""
+        """Without BindingResolver, all node.data keys are ignored (intent)."""
         data = {
             "columns": ["Metric", "Value"],
             "metrics": ["revenue", "growth"],
@@ -77,9 +72,8 @@ class TestUIIRCompiler(unittest.TestCase):
         graph = _make_graph({"kpi1": node}, root="kpi1")
         tree = UIIRCompiler.compile(graph, graph.layout)
 
-        self.assertEqual(set(tree.root.props.keys()), set(data.keys()))
-        for k in data:
-            self.assertEqual(tree.root.props[k], node.data[k])
+        # Intent (node.data) is NOT UI props — BindingResolver is the bridge.
+        self.assertEqual(tree.root.props, {})
 
     def test_multi_node_tree_consistency(self):
         """GraphIR edges → UIComponentNode.children structure."""
@@ -159,7 +153,8 @@ class TestUIIRCompiler(unittest.TestCase):
         self.assertEqual(len(tree.root.children), 1)
         section_node = tree.root.children[0]
         self.assertEqual(section_node.component, "BarChart")
-        self.assertEqual(section_node.props["title"], "Section")
+        # Intent is not UI — no BindingResolver → props = {}
+        self.assertEqual(section_node.props, {})
         self.assertEqual(len(section_node.children), 1)
         self.assertEqual(section_node.children[0].component, "AnalyticsTable")
 

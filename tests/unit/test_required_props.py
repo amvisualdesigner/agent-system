@@ -406,18 +406,13 @@ class TestCompilerRequiredPropsGate:
         assert "metrics" in tree.root.props
         assert "title" not in tree.root.props  # optional, missing
 
-    def test_fallback_props_used_when_no_binding(self):
-        """PR1: When no resolved_bindings for a type, node.data IS used as props.
-        
-        This differs from the old behavior (where fallback_props was NOT consulted
-        for required props). In the new architecture, node.data is the structural
-        source of truth when BindingResolver has no entry for this component.
-        """
+    def test_missing_binding_raises_missing_required_props(self):
+        """Without BindingResolver for a component with required props → error."""
         node_id = "ts:1"
         node = GraphIRNode(
             id=node_id,
             type="Timeseries",
-            data={"data": [1, 2, 3]},  # fallback data
+            data={"data": [1, 2, 3]},  # intent (not UI props)
         )
         graph = GraphIR(
             nodes={node_id: node},
@@ -433,12 +428,14 @@ class TestCompilerRequiredPropsGate:
         }
         sigs = {"Timeseries": sig}
         resolved = ResolvedBindings(component_props={}, page_data_source=None)
-        tree = UIIRCompiler.compile(
-            graph, graph.layout,
-            resolved_bindings=resolved,
-            component_signatures=sigs,
-        )
-        assert list(tree.root.props.get("data")) == [1, 2, 3]
+        with pytest.raises(MISSING_REQUIRED_PROPS) as exc:
+            UIIRCompiler.compile(
+                graph, graph.layout,
+                resolved_bindings=resolved,
+                component_signatures=sigs,
+            )
+        assert exc.value.component == "Timeseries"
+        assert "data" in exc.value.missing
 
 class TestRendererRequiredPropsGuard:
     """Tests for render-time required-prop guards."""

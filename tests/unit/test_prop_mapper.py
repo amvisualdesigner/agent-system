@@ -563,17 +563,18 @@ class TestBindingResultStructure:
 class TestLoadDataAccessConfig:
     """_load_data_access_config — always loads global SSOT."""
 
-    def test_global_config_loads_v3(self):
+    def test_global_config_loads_v4(self):
         result = _load_data_access_config()
         assert result is not None
         assert "components" in result
-        assert "Page" in result["components"]
-        assert "dataSource" in result["components"]["Page"]
+        assert "composition" in result
+        assert "Page" in result["composition"]
+        assert "dataSource" in result["composition"]["Page"]
 
-    def test_global_config_has_page(self):
+    def test_global_config_has_composition_page(self):
         result = _load_data_access_config()
         assert result is not None
-        assert "Page" in result["components"]
+        assert "Page" in result.get("composition", {})
 
     def test_missing_file_returns_none(self, monkeypatch):
         """Simulate missing config file via os.path.exists."""
@@ -607,32 +608,35 @@ class TestLoadDataAccessConfig:
 
     def test_component_not_in_data_access_falls_through(self):
         config = _load_data_access_config()
-        assert "Page" in config["components"]
+        # Page is in composition, not components in v4
+        assert "Page" not in config.get("components", {})
 
-    def test_global_config_is_v3_with_datasource(self):
+    def test_global_config_is_v4_with_datasource(self):
         result = _load_data_access_config()
         assert result is not None
         assert "components" in result
-        assert "Page" in result["components"]
-        # Verify it's v3 (has dataSource not bindings)
-        page_cfg = result["components"]["Page"]
+        assert "composition" in result
+        # Verify it's v4 (composition.Page.dataSource, not components.Page.dataSource)
+        page_cfg = result.get("composition", {}).get("Page", {})
         assert "dataSource" in page_cfg
 
 
 class TestParseBindings:
     """_parse_bindings correctness."""
 
-    def test_global_config_has_no_per_component_bindings(self):
-        """Global config is v3 with dataSource only — no per-component bindings."""
+    def test_global_config_has_per_component_bindings(self):
+        """Global config is v4 with per-component bindings."""
         data = _load_data_access_config()
         bindings = _parse_bindings(data)
-        assert len(bindings) == 0
+        assert len(bindings) >= 11  # KpiRow, Timeseries, AnalyticsTable, BarChart, etc.
 
-    def test_v3_config_returns_no_bindings(self):
-        """v3 config has dataSource, not bindings → bindings map is empty."""
+    def test_v4_config_returns_bindings(self):
+        """v4 config has per-component props → bindings map populated."""
         data = _load_data_access_config()
         bindings = _parse_bindings(data)
-        assert len(bindings) == 0
+        assert len(bindings) > 0
+        assert "KpiRow" in bindings
+        assert "Timeseries" in bindings
 
     def test_find_binding_returns_correct(self):
         bindings_map = {

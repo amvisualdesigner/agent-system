@@ -48,7 +48,6 @@ class UIComponentNode:
     data_imports: tuple[str, ...] = ()
     instance_only: bool = False
     binding_missing_props: tuple[str, ...] = ()
-    fallback_props: dict[str, Any] = field(default_factory=dict)
     children: list[UIComponentNode] = field(default_factory=list)
     layout_hints: list[Any] = field(default_factory=list)
 

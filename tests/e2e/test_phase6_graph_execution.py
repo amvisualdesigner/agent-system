@@ -64,7 +64,7 @@ def _render_page(
     Args:
         children: list of (node_id, type, data_dict)
         page_data: data for Page node (default: {})
-        slices: list of slice dicts for data_access.json
+        slices: list of slice dicts for data_access.json (legacy)
         resolved_bindings: pre-resolved bindings (PR1: contract_params never
                           reach the compiler/renderer)
     """

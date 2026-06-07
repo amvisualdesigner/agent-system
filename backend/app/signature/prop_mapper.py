@@ -211,6 +211,62 @@ class BindingResult:
     provenance: dict[str, list[str]] = field(default_factory=dict)
 
 
+# ── v4 Binding format ───────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class V4BindingDef:
+    """A single v4 binding definition for a component prop.
+
+    Maps a contract param (from_field) to a component prop, with
+    optional transform, default, and arity hint.
+
+    Attributes:
+        from_field: contract_params field this binding consumes
+        transform: registered transform name (identity, items, wrap, value, label)
+        arity: cardinality hint (scalar, array, scalar->array)
+        shape: type hint (documentation only)
+        default: fallback value if from_field not in contract_params
+        required: if True and no from_field + no default → MISSING_CONTRACT_PARAM
+    """
+    from_field: str
+    transform: str = "identity"
+    arity: str | None = None
+    shape: str | None = None
+    default: Any | None = None
+    required: bool = False
+
+
+def load_v4_bindings() -> dict[str, dict[str, V4BindingDef]]:
+    """Load per-component v4 bindings from data_access.json.
+
+    Returns {component_type: {prop_name: V4BindingDef}} from
+    components.X.props entries. Returns empty dict if no v4 bindings.
+    """
+    data = _load_data_access_config()
+    if not data:
+        return {}
+    components = data.get("components", {})
+    result: dict[str, dict[str, V4BindingDef]] = {}
+    for comp_name, comp_data in components.items():
+        props = comp_data.get("props") if isinstance(comp_data, dict) else None
+        if not props:
+            continue
+        bindings: dict[str, V4BindingDef] = {}
+        for prop_name, prop_cfg in props.items():
+            bindings[prop_name] = V4BindingDef(
+                from_field=prop_cfg.get("from", ""),
+                transform=prop_cfg.get("transform", "identity"),
+                arity=prop_cfg.get("arity"),
+                shape=prop_cfg.get("shape"),
+                default=prop_cfg.get("default"),
+                required=prop_cfg.get("required", False),
+            )
+        if bindings:
+            result[comp_name] = bindings
+    return result
+
+
 # ── BindingIR compilation ────────────────────────────────────────────────
 
 
@@ -255,34 +311,59 @@ def _derive_import(source: DataSourceIR) -> str | None:
 
 
 def load_page_data_source() -> DataSourceIR | None:
-    """Load Page-level DataSourceIR from backend/config/data_access.json (v3 format).
+    """Load Page-level DataSourceIR from backend/config/data_access.json (v4 format).
 
     SSOT: backend/config/data_access.json is the SINGLE source of truth.
     No workspace override, no .opencode lookup.
 
-    In Phase 6, only Page can own a data source. Children receive data slices.
-    The data_access.json v3 format places 'dataSource' + 'slices' under Page's
-    component entry, replacing the old per-component 'bindings'.
+    In v4, Page's dataSource lives under 'composition.Page.dataSource'.
+    Falls back to v3 location 'components.Page.dataSource' for backward compat.
 
-    Returns DataSourceIR with slices populated, or None if:
-      - No data_access.json exists
-      - Page has no 'dataSource' key
-      - Missing or invalid type
+    Returns DataSourceIR with slices populated, or None if missing.
     """
     data = _load_data_access_config()
     if not data:
         return None
+    # v4 format: composition.Page.dataSource
+    comp = data.get("composition", {})
+    page_cfg = comp.get("Page") if comp else None
+    ds_raw = page_cfg.get("dataSource") if page_cfg else None
+    if ds_raw:
+        return _infer_datasource_ir(ds_raw)
+    # v3 fallback: components.Page.dataSource
     comps = data.get("components", {})
-    page_cfg = comps.get("Page")
-    if not page_cfg:
-        return None
-    ds_raw = page_cfg.get("dataSource")
-    if not ds_raw:
-        return None
-    return _infer_datasource_ir(ds_raw)
+    page_cfg_v3 = comps.get("Page")
+    if page_cfg_v3:
+        ds_raw_v3 = page_cfg_v3.get("dataSource")
+        if ds_raw_v3:
+            return _infer_datasource_ir(ds_raw_v3)
+    return None
 
 
 # ── data_access.json loader (new format) ─────────────────────────────────
+
+
+def load_workspace_data_source(workspace: str) -> DataSourceIR | None:
+    """Load DataSourceIR from workspace .opencode/data_access.json (legacy v3).
+
+    Used by BindingResolver for backward compat with Phase 6 tests.
+    Production uses global SSOT via load_page_data_source().
+    """
+    ws_path = os.path.join(workspace, ".opencode", "data_access.json")
+    if not os.path.exists(ws_path):
+        return None
+    try:
+        with open(ws_path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        page_cfg = (data.get("components") or {}).get("Page") or {}
+        ds_raw = page_cfg.get("dataSource")
+        if ds_raw:
+            return _infer_datasource_ir(ds_raw)
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _load_data_access_config() -> dict | None:

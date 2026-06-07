@@ -1,9 +1,141 @@
 {
-  "version": 3,
+  "version": 4,
   "components": {
+    "KpiRow": {
+      "props": {
+        "data": {
+          "from": "metrics",
+          "transform": "items",
+          "arity": "array",
+          "shape": "KpiItem[]"
+        }
+      }
+    },
+    "Timeseries": {
+      "props": {
+        "data": {
+          "from": "metric",
+          "transform": "wrap",
+          "arity": "scalar→array",
+          "shape": "Point[]"
+        },
+        "title": {
+          "from": "chartTitle",
+          "default": "Trend",
+          "arity": "scalar"
+        }
+      }
+    },
+    "AnalyticsTable": {
+      "props": {
+        "columns": {
+          "from": "columns",
+          "arity": "array"
+        },
+        "data": {
+          "from": "tableData",
+          "arity": "array"
+        }
+      }
+    },
+    "BarChart": {
+      "props": {
+        "data": {
+          "from": "metrics",
+          "transform": "items",
+          "arity": "array",
+          "shape": "Array<{label: string, value: number}>"
+        }
+      }
+    },
+    "MetricCard": {
+      "props": {
+        "value": {
+          "from": "metric",
+          "transform": "value",
+          "arity": "scalar"
+        },
+        "label": {
+          "from": "metric",
+          "transform": "label",
+          "arity": "scalar"
+        }
+      }
+    },
+    "FilterPanel": {
+      "props": {
+        "filters": {
+          "from": "filters",
+          "transform": "identity",
+          "arity": "array"
+        }
+      }
+    },
+    "Embed": {
+      "props": {
+        "src": {
+          "from": "src",
+          "transform": "identity",
+          "arity": "scalar"
+        },
+        "title": {
+          "from": "title",
+          "transform": "identity",
+          "default": "Embedded content",
+          "arity": "scalar"
+        }
+      }
+    },
+    "SearchBar": {
+      "props": {
+        "placeholder": {
+          "from": "placeholder",
+          "default": "Search...",
+          "arity": "scalar"
+        }
+      }
+    },
+    "Form": {
+      "props": {
+        "fields": {
+          "from": "fields",
+          "transform": "identity",
+          "arity": "array"
+        }
+      }
+    },
+    "ExportButton": {
+      "props": {
+        "format": {
+          "from": "format",
+          "default": "csv",
+          "arity": "scalar"
+        }
+      }
+    },
+    "Drilldown": {
+      "props": {
+        "label": {
+          "from": "label",
+          "default": "View details",
+          "arity": "scalar"
+        },
+        "target": {
+          "from": "target",
+          "transform": "identity",
+          "arity": "scalar"
+        }
+      }
+    }
+  },
+  "composition": {
     "Page": {
       "dataSource": {
         "type": "dashboard_data",
+        "hook": {
+          "name": "useDashboardData",
+          "import": "@/hooks/useDashboardData"
+        },
         "slices": [
           {
             "component": "KpiRow",

@@ -159,14 +159,15 @@ class TestBindingResolverGolden:
         assert content.count("data={_pageData.chartData}") == 2
         assert content.count('title="Chart"') == 2
 
-    def test_missing_component_props_still_work(self):
-        """PR2: Componente sin entry en component_props usa node.data."""
+    def test_missing_component_props_emits_bare_tag(self):
+        """Componente sin entry en component_props emite tag vacío."""
         _, content = _render_with_bindings(
             children=[("ts", "Timeseries", {"title": "From Node"})],
             component_props={},  # Timeseries no tiene binding
         )
-        # Without component_props, the renderer falls back to node.data
-        assert '<Timeseries title="From Node" />' in content or '<Timeseries' in content
+        # No fallback — node.data is intent, not UI props.
+        # Sin BindingResolver, the component emits bare tag.
+        assert '<Timeseries />' in content
 
     def test_provenance_in_emit_log(self):
         """PR2: Provenance tracking llega al emit log."""
