@@ -49,6 +49,7 @@ class BackendConfig:
     path_map: dict[str, str] = field(default_factory=dict)
     file_path_overrides: dict[str, str] = field(default_factory=dict)
     component_signatures: dict[str, dict] = field(default_factory=dict)
+    workspace: str | None = None
 
 
 class BackendRenderer(ABC):

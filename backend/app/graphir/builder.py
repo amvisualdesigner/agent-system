@@ -91,6 +91,7 @@ class GraphIRBuilder:
             else None
         )
 
+        instance_only = intent.source == "structural_instance"
         node = GraphIRNode(
             id=node_id,
             type=graphir_type,
@@ -100,6 +101,7 @@ class GraphIRBuilder:
                 "intent_id": intent.id,
                 "intent_capability": intent.capability,
                 "intent_source": intent.source,
+                "instance_only": instance_only,
             },
         )
         draft.add_node(node)
@@ -241,15 +243,16 @@ class GraphIRBuilder:
             action = op["action"]
             target = op["target"]
             payload = op.get("payload", {})
+            instance_only = op.get("instance_only", False)
 
-            if action not in (CREATE, MODIFY):
+            if action not in (CREATE, MODIFY) and not instance_only:
                 continue
 
             intent = Intent(
                 id=make_intent_id(f"op:{action}:{target}", target, "structural"),
                 capability=target,
                 params=dict(payload),
-                source=f"structural_{action.lower()}",
+                source=f"structural_{action.lower()}" if not instance_only else "structural_instance",
             )
             intents.append(intent)
 

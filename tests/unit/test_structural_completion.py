@@ -751,7 +751,7 @@ class TestCompleteStructureWithActions:
         keeps = [c for c in ir.capabilities if c.action == "KEEP"]
         assert len(keeps) > 0
         for k in keeps:
-            assert k.params == {}
+            # KEEP now populates params from contract defaults for composition
             assert k.mode == CompletionMode.SAFE_SKIP
 
     def test_modify_action_from_semantic(self, dashboard_contract):

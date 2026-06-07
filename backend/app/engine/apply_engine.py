@@ -36,6 +36,8 @@ from app.graphir.structural_coverage import (
     StructuralIntegrityError,
     StructuralCoverageReport,
 )
+from app.graphir.compiler import MISSING_REQUIRED_PROPS
+from app.binding.resolver import resolve as resolve_bindings
 from app.graphir.pipeline import GraphIRPipeline
 from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops, FileOp
@@ -418,13 +420,21 @@ def _build_audit(
             "completion_warnings": structural_ir.completion_warnings,
         }
 
-        # UI layer: rendering representation
+        # UI layer: rendering representation + semantic binding fidelity
+        _last_tree = ReactBackend.last_ui_tree
+        if _last_tree is not None:
+            ui_meta = {
+                "semantic_warnings": list(_last_tree.semantic_warnings),
+                "semantic_fidelity_score": _last_tree.semantic_fidelity_score,
+                "consumed_params": sorted(_last_tree.consumed_params),
+            }
         trace["ui"] = {
             "graph": {
                 "nodes": list(graph.nodes.keys()),
                 "edges": len(graph.edges),
             },
             "render_coverage": render_coverage,
+            "semantic": ui_meta,
         }
 
         # Execution layer: binding and side effects
@@ -678,6 +688,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         path_map=path_map,
         file_path_overrides=file_path_overrides,
         component_signatures=component_signatures,
+        workspace=context.workspace,
     )
 
     # ── Audit var holders ──
@@ -728,7 +739,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             )
 
         matcher = IntentFileMatcher()
-        resolver = IdentityResolver(resolved_mapping=resolved_mapping)
+        resolver = IdentityResolver(
+            resolved_mapping=resolved_mapping,
+            file_path_overrides=file_path_overrides,
+        )
         renderer = RepositoryAwareRenderer()
 
         # Pre-compute decisions (needed for memory persistence)
@@ -779,11 +793,26 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                         with open(abs_path) as f:
                             existing_content[target] = f.read()
 
-        fileops = renderer.render(
-            graph, graph_layout, backend_config,
-            context=render_ctx,
-            existing_content_by_path=existing_content,
-        )
+        contract_params = contract_resolution.contract_params if contract_resolution else None
+        resolved_bindings = resolve_bindings(
+            contract_params or {},
+        ) if contract_params else None
+        try:
+            fileops = renderer.render(
+                graph, graph_layout, backend_config,
+                context=render_ctx,
+                existing_content_by_path=existing_content,
+                resolved_bindings=resolved_bindings,
+            )
+        except MISSING_REQUIRED_PROPS as e:
+            return {
+                "execution": {
+                    "status": "rejected",
+                    "reason": str(e),
+                    "diff": None, "operations": [],
+                },
+                "context": {"repo_snapshot": []},
+            }
 
         # Collect constraint vars for audit
         _audit_decisions = decisions
@@ -839,7 +868,21 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         ReactBackend.reset_emit_log(run_id)
         ReactBackend.reset_traces(run_id)
         backend = ReactBackend()
-        fileops = backend.render(graph, graph_layout, backend_config)
+        contract_params = contract_resolution.contract_params if contract_resolution else None
+        resolved_bindings = resolve_bindings(
+            contract_params or {},
+        ) if contract_params else None
+        try:
+            fileops = backend.render(graph, graph_layout, backend_config, resolved_bindings=resolved_bindings)
+        except MISSING_REQUIRED_PROPS as e:
+            return {
+                "execution": {
+                    "status": "rejected",
+                    "reason": str(e),
+                    "diff": None, "operations": [],
+                },
+                "context": {"repo_snapshot": []},
+            }
 
     # ── Capture emitted props ──
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))

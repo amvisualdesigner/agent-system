@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -39,11 +40,16 @@ def agent_interpret(req: InterpretRequest):
     try:
         from app.engine.structural_index import StructuralIndex
         from app.runtime.context import build_context
+        from app.executor.worktree_manager import ensure_worktree
+
         context = build_context(run_id)
-        if context and context.workspace:
-            idx = StructuralIndex.from_worktree(context.workspace)
-            index_snapshot = {cap: idx.resolve_all_paths(cap) for cap in idx}
-            logger.info("worktree_capabilities index: %d caps", len(index_snapshot))
+        ensure_worktree(context)
+        idx = StructuralIndex.from_worktree(context.workspace)
+        index_snapshot = {cap: idx.resolve_all_paths(cap) for cap in idx}
+        logger.info(
+            "worktree_capabilities index: %d caps from workspace=%s",
+            len(index_snapshot), context.workspace,
+        )
     except Exception as e:
         logger.warning("Could not load StructuralIndex snapshot: %s", e)
 

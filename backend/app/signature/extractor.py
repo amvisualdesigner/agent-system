@@ -17,8 +17,8 @@ _ALL_TYPE_PATTERN = re.compile(
 _COMPONENT_EXPORT_PATTERN = re.compile(
     r'export\s+(?:function|const)\s+(\w+)',
 )
-_PROP_NAME_PATTERN = re.compile(
-    r'^\s+(\w+)\??:',
+_PROP_DETAIL_PATTERN = re.compile(
+    r'^\s+(\w+)(\??)\s*:\s*(.+?);?\s*$',
     re.MULTILINE,
 )
 
@@ -126,14 +126,53 @@ def _extract_single_file(filepath: str) -> dict[str, Any] | None:
         if block != props_block:
             extra_types.append(block)
 
-    # Extract prop names from the props interface
-    prop_names: list[str] = _PROP_NAME_PATTERN.findall(props_block)
+    # Extract prop names + distinguish required vs optional from the interface block
+    required_props: list[str] = []
+    optional_props: list[str] = []
+    for m in _PROP_DETAIL_PATTERN.finditer(props_block):
+        name, is_optional = m.group(1), m.group(2)
+        if is_optional == '?':
+            optional_props.append(name)
+        else:
+            required_props.append(name)
+    prop_names: list[str] = required_props + optional_props
+
+    # Fase 2.5: SIGNATURE_EMPTY warning — detect extractor regressions early
+    if component_name and not prop_names and ("Props" in props_block or "Props" in component_name):
+        logger.warning(
+            "SIGNATURE_EMPTY component=%s file=%s interface_found=%s props_extracted=[]",
+            component_name,
+            filepath,
+            props_type_name or "Props",
+        )
 
     return {
         "component_name": component_name,
         "props": props_block.strip(),
         "extra_types": extra_types,
         "prop_names": prop_names,
+        "required_props": required_props,
+        "optional_props": optional_props,
         "imports": imports,
         "file_path": filepath,
+    }
+
+
+def get_signature_metrics(signatures: dict[str, dict[str, Any]]) -> dict[str, int]:
+    """Fase 2.4: Generate structured signature metrics report.
+
+    Returns:
+        dict with total_components, parsed_components,
+        empty_signatures, components_with_required_props
+    """
+    total = len(signatures)
+    with_props = sum(1 for s in signatures.values() if s.get("prop_names"))
+    empty_sigs = sum(1 for s in signatures.values() if not s.get("prop_names"))
+    with_required = sum(1 for s in signatures.values() if s.get("required_props"))
+
+    return {
+        "total_components": total,
+        "parsed_components": with_props,
+        "empty_signatures": empty_sigs,
+        "components_with_required_props": with_required,
     }

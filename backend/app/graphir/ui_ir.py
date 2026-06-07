@@ -14,7 +14,10 @@ Architecture:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.signature.prop_mapper import DataSourceIR
 
 
 @dataclass
@@ -42,6 +45,10 @@ class UIComponentNode:
     id: str
     component: str
     props: dict[str, Any]
+    data_imports: tuple[str, ...] = ()
+    instance_only: bool = False
+    binding_missing_props: tuple[str, ...] = ()
+    fallback_props: dict[str, Any] = field(default_factory=dict)
     children: list[UIComponentNode] = field(default_factory=list)
     layout_hints: list[Any] = field(default_factory=list)
 
@@ -62,8 +69,26 @@ class UIComponentTree:
     """Complete framework-agnostic component tree.
 
     Produced by UIIRCompiler.compile(). Single source of truth for rendering.
+
+    Semantic metadata:
+        semantic_warnings — per-component binding issues (loss, degradation).
+        semantic_fidelity_score — proportion of contract_params consumed by
+            at least one binding in the tree (union-based, 0.0–1.0).
+        consumed_params — union of all contract param keys consumed by any
+            binding in the tree.
+        provenance — traceability map: {node_id: {prop_name: [contract_param_names]}}.
+            Links generated props back to the contract params that originated them.
+        page_data_source — Phase 6: Page-level data source with slices.
+            When set, Page is the sole data owner; children receive data via
+            JSVariable references from Page's hook result. None means no
+            Page-level data aggregation (legacy/migration mode).
     """
     root: UIComponentNode
+    semantic_warnings: list[str] = field(default_factory=list)
+    semantic_fidelity_score: float = 1.0
+    consumed_params: set[str] = field(default_factory=set)
+    provenance: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    page_data_source: Any | None = None
 
 
 @dataclass

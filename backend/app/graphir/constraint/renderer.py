@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import os
 import logging
+from typing import Any
 
+from app.binding.models import ResolvedBindings
 from app.graphir.backends import ReactBackend
-from app.graphir.backends.react_backend import _flatten_tree
+from app.graphir.backends.react_backend import _flatten_tree, JSVariable
 from app.graphir.models import FileOp
 from app.graphir.compiler import UIIRCompiler
 from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
@@ -77,6 +79,7 @@ class RepositoryAwareRenderer:
         config,
         context: RenderContext | None = None,
         existing_content_by_path: dict[str, str] | None = None,
+        resolved_bindings: ResolvedBindings | None = None,
     ) -> list[FileOp]:
         """Produce FileOps from GraphIR + RenderContext (PURE).
 
@@ -86,6 +89,9 @@ class RepositoryAwareRenderer:
 
         All existing file content for line-range merges arrives via
         existing_content_by_path — NO filesystem reads.
+
+        Props are pre-resolved by BindingResolver — contract_params never
+        reach the compiler or renderer (PR1 Binding Resolution Architecture).
 
         Args:
             graph: GraphIR instance
@@ -116,13 +122,39 @@ class RepositoryAwareRenderer:
                                                      FEATURE_FLAGS.get("constraint_graph_line_range", False))
 
         # Compile UI tree ONCE — single source of truth for rendering
-        ui_tree = UIIRCompiler.compile(graph, layout)
+        ui_tree = UIIRCompiler.compile(
+            graph, layout,
+            resolved_bindings=resolved_bindings,
+            component_signatures=config.component_signatures,
+        )
+        ReactBackend.last_ui_tree = ui_tree
         ui_node_map = RepositoryAwareRenderer._build_flat_map(ui_tree.root)
 
         fileops: list[FileOp] = []
 
         for uinode in _flatten_tree(ui_tree.root):
             ReactBackend.add_trace(uinode.id, "entered", component=uinode.component)
+
+            # instance_only: capability exists in repo, requested as CREATE.
+            # Skip file generation — the implementation file stays untouched.
+            # The node still participates in parent composition.
+            if uinode.instance_only:
+                ReactBackend.add_trace(uinode.id, "skipped_instance_only",
+                    component=uinode.component)
+                continue
+
+            # BINDING_MISSING: required prop has no binding — halt render.
+            if uinode.binding_missing_props:
+                ReactBackend.add_trace(uinode.id, "binding_missing",
+                    component=uinode.component,
+                    props={"missing_props": list(uinode.binding_missing_props)})
+                logger.error(
+                    "BINDING_MISSING: %s missing required props: %s — skipping render. "
+                    "Add binding to data_access.json.",
+                    uinode.component, uinode.binding_missing_props,
+                )
+                continue
+
             decision = decisions.get(uinode.id)
             if decision is None:
                 continue
@@ -148,15 +180,39 @@ class RepositoryAwareRenderer:
                 )
                 continue
 
+            # PR3: props come from ResolvedBindings.component_props (set in compiler).
+            page_hook_decl: str | None = None
+            if uinode.component == "Page" and ui_tree.page_data_source:
+                page_hook_decl = ReactBackend._page_hook_declaration(ui_tree.page_data_source)
+                hook_import = ReactBackend._page_hook_import(ui_tree.page_data_source)
+                if hook_import and hook_import not in uinode.data_imports:
+                    uinode.data_imports = tuple(list(uinode.data_imports) + [hook_import])
+
             # Phase 6b: Materialize composition — real imports + React tree
             child_ids = RepositoryAwareRenderer.resolve_children(uinode)
             if child_ids:
-                import_block, mount_block = self._materialize_composition(
+                import_block, mount_block, child_data_imports = self._materialize_composition(
                     ctx.id, child_ids, layout, config,
                     decisions, split_plan, ui_node_map,
                 )
                 content = self._insert_imports(content, import_block)
                 content = content.replace("__COMPOSITION__", mount_block)
+            else:
+                child_data_imports = []
+                content = content.replace("__COMPOSITION__", "")
+
+            # Phase 6: inject Page hook declaration after composition materialized
+            if page_hook_decl:
+                content = ReactBackend._inject_hook_declarations(content, [page_hook_decl])
+
+            # Phase 5: inject data_access.json imports (Page only in Phase 6)
+            if uinode.data_imports:
+                content = ReactBackend._inject_data_imports(content, uinode.data_imports)
+
+            # Fix 1 — Export normalization: rename export to match filename
+            file_basename = os.path.splitext(os.path.basename(file_path))[0]
+            if uinode.component != file_basename and file_basename:
+                content = ReactBackend._normalize_export_name(content, uinode.component, file_basename)
 
             # 2) Phase 4: Check for SPLIT redirect
             if split_plan.is_splitting(decision.target_file):
@@ -249,17 +305,18 @@ class RepositoryAwareRenderer:
         decisions: dict[str, object],
         split_plan: RefactoringPlan | None = None,
         ui_node_map: dict[str, UIComponentNode] | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[str]]:
         """Generate real React imports and mount JSX for children.
 
         Phase 6b: Uses UIComponentTree (via ui_node_map) for child data,
         NEVER accesses graph.nodes directly. Props come from UIComponentNode.props.
 
         Returns:
-            (import_block, mount_block) — strings to inject into content.
+            (import_block, mount_block, child_data_imports) — strings + imports to inject.
         """
         imports: list[str] = []
         mounts: list[str] = []
+        child_data_imports: list[str] = []
 
         parent_decision = decisions.get(parent_node_id)
         parent_file: str = ""
@@ -274,6 +331,10 @@ class RepositoryAwareRenderer:
             ui_node = ui_node_map.get(cid)
             if ui_node is None:
                 continue
+
+            # Collect data_access.json imports from children
+            if ui_node.data_imports:
+                child_data_imports.extend(ui_node.data_imports)
 
             child_decision = decisions.get(cid)
             if child_decision is None:
@@ -297,6 +358,13 @@ class RepositoryAwareRenderer:
 
             # Filter props against known signature to avoid type mismatches
             known = ReactBackend._known_prop_names(ui_node.component, config)
+            if known is not None and ui_node.props:
+                unrecognized = [k for k in ui_node.props if k not in known]
+                if unrecognized:
+                    logger.debug(
+                        "PROP_FILTER component=%s unrecognized=%s known=%s",
+                        ui_node.component, unrecognized, list(known),
+                    )
             filtered_props = {k: v for k, v in ui_node.props.items() if known is None or k in known} if ui_node.props else ui_node.props
             props_str = ReactBackend._emit(filtered_props)
             child_constraints = layout.constraints.get(cid, [])
@@ -314,7 +382,7 @@ class RepositoryAwareRenderer:
 
         import_block = "\n".join(imports)
         mount_block = "\n".join(mounts)
-        return import_block, mount_block
+        return import_block, mount_block, child_data_imports
 
     @staticmethod
     def _insert_imports(content: str, import_block: str) -> str:

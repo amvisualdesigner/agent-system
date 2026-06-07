@@ -3,8 +3,34 @@ import shutil
 import subprocess
 
 from app.config.settings import settings
+from app.runtime.context import RunContext
 from app.utils.run_id import validate_run_id
 from app.utils.path_guard import guard_within
+
+
+def ensure_worktree(context: RunContext) -> str:
+    """
+    Crea el worktree si no existe. Idempotente en 3 niveles:
+      1. Instance flag (context.worktree_created)
+      2. Filesystem check (workspace dir exists)
+      3. create_worktree (solo si no existe en FS)
+    Retorna workspace path.
+    """
+    if context.worktree_created:
+        return context.workspace
+
+    workspace = f"{settings.RUNS_DIR}/{context.run_id}"
+
+    if os.path.isdir(workspace):
+        context.workspace = workspace
+        context.worktree_created = True
+        print(f"[worktree] reuse existing at {workspace}")
+        return workspace
+
+    workspace = create_worktree(context.run_id)
+    context.workspace = workspace
+    context.worktree_created = True
+    return workspace
 
 
 def create_worktree(run_id: str) -> str:
@@ -109,6 +135,24 @@ def create_worktree(run_id: str) -> str:
         cwd=workspace,
         check=False
     )
+
+    # ----------------------------
+    # 7. copiar .opencode/ local gitignorado al worktree
+    # ----------------------------
+    src_opencode = os.path.join(repo_root, ".opencode")
+    dst_opencode = os.path.join(workspace, ".opencode")
+    if os.path.isdir(src_opencode):
+        os.makedirs(dst_opencode, exist_ok=True)
+        for fname in os.listdir(src_opencode):
+            src = os.path.join(src_opencode, fname)
+            dst = os.path.join(dst_opencode, fname)
+            if os.path.isfile(src):
+                if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+                    try:
+                        shutil.copy2(src, dst)
+                        print(f"[worktree] seeded {fname}")
+                    except Exception as e:
+                        print(f"[worktree] WARN: failed to seed {fname}: {e}")
 
     print(f"[worktree] ready at {workspace}")
 

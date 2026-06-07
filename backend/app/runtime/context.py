@@ -10,6 +10,7 @@ class RunContext:
     base_dir: str
     workspace: str
     artifacts: str
+    worktree_created: bool = False
 
 
 def build_context(run_id: str, workspace_root: str | None = None) -> RunContext:
@@ -19,7 +20,6 @@ def build_context(run_id: str, workspace_root: str | None = None) -> RunContext:
     guard_within(workspace, settings.RUNS_DIR)
     guard_within(artifacts, settings.ARTIFACTS_DIR)
 
-    os.makedirs(workspace, exist_ok=True)
     os.makedirs(artifacts, exist_ok=True)
 
     return RunContext(

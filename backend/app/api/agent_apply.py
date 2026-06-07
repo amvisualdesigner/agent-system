@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from app.engine.apply_engine import apply_engine
 from app.contracts.apply_request import ApplyRequest
 from app.runtime.context import build_context
-from app.executor.worktree_manager import create_worktree
+from app.executor.worktree_manager import ensure_worktree
 from app.intent.models import RunPhase
 from app.utils.run_id import validate_run_id
 
@@ -49,7 +49,7 @@ def agent_apply(req: ApplyRequest):
     transition_phase(run_id, RunPhase.APPLYING)
 
     context = build_context(run_id)
-    context.workspace = create_worktree(run_id)
+    ensure_worktree(context)
 
     # Use persisted plan when none passed (state machine flow)
     plan = req.plan or state.get("compiled_plan")

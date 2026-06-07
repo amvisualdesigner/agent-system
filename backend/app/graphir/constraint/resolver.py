@@ -40,13 +40,22 @@ class IdentityResolver:
     Args:
         resolved_mapping: dict[fingerprint, MemoryRecord] from semantic memory
             (Phase 6a+). Empty in Phase 1 (all decisions via scoring).
+        file_path_overrides: dict[component_type, real_repo_path] from
+            _discover_repo_capability_files(). When set, overrides target_file
+            so decisions land on real repo files (e.g., SalesOverviewPage.tsx
+            instead of Page.tsx).
     """
 
     UPDATE_THRESHOLD = 0.55
     EXTEND_THRESHOLD = 0.35
 
-    def __init__(self, resolved_mapping: dict[str, MemoryRecord] | None = None):
+    def __init__(
+        self,
+        resolved_mapping: dict[str, MemoryRecord] | None = None,
+        file_path_overrides: dict[str, str] | None = None,
+    ):
         self.resolved_mapping = resolved_mapping or {}
+        self.file_path_overrides = file_path_overrides or {}
 
     def resolve(
         self,
@@ -71,9 +80,34 @@ class IdentityResolver:
         for node_id in identities:
             identity = identities[node_id]
             decision = self._decide(identity, node_id, candidates, file_nodes)
-            decisions[node_id] = decision
+            decisions[node_id] = self._apply_override(decision, identity, file_nodes)
 
         return decisions
+
+    def _apply_override(
+        self,
+        decision: FileOpDecision,
+        identity: CanonicalIdentity,
+        file_nodes: dict[str, object],
+    ) -> FileOpDecision:
+        if not self.file_path_overrides:
+            return decision
+        override = self.file_path_overrides.get(identity.component_name)
+        if override is None or override == decision.target_file:
+            return decision
+        new_decision = Decision.UPDATE if override in file_nodes else decision.decision
+        logger.info(
+            "Ownership override: %s target %s → %s (decision=%s)",
+            identity.component_name, decision.target_file, override, new_decision,
+        )
+        return FileOpDecision(
+            intent_id=decision.intent_id,
+            graphir_node_id=decision.graphir_node_id,
+            decision=new_decision,
+            target_file=override,
+            confidence=decision.confidence,
+            rationale=f"{decision.rationale} | OWNERSHIP OVERRIDE → {override}",
+        )
 
     def _decide(
         self,
