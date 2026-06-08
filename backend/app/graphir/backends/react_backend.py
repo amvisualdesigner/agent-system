@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar
 
+logger = logging.getLogger(__name__)
+
 from app.binding.models import ResolvedBindings
 from app.graphir.compiler import UIIRCompiler
 from app.graphir.models import FileOp, GraphIR, GraphIRNode, LayoutConstraint
@@ -1114,3 +1116,103 @@ ReactBackend.register("SearchBar", _generate_search_bar)
 ReactBackend.register("Form", _generate_form)
 ReactBackend.register("ExportButton", _generate_export_button)
 ReactBackend.register("Drilldown", _generate_drilldown)
+
+
+# ── Datasource infrastructure generation (bootstrap, not per-apply) ────────
+
+
+def generate_datasource_artifacts(
+    contract: "DatasourceContract",
+    workspace_root: str,
+) -> list[FileOp]:
+    """Generate datasource infrastructure files from contract.
+
+    Called once per workspace (bootstrap), not per plan execution.
+    Generates TypeScript types + hook implementation.
+
+    Returns FileOps with path relative to workspace_root.
+    """
+    from app.datasource.contract import DatasourceContract
+
+    fileops: list[FileOp] = []
+
+    # ── types/dashboard.ts ──
+    type_lines: list[str] = [
+        "// Auto-generated from datasource contract. Do not edit manually.",
+        "// Change backend/data/datasource.json to modify.",
+        "",
+    ]
+    for t in contract.types:
+        type_lines.append(t.to_typescript())
+        type_lines.append("")
+
+    # Build DashboardData interface from fields
+    dashboard_lines = ["export interface DashboardData {"]
+    nested_groups: dict[str, list[tuple[str, str]]] = {}
+    top_level: list[tuple[str, str]] = []
+    for f in contract.fields:
+        parts = f.path_parts
+        if len(parts) == 1:
+            top_level.append((parts[0], f.type_ref))
+        else:
+            nested_groups.setdefault(parts[0], []).append((".".join(parts[1:]), f.type_ref))
+
+    for name, type_ref in sorted(top_level):
+        dashboard_lines.append(f"  {name}: {type_ref};")
+    for group_name, sub_fields in sorted(nested_groups.items()):
+        dashboard_lines.append(f"  {group_name}: {{")
+        for sub_name, sub_type in sorted(sub_fields):
+            dashboard_lines.append(f"    {sub_name}: {sub_type};")
+        dashboard_lines.append("  };")
+    dashboard_lines.append("}")
+    type_lines.extend(dashboard_lines)
+    type_lines.append("")
+
+    type_content = "\n".join(type_lines)
+    type_path = os.path.join("frontend", "src", "types", "dashboard.ts")
+    fileops.append(FileOp(
+        action="create",
+        path=type_path,
+        content=type_content,
+        pipeline_route="infrastructure",
+    ))
+
+    # ── hooks/useDashboardData.ts ──
+    hook_lines: list[str] = [
+        "// Auto-generated from datasource contract. Do not edit manually.",
+        "// Change backend/data/datasource.json to modify.",
+        "",
+        "import type { DashboardData } from '@/types/dashboard';",
+        "",
+        f"export function {contract.hook_name}(): DashboardData {{",
+    ]
+
+    if contract.mock_data:
+        raw = json.dumps(contract.mock_data, indent=2)
+        mock_lines = raw.split("\n")
+        # first line is opening brace -> "  return {"
+        hook_lines.append("  return {")
+        for line in mock_lines[1:-1]:
+            hook_lines.append(f"    {line}")
+        # last line is closing brace -> "  };"
+        hook_lines.append("  };")
+    else:
+        hook_lines.append("  return {};")
+
+    hook_lines.append("}")
+    hook_lines.append("")
+
+    hook_content = "\n".join(hook_lines)
+    hook_path = os.path.join("frontend", "src", "hooks", "useDashboardData.ts")
+    fileops.append(FileOp(
+        action="create",
+        path=hook_path,
+        content=hook_content,
+        pipeline_route="infrastructure",
+    ))
+
+    logger.info(
+        "DATASOURCE_BOOTSTRAP: generated %d files (types=%s, hook=%s)",
+        len(fileops), type_path, hook_path,
+    )
+    return fileops

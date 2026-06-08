@@ -653,6 +653,45 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
+    # ── Datasource bootstrap: ensure types/hook exist before component gen ──
+    if not dry_run:
+        try:
+            from app.datasource.contract import DatasourceContract
+            from app.graphir.backends.react_backend import generate_datasource_artifacts
+            ds_contract = DatasourceContract.load(context.workspace)
+            if ds_contract is not None:
+                # Bootstrap: ensure types/hook exist
+                # Check hook file — it's the stronger signal. If hook exists,
+                # the workspace already has datasource infrastructure.
+                # Generating types alone would cause KpiItem/Point type collisions.
+                hook_path_bs = os.path.join(context.workspace, "frontend", "src", "hooks", "useDashboardData.ts")
+                if not os.path.exists(hook_path_bs):
+                    infra_ops = generate_datasource_artifacts(ds_contract, context.workspace)
+                    infra_applier = FileOpApplier(context.workspace)
+                    infra_applier.apply(infra_ops)
+                    logger.info(
+                        "DATASOURCE_BOOTSTRAP: wrote %d infrastructure files",
+                        len(infra_ops),
+                    )
+
+                # Validate: check all data_access.json slices reference real fields
+                try:
+                    from app.signature.prop_mapper import load_page_data_source
+                    page_ds = load_page_data_source()
+                    if page_ds and page_ds.slices:
+                        slice_warnings = ds_contract.validate_slices(list(page_ds.slices))
+                        for w in slice_warnings:
+                            logger.warning("DATASOURCE_SLICE_MISMATCH: %s", w)
+                        if not slice_warnings:
+                            logger.debug(
+                                "DATASOURCE_SLICE_CHECK: all %d slices valid",
+                                len(page_ds.slices),
+                            )
+                except Exception as inner_e:
+                    logger.warning("DATASOURCE_SLICE_CHECK failed: %s", inner_e)
+        except Exception as e:
+            logger.warning("DATASOURCE_BOOTSTRAP failed: %s", e)
+
     # ── Step 3: ConstraintGraph or BackendRenderer ──
     files = contract.renderer.get("files", [])
     base_path = contract.renderer.get("base_path", "")
@@ -896,7 +935,18 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         cap_files = _discover_repo_capability_files(context.workspace)
         for op in delete_targets:
             target = op["target"]
-            for fp in cap_files.get(target, []):
+            hint = op.get("instance_hint")
+            all_files = cap_files.get(target, [])
+            if hint and len(all_files) > 1:
+                # Multi-instance DELETE con hint: filtrar por filename match
+                hint_lower = hint.lower()
+                filtered = [fp for fp in all_files if hint_lower in os.path.basename(fp).lower().replace(".tsx", "")]
+                if filtered:
+                    for fp in filtered:
+                        fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
+                    continue
+            # Sin hint o sin match: borrar todos los archivos de la capability
+            for fp in all_files:
                 fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
 
     # ── Translate replace_pairs to file operations ──

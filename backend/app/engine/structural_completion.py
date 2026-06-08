@@ -121,6 +121,8 @@ class ResolvedCapability:
                     su archivo fuente; solo instanciarla en el contenedor".
                     En la práctica, action=KEEP + instance_only=True indica
                     que hubo intención CREATE sobre algo que ya existe.
+    instance_id: instance_id específico para DELETE (multi-instancia).
+                 None = borrar todas las instancias de la capability.
     """
     name: str
     params: dict[str, Any]
@@ -128,6 +130,8 @@ class ResolvedCapability:
     action: str = CREATE
     provenance: dict[str, str] = field(default_factory=dict)
     instance_only: bool = False
+    instance_id: str | None = None
+    instance_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,7 @@ class StructuralIR:
           target: capability name
           payload: params (solo para CREATE/MODIFY/INSTANCE)
           instance_only: True si es una instancia (no regenerar archivo)
+          instance_id: específico para DELETE multi-instancia (None = borrar todas)
 
         INSTANCE significa KEEP pero con intención de instanciar
         (create-on-existing). El nodo participa en composición pero
@@ -208,7 +213,12 @@ class StructuralIR:
                     "action": rc.action,
                     "target": rc.name,
                 }
-                if rc.action in (CREATE, MODIFY):
+                if rc.action == DELETE:
+                    if rc.instance_id:
+                        op["instance_id"] = rc.instance_id
+                    if rc.instance_hint:
+                        op["instance_hint"] = rc.instance_hint
+                elif rc.action in (CREATE, MODIFY):
                     op["payload"] = dict(rc.params)
                 ops.append(op)
         return ops
@@ -560,6 +570,43 @@ def _resolve_action(
     if exists:
         return KEEP
     return CREATE
+
+
+def _resolve_delete_instance(
+    capability: str,
+    instance_hint: str | None,
+    structural_index: StructuralIndex | None,
+) -> str | None:
+    """Resolve instance_id for DELETE when instance_hint is present.
+
+    Uses StructuralIndex.get_instances() + fuzzy path matching against
+    the hint. Returns instance_id or None (delete all instances).
+
+    None = no hint or no match → full-capability DELETE (backward compat).
+    """
+    if not instance_hint or structural_index is None:
+        return None
+
+    instances = structural_index.get_instances(capability)
+    if not instances or len(instances) <= 1:
+        return None  # single instance or none → no filtering needed
+
+    hint_lower = instance_hint.lower()
+    for inst in instances:
+        path_lower = inst.path.lower()
+        if hint_lower in path_lower:
+            return inst.instance_id
+
+    # Fallback: match aliases from apply_engine.FILENAME_ALIASES
+    # e.g. "linechart" → "presentation.timeseries"
+    from app.engine.aliases import FILENAME_ALIASES
+    for alias, cap_target in FILENAME_ALIASES.items():
+        if cap_target == capability and hint_lower in alias.lower():
+            for inst in instances:
+                if alias.lower() in inst.path.lower():
+                    return inst.instance_id
+
+    return None  # no match → full capability delete
 
 
 # ── Layout hint extraction (MOVE scope, REPLACE anchor) ───────
@@ -1045,6 +1092,18 @@ def complete_structure(
     # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
 
+    # Build instance_hints map from semantic actions for multi-instance DELETE
+    instance_hints: dict[str, str] = {}
+    for action in semantic_resolution.actions:
+        hint = action.get("instance_hint")
+        if hint:
+            obj = action.get("object") or action.get("direct_object") or ""
+            # Find the capability that matches this action's object
+            for cap in capabilities:
+                if cap.endswith(obj):
+                    instance_hints[cap] = hint
+                    break
+
     for cap in capabilities:
         action_verb = action_map.get(cap)
 
@@ -1086,13 +1145,21 @@ def complete_structure(
 
         # DELETE → no resuelven params (repo pierde la capacidad)
         if action == DELETE:
+            hint = instance_hints.get(cap)
+            instance_id = _resolve_delete_instance(
+                cap, hint, structural_index,
+            )
             resolved.append(ResolvedCapability(
                 name=cap,
                 params={},
                 mode=CompletionMode.SAFE_SKIP,
                 action=DELETE,
+                instance_id=instance_id,
+                instance_hint=hint,
             ))
             warnings.append(f"{cap}: marked for deletion")
+            if instance_id:
+                warnings.append(f"{cap}: limiting delete to instance_id={instance_id} (hint={hint})")
             continue
 
         schema = STRUCTURAL_SCHEMA.get(cap)

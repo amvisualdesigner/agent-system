@@ -19,35 +19,6 @@ from app.graphir.intent import (
 
 logger = logging.getLogger(__name__)
 
-# Container capabilities that should expand to children
-_CONTAINER_CAPS = {"layout.page"}
-
-
-def expand_container_actions(
-    actions: list[IntentAction],
-    contract: SkillContract,
-) -> list[IntentAction]:
-    """Expand container actions (e.g. modify dashboard) to children.
-
-    Determinista: usa solo el contrato (capabilities), no el StructuralIndex.
-    La expansion es para preview. El lifecycle real lo decide complete_structure().
-    """
-    expanded = list(actions)
-    contract_caps = list(contract.ast_template.get("capabilities", {}).values())
-
-    for action in actions:
-        cap = action.target_capability
-        if cap in _CONTAINER_CAPS and action.verb == "modify":
-            for child_cap in contract_caps:
-                if child_cap.startswith("presentation.") and child_cap not in {a.target_capability for a in expanded}:
-                    expanded.append(IntentAction(
-                        verb=action.verb,
-                        target_capability=child_cap,
-                        params={},
-                        confidence=action.confidence,
-                    ))
-    return expanded
-
 
 def _build_actions(
     actions: list[IntentAction],
@@ -65,8 +36,34 @@ def _build_actions(
             "params": dict(action.params),
             "confidence": action.confidence,
         }
+        if action.instance_hint:
+            entry["instance_hint"] = action.instance_hint
         result.append(entry)
     return result
+
+
+def _build_intents(
+    actions: list[IntentAction],
+    interpretation_id: str,
+) -> list[dict]:
+    """Build intent list from actions."""
+    intents = []
+    for action in actions:
+        cap = action.target_capability
+        intent_id = make_intent_id(
+            f"{action.verb} {cap}", cap,
+            seed=interpretation_id,
+        )
+        intent = Intent(
+            id=intent_id,
+            capability=cap,
+            params=dict(action.params),
+            task_fragment=f"{action.verb} {cap}",
+            weight=action.confidence,
+            source="confirmed_intent",
+        )
+        intents.append(intent.to_dict())
+    return intents
 
 
 def compile_plan(confirmed: ConfirmedIntent) -> CompiledPlan:
@@ -93,12 +90,13 @@ def compile_plan(confirmed: ConfirmedIntent) -> CompiledPlan:
     # 1. Build SkillIR from confirmed params + contract
     skill_ir = _build_skill_ir(confirmed, contract)
 
-    # 2. Build semantic_frame from confirmed actions (expanded for containers)
-    expanded_actions = expand_container_actions(confirmed.actions, contract)
-    semantic_frame = _build_semantic_frame_from_actions(expanded_actions, confirmed.params)
+    # 2. Build semantic_frame from confirmed actions.
+    #    Container expansion is handled later by complete_structure() (3E composition sync)
+    #    which promotes children to INSTANCE without regenerating their files.
+    semantic_frame = _build_semantic_frame_from_actions(confirmed.actions, confirmed.params)
 
-    # 3. Build intents from expanded actions
-    intents = _build_intents(expanded_actions, confirmed.interpretation_id)
+    # 3. Build intents from confirmed actions
+    intents = _build_intents(confirmed.actions, confirmed.interpretation_id)
 
     # 4. Build top-level actions list (zero-loss: must match semantic_frame.actions)
     plan_actions = _build_actions(confirmed.actions, confirmed.params)
@@ -153,12 +151,15 @@ def _build_semantic_frame_from_actions(
 
     for action in actions:
         obj = action.target_capability.split(".")[-1] if "." in action.target_capability else action.target_capability
-        frame_actions.append({
+        frame_action = {
             "verb": action.verb,
             "object": obj,
             "direct_object": obj,
             "confidence": action.confidence,
-        })
+        }
+        if action.instance_hint:
+            frame_action["instance_hint"] = action.instance_hint
+        frame_actions.append(frame_action)
         objects.append({
             "type": obj,
             "confidence": action.confidence,
@@ -181,27 +182,3 @@ def _build_semantic_frame_from_actions(
         "confidence": 1.0,
         "missing_info": [],
     }
-
-
-def _build_intents(
-    actions: list[IntentAction],
-    interpretation_id: str,
-) -> list[dict]:
-    """Build intent list from (possibly expanded) actions."""
-    intents = []
-    for action in actions:
-        cap = action.target_capability
-        intent_id = make_intent_id(
-            f"{action.verb} {cap}", cap,
-            seed=interpretation_id,
-        )
-        intent = Intent(
-            id=intent_id,
-            capability=cap,
-            params=dict(action.params),
-            task_fragment=f"{action.verb} {cap}",
-            weight=action.confidence,
-            source="confirmed_intent",
-        )
-        intents.append(intent.to_dict())
-    return intents

@@ -5,7 +5,7 @@ importing from a test module.
 """
 
 from app.intent.models import ConfirmedIntent, IntentAction
-from app.intent.plan_compiler import compile_plan, expand_container_actions
+from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import get_contract
 from app.catalog.loader import get_contract_catalog
 from app.intent.interpreter import _select_contract, _has_action_verb
@@ -66,12 +66,15 @@ def simulate_confirm(interpret_result: dict) -> dict:
 
     clean_actions = []
     for a in actions_data:
-        clean_actions.append({
+        entry = {
             "verb": a.get("verb", ""),
             "target_capability": a.get("target_capability", ""),
             "params": a.get("params", {}),
             "confidence": a.get("confidence", 1.0),
-        })
+        }
+        if a.get("instance_hint"):
+            entry["instance_hint"] = a["instance_hint"]
+        clean_actions.append(entry)
     confirmed = ConfirmedIntent(
         contract_id=contract_id,
         contract_version=1,
@@ -86,11 +89,10 @@ def simulate_confirm(interpret_result: dict) -> dict:
     except ValueError as e:
         return {"status": "rejected", "reason": str(e)}
 
-    preview_actions = expand_container_actions(confirmed.actions, contract)
-    summary = "; ".join(f"{a.verb.capitalize()} {a.target_capability}" for a in preview_actions)
+    summary = "; ".join(f"{a.verb.capitalize()} {a.target_capability}" for a in confirmed.actions)
 
     structural_ops = []
-    for a in preview_actions:
+    for a in confirmed.actions:
         op_verb = "DELETE" if a.verb == "remove" else a.verb.upper()
         structural_ops.append({"action": op_verb, "target": a.target_capability})
 

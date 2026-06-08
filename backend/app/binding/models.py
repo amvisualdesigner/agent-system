@@ -48,3 +48,45 @@ class ResolvedBindings:
     unconsumed_params: set[str] = field(default_factory=set)
     page_data_source: Any | None = None
     imports: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BindingDiffItem:
+    """Single prop-level diff entry from dual-write (F0) comparison.
+
+    Attributes:
+        component: Component type (e.g. "Timeseries")
+        prop: Prop name (e.g. "data")
+        slice_value: Value resolved via Page slice path
+        binding_value: Value resolved via v4 binding path
+        classification: Equivalence class — "structural_equivalent",
+                       "semantic_equivalent", or "divergent"
+    """
+    component: str
+    prop: str
+    slice_value: Any = None
+    binding_value: Any = None
+    classification: str = "divergent"
+
+
+@dataclass
+class BindingDiff:
+    """Result of dual-write comparison between Page slices and v4 bindings.
+
+    Attributes:
+        items: List of per-prop diff entries
+    """
+    items: list[BindingDiffItem] = field(default_factory=list)
+
+    @property
+    def divergent_count(self) -> int:
+        return sum(1 for i in self.items if i.classification == "divergent")
+
+    @property
+    def binding_missing_count(self) -> int:
+        """Props que el binding registry declara pero no puede resolver."""
+        return sum(1 for i in self.items if i.classification == "binding_missing")
+
+    @property
+    def total_overlap(self) -> int:
+        return len(self.items)

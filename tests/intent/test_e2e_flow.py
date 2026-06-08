@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.intent.models import ConfirmedIntent, IntentAction
-from app.intent.plan_compiler import compile_plan, expand_container_actions
+from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import get_contract
 from app.catalog.loader import get_contract_catalog
 
@@ -133,12 +133,15 @@ def _simulate_confirm(interpret_result: dict) -> dict:
     # Strip extra keys (label, reason) that are not in IntentAction
     clean_actions = []
     for a in actions_data:
-        clean_actions.append({
+        entry = {
             "verb": a.get("verb", ""),
             "target_capability": a.get("target_capability", ""),
             "params": a.get("params", {}),
             "confidence": a.get("confidence", 1.0),
-        })
+        }
+        if a.get("instance_hint"):
+            entry["instance_hint"] = a["instance_hint"]
+        clean_actions.append(entry)
     confirmed = ConfirmedIntent(
         contract_id=contract_id,
         contract_version=1,
@@ -153,11 +156,10 @@ def _simulate_confirm(interpret_result: dict) -> dict:
     except ValueError as e:
         return {"status": "rejected", "reason": str(e)}
 
-    preview_actions = expand_container_actions(confirmed.actions, contract)
-    summary = "; ".join(f"{a.verb.capitalize()} {a.target_capability}" for a in preview_actions)
+    summary = "; ".join(f"{a.verb.capitalize()} {a.target_capability}" for a in confirmed.actions)
 
     structural_ops = []
-    for a in preview_actions:
+    for a in confirmed.actions:
         op_verb = "DELETE" if a.verb == "remove" else a.verb.upper()
         structural_ops.append({"action": op_verb, "target": a.target_capability})
 
@@ -309,36 +311,29 @@ class TestCase3UpdateDashboard:
         assert actions[0]["verb"] == "modify"
         assert actions[0]["target_capability"] == "layout.page"
 
-    def test_confirm_expands_to_children(self):
-        """Update dashboard → debe expandir a layout.page + kpi_row + timeseries."""
+    def test_confirm_no_container_expansion(self):
+        """Update dashboard → preview solo layout.page (sin expansion a hijos).
+        Container expansion se maneja en complete_structure() (3E composition sync)
+        que promueve hijos a INSTANCE sin regenerar archivos."""
         interpret = _simulate_interpret("Update dashboard")
         result = _simulate_confirm(interpret)
         assert result["status"] == "ok"
 
         ops = result["plan_preview"]["structural_operations"]
         targets = [o["target"] for o in ops]
-        print(f"Expanded targets: {targets}")
+        print(f"Targets: {targets}")
 
-        assert "layout.page" in targets, f"Expected layout.page in {targets}"
-        assert "presentation.kpi_row" in targets, f"Expected kpi_row in {targets}"
-        assert "presentation.timeseries" in targets, f"Expected timeseries in {targets}"
+        assert len(targets) == 1, f"Expected only layout.page, got {targets}"
+        assert targets[0] == "layout.page"
 
-    def test_confirm_no_leaf_only(self):
-        """Should not be only one operation."""
-        interpret = _simulate_interpret("Update dashboard")
-        result = _simulate_confirm(interpret)
-        ops = result["plan_preview"]["structural_operations"]
-        assert len(ops) >= 3, f"Expected at least 3 operations, got {len(ops)}"
-
-    def test_compiled_plan_includes_all_intents(self):
+    def test_compiled_plan_has_one_intent(self):
+        """Update dashboard → solo un intent (layout.page)."""
         interpret = _simulate_interpret("Update dashboard")
         result = _simulate_confirm(interpret)
         plan = result["plan"]
         intents = plan["intents"]
-        capabilities = {i["capability"] for i in intents}
-        assert "layout.page" in capabilities
-        assert "presentation.kpi_row" in capabilities
-        assert "presentation.timeseries" in capabilities
+        assert len(intents) == 1
+        assert intents[0]["capability"] == "layout.page"
 
 
 # ── Caso 4: Add trend chart (preview vs reality convergence) ────
@@ -395,15 +390,13 @@ class TestCase4AddTrendChart:
         assert len(estimated) == len(ops) == 1
         assert any("Timeseries" in f for f in estimated)
 
-    def test_update_dashboard_estimated_matches_all_children(self):
-        """Container expansion produce estimated_files para todos los hijos."""
+    def test_update_dashboard_estimated_matches_page_only(self):
+        """Update dashboard → estimated_files solo layout.page (sin expansion a hijos)."""
         interpret = _simulate_interpret("Update dashboard")
         result = _simulate_confirm(interpret)
         estimated = result["plan_preview"]["estimated_files"]
-        assert len(estimated) >= 3  # page + kpi_row + timeseries
-        assert any("Page.tsx" in f for f in estimated)
-        assert any("KpiRow" in f for f in estimated)
-        assert any("Timeseries" in f for f in estimated)
+        assert len(estimated) == 1, f"Expected 1 file, got {len(estimated)}: {estimated}"
+        assert any("Page.tsx" in f for f in estimated), f"Expected Page.tsx in {estimated}"
 
 
 # ── Gate validation ─────────────────────────────────────────────

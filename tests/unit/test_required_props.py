@@ -20,10 +20,9 @@ from unittest.mock import MagicMock, patch
 
 from app.binding.models import ResolvedBindings
 from app.graphir.compiler import MISSING_REQUIRED_PROPS, UIIRCompiler
-from app.binding.resolver import page_ds_has_slice
+
 from app.graphir.models import GraphIR, GraphIRLayout, GraphIRNode
 from app.graphir.ui_ir import UIComponentNode, UIComponentTree
-from app.signature.prop_mapper import DataSourceIR, DataSlice
 from app.signature.extractor import _PROP_DETAIL_PATTERN
 
 
@@ -244,38 +243,6 @@ class TestMISSING_REQUIRED_PROPS:
                 missing=["x"],
                 available=["y"],
             )
-
-
-# ── 3. page_ds_has_slice helper ──
-
-class TestPageDsHasSlice:
-    """Tests for page_ds_has_slice helper."""
-
-    def test_no_page_ds_returns_false(self):
-        assert page_ds_has_slice(None, "Timeseries") is False
-        assert page_ds_has_slice(None, "KpiRow", "data") is False
-
-    @pytest.fixture
-    def mock_ds(self):
-        return DataSourceIR(
-            type="dashboard_data",
-            selector="overviewData",
-            slices=(
-                DataSlice(component="Timeseries", target_prop="data", selector="trendData"),
-                DataSlice(component="KpiRow", target_prop="data", selector="kpiData"),
-            ),
-        )
-
-    def test_matching_component_returns_true(self, mock_ds):
-        assert page_ds_has_slice(mock_ds, "Timeseries") is True
-        assert page_ds_has_slice(mock_ds, "KpiRow") is True
-
-    def test_non_matching_component_returns_false(self, mock_ds):
-        assert page_ds_has_slice(mock_ds, "NonExistent") is False
-
-    def test_empty_slices_returns_false(self):
-        ds = DataSourceIR(type="dashboard_data", selector="d", slices=())
-        assert page_ds_has_slice(ds, "Timeseries") is False
 
 
 # ── 4. Compiler gate: _build_node required-prop enforcement ──

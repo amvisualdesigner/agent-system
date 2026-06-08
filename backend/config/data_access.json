@@ -7,22 +7,25 @@
           "from": "metrics",
           "transform": "items",
           "arity": "array",
-          "shape": "KpiItem[]"
+          "shape": "KpiItem[]",
+          "type_info": {"type": "array", "items": "KpiItem"}
         }
       }
     },
     "Timeseries": {
       "props": {
         "data": {
-          "from": "metric",
+          "from": "timeseries_metric",
           "transform": "wrap",
           "arity": "scalar→array",
-          "shape": "Point[]"
+          "shape": "Point[]",
+          "type_info": {"type": "array", "items": "Point"}
         },
         "title": {
           "from": "chartTitle",
           "default": "Trend",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         }
       }
     },
@@ -30,21 +33,8 @@
       "props": {
         "columns": {
           "from": "columns",
-          "arity": "array"
-        },
-        "data": {
-          "from": "tableData",
-          "arity": "array"
-        }
-      }
-    },
-    "BarChart": {
-      "props": {
-        "data": {
-          "from": "metrics",
-          "transform": "items",
           "arity": "array",
-          "shape": "Array<{label: string, value: number}>"
+          "type_info": {"type": "array", "items": "string"}
         }
       }
     },
@@ -53,36 +43,34 @@
         "value": {
           "from": "metric",
           "transform": "value",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "object"}
         },
         "label": {
           "from": "metric",
           "transform": "label",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "object"}
         }
       }
     },
     "FilterPanel": {
-      "props": {
-        "filters": {
-          "from": "filters",
-          "transform": "identity",
-          "arity": "array"
-        }
-      }
+      "props": {}
     },
     "Embed": {
       "props": {
         "src": {
           "from": "src",
           "transform": "identity",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         },
         "title": {
           "from": "title",
           "transform": "identity",
           "default": "Embedded content",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         }
       }
     },
@@ -91,7 +79,8 @@
         "placeholder": {
           "from": "placeholder",
           "default": "Search...",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         }
       }
     },
@@ -100,7 +89,8 @@
         "fields": {
           "from": "fields",
           "transform": "identity",
-          "arity": "array"
+          "arity": "array",
+          "type_info": {"type": "array", "items": "object"}
         }
       }
     },
@@ -109,7 +99,8 @@
         "format": {
           "from": "format",
           "default": "csv",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         }
       }
     },
@@ -118,12 +109,14 @@
         "label": {
           "from": "label",
           "default": "View details",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         },
         "target": {
           "from": "target",
           "transform": "identity",
-          "arity": "scalar"
+          "arity": "scalar",
+          "type_info": {"type": "string"}
         }
       }
     }
@@ -148,6 +141,24 @@
             "targetProp": "data",
             "selector": "chartData.timeseries",
             "consumes": ["timeseries_metric"]
+          },
+          {
+            "component": "BarChart",
+            "targetProp": "data",
+            "selector": "chartData.barChart",
+            "consumes": []
+          },
+          {
+            "component": "AnalyticsTable",
+            "targetProp": "data",
+            "selector": "tableData",
+            "consumes": []
+          },
+          {
+            "component": "FilterPanel",
+            "targetProp": "filters",
+            "selector": "filters",
+            "consumes": []
           }
         ]
       }

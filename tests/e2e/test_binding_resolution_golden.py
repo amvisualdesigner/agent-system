@@ -240,7 +240,7 @@ class TestBindingResolverGlobalSSOT:
         assert "data" in result.component_props["KpiRow"]
         assert result.component_props["KpiRow"]["data"].name == "_pageData.kpiData"
 
-        # Timeseries recibe data desde global config
+        # Timeseries recibe data desde slice (API data, binding no puede reemplazar)
         assert "Timeseries" in result.component_props
         assert "data" in result.component_props["Timeseries"]
         assert result.component_props["Timeseries"]["data"].name == "_pageData.chartData.timeseries"
@@ -252,4 +252,4 @@ class TestBindingResolverGlobalSSOT:
         # page_data_source presente (desde global config)
         assert result.page_data_source is not None
         assert result.page_data_source.type == "dashboard_data"
-        assert len(result.page_data_source.slices) == 2
+        assert len(result.page_data_source.slices) == 5

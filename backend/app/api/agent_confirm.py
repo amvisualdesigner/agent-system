@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.config.feature_flags import FEATURE_FLAGS
 from app.intent.models import ConfirmedIntent, IntentAction, RunPhase
-from app.intent.plan_compiler import compile_plan, expand_container_actions
+from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.utils.run_id import validate_run_id
 
@@ -96,7 +96,7 @@ def _agent_confirm(req: ConfirmRequest):
         }
 
     # Build ConfirmedIntent — only pass fields IntentAction accepts
-    _ia_fields = {"verb", "target_capability", "params", "confidence"}
+    _ia_fields = {"verb", "target_capability", "params", "confidence", "instance_hint"}
     confirmed = ConfirmedIntent(
         contract_id=req.contract_id,
         contract_version=req.contract_version,
@@ -135,15 +135,13 @@ def _agent_confirm(req: ConfirmRequest):
         }
         return cached
 
-    # Container expansion for preview (cosmetic, no index needed)
-    preview_actions = expand_container_actions(confirmed.actions, contract)
-
-    # Build preview summary
+    # Build preview summary from confirmed actions (no container expansion;
+    # composition children are handled by complete_structure() at apply time)
     cap_labels = {}
     for cap_entry in (getattr(contract, '_catalog_labels', None) or {}):
         cap_labels[cap_entry["id"]] = cap_entry.get("label", cap_entry["id"])
     summary_parts = []
-    for a in preview_actions:
+    for a in confirmed.actions:
         verb = a.verb
         cap = a.target_capability
         label = cap_labels.get(cap, cap.split(".")[-1])
@@ -151,9 +149,9 @@ def _agent_confirm(req: ConfirmRequest):
             summary_parts.append(f"{verb.capitalize()} {label}")
     summary = "; ".join(summary_parts) if summary_parts else "No changes"
 
-    # Structural operations from expanded actions
+    # Structural operations from confirmed actions
     structural_ops = []
-    for a in preview_actions:
+    for a in confirmed.actions:
         action_verb = a.verb.upper()
         if action_verb == "REMOVE":
             action_verb = "DELETE"

@@ -270,17 +270,17 @@ class TestUpdateDashboard:
         assert len(actions) == 1
         assert actions[0]["target_capability"] == "layout.page"
 
-    def test_confirm_expands_to_children(self):
-        """Update dashboard → expande a layout.page + kpi_row + timeseries."""
+    def test_confirm_no_container_expansion(self):
+        """Update dashboard → preview solo layout.page.
+        Container expansion se elimino de PlanCompiler; la composicion de
+        hijos se maneja en complete_structure() via 3E composition sync."""
         interpret = simulate_interpret("Update dashboard")
         result = simulate_confirm(interpret)
         assert result["status"] == "ok"
         ops = result["plan_preview"]["structural_operations"]
         targets = [o["target"] for o in ops]
-        assert len(targets) >= 3
-        assert "layout.page" in targets
-        assert "presentation.kpi_row" in targets
-        assert "presentation.timeseries" in targets
+        assert len(targets) == 1, f"Expected 1 target, got {targets}"
+        assert targets[0] == "layout.page"
 
     def test_apply_with_container_expansion(self, e2e_workspace, artifacts_dir):
         seed_file(e2e_workspace, "SalesOverviewPage.tsx", SALES_PAGE_TSX)

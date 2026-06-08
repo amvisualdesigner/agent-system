@@ -83,11 +83,19 @@ def components_with_bindings(data: dict) -> set[str]:
             # Page itself is the data owner → has binding
             bound.add(comp_name)
 
-    # v4: composition section — data owner has binding
+    # v4: composition section — data owner has binding, slices provide data to targets
     comp = data.get("composition", {})
     if isinstance(comp, dict):
-        for comp_name in comp:
+        for comp_name, comp_data in comp.items():
             bound.add(comp_name)
+            if isinstance(comp_data, dict):
+                ds = comp_data.get("dataSource")
+                if ds and isinstance(ds, dict):
+                    slices = ds.get("slices", [])
+                    for slice_ in slices:
+                        target = slice_.get("component")
+                        if target:
+                            bound.add(target)
 
     return bound
 

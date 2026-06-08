@@ -18,8 +18,6 @@ Cases:
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import tempfile
 
@@ -28,29 +26,33 @@ from app.binding.resolver import resolve as resolve_bindings
 from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.models import GraphIRNode, GraphIREdge, GraphIRDraft, EdgeRole
 from app.graphir.layout import LayoutDerivationEngine
+from app.signature.prop_mapper import DataSourceIR, DataSlice
 
 
 # ── Helpers ──
 
 
-def _make_v3_workspace(slices: list[dict] | None = None) -> str:
-    """Create temp workspace with v3 data_access.json (Page dataSource + slices)."""
-    tmpdir = tempfile.mkdtemp(prefix="phase6_e2e_")
-    os.makedirs(os.path.join(tmpdir, ".opencode"), exist_ok=True)
-    page_entry: dict = {
-        "dataSource": {
-            "type": "dashboard_data",
-        },
-    }
-    if slices:
-        page_entry["dataSource"]["slices"] = slices
-    cfg = {
-        "version": 3,
-        "components": {"Page": page_entry},
-    }
-    with open(os.path.join(tmpdir, ".opencode", "data_access.json"), "w") as f:
-        json.dump(cfg, f)
-    return tmpdir
+def _make_datasource_ir(slices: list[dict] | None = None) -> DataSourceIR | None:
+    """Build DataSourceIR from slice dict list (for page_ds_override in tests).
+
+    When slices is None, returns empty DataSourceIR (Page has dataSource but
+    no slices — hook declared, no refs injected).
+    """
+    if slices is None:
+        return DataSourceIR(type="dashboard_data", selector=None, slices=())
+    return DataSourceIR(
+        type="dashboard_data",
+        selector=None,
+        slices=tuple(
+            DataSlice(
+                component=sr.get("component", ""),
+                target_prop=sr.get("targetProp", ""),
+                selector=sr.get("selector", ""),
+                consumes=tuple(sr.get("consumes", [])),
+            )
+            for sr in slices
+        ),
+    )
 
 
 def _render_page(
@@ -64,7 +66,7 @@ def _render_page(
     Args:
         children: list of (node_id, type, data_dict)
         page_data: data for Page node (default: {})
-        slices: list of slice dicts for data_access.json (legacy)
+        slices: list of slice dicts for page_ds_override (legacy compat)
         resolved_bindings: pre-resolved bindings (PR1: contract_params never
                           reach the compiler/renderer)
     """
@@ -79,12 +81,13 @@ def _render_page(
     graph = draft.freeze()
     layout = LayoutDerivationEngine.derive(graph)
 
-    ws = _make_v3_workspace(slices)
+    ws = tempfile.mkdtemp(prefix="phase6_e2e_")
     config = BackendConfig(workspace=ws)
 
-    # PR1: When resolved_bindings not provided, resolve from workspace config
+    # PR1: When resolved_bindings not provided, resolve from global SSOT + slices override
     if resolved_bindings is None:
-        resolved_bindings = resolve_bindings({}, ws)
+        page_ds = _make_datasource_ir(slices)
+        resolved_bindings = resolve_bindings({}, page_ds_override=page_ds)
 
     backend = ReactBackend()
     fileops = backend.render(graph, layout, config, resolved_bindings=resolved_bindings)
@@ -182,7 +185,7 @@ class TestPhase6SimplePage:
         """Verify render traces capture Phase 6 distribution."""
         ReactBackend.reset_emit_log("phase6_trace")
         ReactBackend.reset_traces("phase6_trace")
-        ws = _make_v3_workspace([
+        ds = _make_datasource_ir([
             {"component": "KpiRow", "targetProp": "data", "selector": "kpiData"},
         ])
         backend = ReactBackend()
@@ -192,10 +195,9 @@ class TestPhase6SimplePage:
         draft.add_edge(GraphIREdge(source="page", target="kpi", role=EdgeRole.CONTAINS))
         graph = draft.freeze()
         layout = LayoutDerivationEngine.derive(graph)
-        config = BackendConfig(workspace=ws)
-        rb = resolve_bindings({}, ws)
+        config = BackendConfig()
+        rb = resolve_bindings({}, page_ds_override=ds)
         backend.render(graph, layout, config, resolved_bindings=rb)
-        shutil.rmtree(ws)
         traces = ReactBackend._render_traces
         emitted = [t for t in traces if t.phase == "emitted"]
         assert len(emitted) >= 1, "Should have at least one emitted trace"
@@ -320,16 +322,15 @@ class TestPhase6NestedComponents:
         """Timeseries (direct child of Page) gets slice."""
         graph = self._build_nested_graph()
         layout = LayoutDerivationEngine.derive(graph)
-        ws = _make_v3_workspace([
+        ds = _make_datasource_ir([
             {"component": "KpiRow", "targetProp": "data", "selector": "kpiData"},
             {"component": "Timeseries", "targetProp": "data", "selector": "chartData.ts"},
         ])
-        config = BackendConfig(workspace=ws)
+        config = BackendConfig()
         backend = ReactBackend()
-        rb = resolve_bindings({}, ws)
+        rb = resolve_bindings({}, page_ds_override=ds)
         fileops = backend.render(graph, layout, config, resolved_bindings=rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
-        shutil.rmtree(ws)
 
         assert "const _pageData = useDashboardData();" in page_content
         assert "data={_pageData.chartData.ts}" in page_content, \
@@ -339,16 +340,15 @@ class TestPhase6NestedComponents:
         """KpiRow (nested under Section) does NOT get automatic slice from Page."""
         graph = self._build_nested_graph()
         layout = LayoutDerivationEngine.derive(graph)
-        ws = _make_v3_workspace([
+        ds = _make_datasource_ir([
             {"component": "KpiRow", "targetProp": "data", "selector": "kpiData"},
             {"component": "Timeseries", "targetProp": "data", "selector": "chartData.ts"},
         ])
-        config = BackendConfig(workspace=ws)
+        config = BackendConfig()
         backend = ReactBackend()
-        rb = resolve_bindings({}, ws)
+        rb = resolve_bindings({}, page_ds_override=ds)
         fileops = backend.render(graph, layout, config, resolved_bindings=rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
-        shutil.rmtree(ws)
 
         # KpiRow is under Section, not direct child of Page
         # _distribute_page_slices only checks direct children
@@ -359,13 +359,12 @@ class TestPhase6NestedComponents:
         """Section intermediate still renders in Page composition."""
         graph = self._build_nested_graph()
         layout = LayoutDerivationEngine.derive(graph)
-        ws = _make_v3_workspace([])
-        config = BackendConfig(workspace=ws)
+        ds = _make_datasource_ir([])
+        config = BackendConfig()
         backend = ReactBackend()
-        rb = resolve_bindings({}, ws)
+        rb = resolve_bindings({}, page_ds_override=ds)
         fileops = backend.render(graph, layout, config, resolved_bindings=rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
-        shutil.rmtree(ws)
 
         assert "Section" in page_content, "Section should appear in composition"
 
@@ -378,11 +377,7 @@ class TestPhase6WithContractParams:
         PR1: title no longer comes from contract_params → BindingResolver or node.data."""
         ReactBackend.reset_emit_log("phase6_params")
         ReactBackend.reset_traces("phase6_params")
-        ws = _make_v3_workspace([
-            {"component": "KpiRow", "targetProp": "data", "selector": "kpiData"},
-        ])
         config = BackendConfig(
-            workspace=ws,
             component_signatures={
                 "Page": {
                     "props": "interface PageProps {\n  title?: string;\n}",
@@ -398,13 +393,12 @@ class TestPhase6WithContractParams:
         layout = LayoutDerivationEngine.derive(graph)
 
         backend = ReactBackend()
-        rb = resolve_bindings({}, ws)
+        rb = resolve_bindings({})
         fileops = backend.render(
             graph, layout, config,
             resolved_bindings=rb,
         )
         page_content = [f for f in fileops if "Page" in f.path][0].content
-        shutil.rmtree(ws)
 
         assert "const _pageData = useDashboardData();" in page_content
         assert "data={_pageData.kpiData}" in page_content

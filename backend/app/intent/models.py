@@ -87,6 +87,7 @@ class IntentAction:
     target_capability: str
     params: dict = field(default_factory=dict)
     confidence: float = 1.0
+    instance_hint: str | None = None
 
 
 # ── InterpretationDraft (output of IntentInterpreter) ───────────────

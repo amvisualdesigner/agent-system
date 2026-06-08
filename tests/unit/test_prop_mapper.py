@@ -137,7 +137,7 @@ class TestLoadPageDataSource:
         ds = load_page_data_source()
         assert ds is not None
         assert ds.type == "dashboard_data"
-        assert len(ds.slices) == 2
+        assert len(ds.slices) == 5
 
     def test_slices_are_parsed_correctly(self):
         ds = load_page_data_source()
@@ -154,7 +154,7 @@ class TestLoadPageDataSource:
         ds = load_page_data_source()
         assert ds is not None
         assert ds.type == "dashboard_data"
-        assert len(ds.slices) == 2
+        assert len(ds.slices) == 5
 
     def test_global_config_has_page(self):
         """Global config HAS Page with dataSource."""
@@ -628,7 +628,7 @@ class TestParseBindings:
         """Global config is v4 with per-component bindings."""
         data = _load_data_access_config()
         bindings = _parse_bindings(data)
-        assert len(bindings) >= 11  # KpiRow, Timeseries, AnalyticsTable, BarChart, etc.
+        assert len(bindings) >= 10  # KpiRow, Timeseries, AnalyticsTable, etc.
 
     def test_v4_config_returns_bindings(self):
         """v4 config has per-component props → bindings map populated."""

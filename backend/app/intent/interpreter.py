@@ -19,6 +19,43 @@ from app.catalog.loader import load_catalog, list_contract_ids
 
 logger = logging.getLogger(__name__)
 
+# ── Instance hints for multi-instance capabilities ────────────────
+# Mapea capability → {keyword_in_message → instance_hint}
+# Usado para distinguir entre instancias cuando el usuario pide DELETE
+# sobre una capability multi-instancia (e.g. LineChart vs Timeseries).
+
+_INSTANCE_HINTS: dict[str, dict[str, str]] = {
+    "presentation.timeseries": {
+        "line": "linechart",
+        "line chart": "linechart",
+        "linechart": "linechart",
+        "timeseries": "timeseries",
+        "trend": "timeseries",
+    },
+}
+
+
+def _resolve_instance_hints(
+    actions: list[dict],
+    message_lower: str,
+) -> list[dict]:
+    """Add instance_hint to actions for multi-instance capabilities.
+
+    Solo aplica cuando el mensaje contiene palabras clave que distinguen
+    instancias (e.g. "line" → LineChart vs "timeseries" → Timeseries).
+    """
+    result = []
+    for action in actions:
+        cap = action.get("target_capability", "")
+        hints = _INSTANCE_HINTS.get(cap)
+        if hints:
+            for keyword, hint in hints.items():
+                if keyword in message_lower:
+                    action["instance_hint"] = hint
+                    break
+        result.append(action)
+    return result
+
 # ── Keyword overlap for contract selection ────────────────────────
 
 _CONTRACT_KEYWORDS: dict[str, set[str]] = {
@@ -129,6 +166,43 @@ def _has_action_verb(message: str) -> bool:
         if any(v in lower for v in verbs):
             return True
     return False
+
+
+def _detect_potential_multi_contract(
+    message: str,
+    contract_id: str,
+    proposed_actions: list[dict],
+) -> list[str]:
+    """Detect if the user message suggests intents that span multiple contracts.
+
+    Returns a list of warning strings, empty if no multi-contract issue detected.
+    """
+    lower = message.lower()
+    warnings: list[str] = []
+
+    # Quick check: no "and" or comma-separated actions → single intent
+    has_conjunction = " and " in lower or ", " in lower or " & " in lower
+    if not has_conjunction:
+        return warnings
+
+    # If only one proposed action but message has conjunctions, it's suspicious
+    if len(proposed_actions) <= 1:
+        # Score all contracts to see if multiple contracts match
+        scores = {}
+        for cid in _CONTRACT_KEYWORDS:
+            scores[cid] = _score_contract(cid, lower)
+
+        # Find contracts with meaningful overlap (not the selected one)
+        other_contracts = [cid for cid, s in scores.items() if s > 0.15 and cid != contract_id]
+        if len(other_contracts) >= 1:
+            other_names = ", ".join(other_contracts)
+            warnings.append(
+                f"Your message mentions multiple requests that span different contracts "
+                f"({other_names}). Currently only one contract can be handled at a time. "
+                "Consider splitting into separate requests."
+            )
+
+    return warnings
 
 
 # ── Build catalog slice for prompt ────────────────────────────────
@@ -417,7 +491,15 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
             clarification_question="I understand the contract but what action should I take? (e.g., remove, modify, create)",
         )
 
-    # 10. Enrich proposed actions with labels
+    # 10. Resolve instance hints for multi-instance capabilities
+    actions = _resolve_instance_hints(actions, message_lower)
+
+    # 11. Detect multi-contract intents
+    multi_warnings = _detect_potential_multi_contract(message, contract_id, actions)
+    if multi_warnings:
+        warnings.extend(multi_warnings)
+
+    # 12. Enrich proposed actions with labels (preserve instance_hint)
     cap_labels = {c["id"]: c.get("label", c["id"]) for c in catalog_entry.get("capabilities", [])}
     enriched = []
     for a in actions:
@@ -428,6 +510,7 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
             "label": cap_labels.get(cap, cap),
             "confidence": a.get("confidence", 0.8),
             "reason": f"{a.get('verb', '')} {cap_labels.get(cap, cap)}",
+            "instance_hint": a.get("instance_hint"),
         })
 
     return InterpretationDraft(

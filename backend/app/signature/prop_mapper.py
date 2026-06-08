@@ -225,7 +225,10 @@ class V4BindingDef:
         from_field: contract_params field this binding consumes
         transform: registered transform name (identity, items, wrap, value, label)
         arity: cardinality hint (scalar, array, scalar->array)
-        shape: type hint (documentation only)
+        shape: type hint (documentation only, legacy)
+        type_info: structured type schema for binding eligibility.
+            e.g. {"type": "string"} or {"type": "array", "items": "Point"}.
+            None = untyped = binding eligible (assumed scalar/UI).
         default: fallback value if from_field not in contract_params
         required: if True and no from_field + no default → MISSING_CONTRACT_PARAM
     """
@@ -233,6 +236,7 @@ class V4BindingDef:
     transform: str = "identity"
     arity: str | None = None
     shape: str | None = None
+    type_info: dict | None = None
     default: Any | None = None
     required: bool = False
 
@@ -259,6 +263,7 @@ def load_v4_bindings() -> dict[str, dict[str, V4BindingDef]]:
                 transform=prop_cfg.get("transform", "identity"),
                 arity=prop_cfg.get("arity"),
                 shape=prop_cfg.get("shape"),
+                type_info=prop_cfg.get("type_info"),
                 default=prop_cfg.get("default"),
                 required=prop_cfg.get("required", False),
             )
@@ -342,28 +347,6 @@ def load_page_data_source() -> DataSourceIR | None:
 
 # ── data_access.json loader (new format) ─────────────────────────────────
 
-
-def load_workspace_data_source(workspace: str) -> DataSourceIR | None:
-    """Load DataSourceIR from workspace .opencode/data_access.json (legacy v3).
-
-    Used by BindingResolver for backward compat with Phase 6 tests.
-    Production uses global SSOT via load_page_data_source().
-    """
-    ws_path = os.path.join(workspace, ".opencode", "data_access.json")
-    if not os.path.exists(ws_path):
-        return None
-    try:
-        with open(ws_path) as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return None
-        page_cfg = (data.get("components") or {}).get("Page") or {}
-        ds_raw = page_cfg.get("dataSource")
-        if ds_raw:
-            return _infer_datasource_ir(ds_raw)
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
 
 
 def _load_data_access_config() -> dict | None:
