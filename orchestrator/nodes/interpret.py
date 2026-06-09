@@ -82,13 +82,25 @@ async def interpret_node(state: AgentState) -> dict:
         }
 
     if status in ("unsupported", "error"):
-        logger.warning("[run_id=%s] interpret: %s", run_id, status)
+        logger.warning("[run_id=%s] interpret: %s — %s", run_id, status,
+                        draft.get("clarification_question", ""))
+        # Treat unsupported as clarification: ask user to rephrase
+        clarification = draft.get("clarification_question",
+                                   "I didn't understand that. Please provide more detail "
+                                   "(e.g., 'remove the trend chart', 'update KPI metrics').")
+        await emitter.emit(
+            run_id,
+            SSEEvent(
+                type="interpretation_ready", node="interpret", phase="awaiting_confirmation",
+                run_id=run_id, data={**draft, "clarification_question": clarification},
+            ),
+        )
         return {
             **state,
             "interpretation": draft,
-            "error": draft.get("clarification_question", "unsupported"),
+            "plan": None,
             "trace": trace[-50:],
-            "phase": "error",
+            "phase": "awaiting_confirmation",
             "_next_node": "return_result",
         }
 

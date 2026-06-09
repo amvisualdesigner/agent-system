@@ -1009,7 +1009,7 @@ class TestCompositionChildExpansion:
 
         idx = StructuralIndex.from_worktree("/opt/agent-repos/agent-test-repo")
         sem = SemanticResolution(
-            actions=[{"verb": "remove", "object": "line", "confidence": 1.0}],
+            actions=[{"verb": "remove", "object": "timeseries", "confidence": 1.0, "instance_hint": "linechart"}],
             semantic_params={},
             semantic_provenance={},
             confidence=1.0,

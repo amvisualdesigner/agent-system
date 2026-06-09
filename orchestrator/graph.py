@@ -48,8 +48,15 @@ graph.add_conditional_edges(
     },
 )
 
-# confirm → validate_plan
-graph.add_edge("confirm", "validate_plan")
+# confirm → validate_plan (or return_result when skipped)
+graph.add_conditional_edges(
+    "confirm",
+    router,
+    {
+        "validate_plan": "validate_plan",
+        "return_result": "return_result",
+    },
+)
 
 # validate_plan: always goes to return_result (awaiting_apply or error)
 graph.add_conditional_edges(

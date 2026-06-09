@@ -32,13 +32,48 @@ async def confirm_node(state: AgentState) -> dict:
         SSEEvent(type="node_start", node="confirm", phase=phase, run_id=run_id),
     )
 
+    contract_id = state.get("confirmed_intent", {}).get("contract_id") or interpretation.get("contract_id", "")
+    if not contract_id:
+        logger.warning("[run_id=%s] confirm: no contract_id (interpretation incomplete)", run_id)
+        await emitter.emit(
+            run_id,
+            SSEEvent(
+                type="interpretation_ready", node="confirm", phase="awaiting_confirmation",
+                run_id=run_id,
+                data=interpretation,
+            ),
+        )
+        return {
+            **state,
+            "interpretation": interpretation,
+            "plan": None,
+            "trace": (state.get("trace") or []) + [{
+                "node": "confirm", "input": {"action": "skip_no_contract"},
+                "output": {"error": "contract_id is required — please refine your request"},
+                "latency_ms": 0,
+            }],
+            "phase": "awaiting_confirmation",
+            "_next_node": "return_result",
+        }
+
     confirmed_intent = state.get("confirmed_intent", {})
+    proposed_actions = interpretation.get("proposed_actions", [])
+
+    # Merge instance_hint from interpretation into confirmed_intent actions when missing
+    ci_actions = confirmed_intent.get("actions", proposed_actions)
+    if ci_actions and ci_actions is not proposed_actions:
+        proposed_map = {a.get("target_capability"): a for a in proposed_actions if a.get("instance_hint")}
+        for action in ci_actions:
+            cap = action.get("target_capability")
+            if cap in proposed_map and "instance_hint" not in action:
+                action["instance_hint"] = proposed_map[cap]["instance_hint"]
+
     confirm_payload = {
         "run_id": run_id,
         "interpretation_id": run_id,
-        "contract_id": confirmed_intent.get("contract_id", interpretation.get("contract_id", "")),
+        "contract_id": contract_id,
         "contract_version": confirmed_intent.get("contract_version", interpretation.get("contract_version", 1)),
-        "actions": confirmed_intent.get("actions", interpretation.get("proposed_actions", [])),
+        "actions": ci_actions,
         "params": confirmed_intent.get("params", interpretation.get("params_proposed", {})),
         "user_message": confirmed_intent.get("user_message", ""),
     }
@@ -108,7 +143,7 @@ async def confirm_node(state: AgentState) -> dict:
         "plan_preview": plan_preview,
         "trace": trace[-50:],
         "phase": "awaiting_apply",
-        "_next_node": "return_result",
+        "_next_node": "validate_plan",
     }
 
 

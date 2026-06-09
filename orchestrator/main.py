@@ -137,10 +137,24 @@ async def confirm_run(run_id: str, req: ConfirmRequest):
 
     # Build confirmed_intent from user's confirmation + existing interpretation
     interpretation = snapshot.get("interpretation", {})
+    proposed_actions = interpretation.get("proposed_actions", [])
+
+    # Merge instance_hint from interpretation into req.actions when missing.
+    # The interpreter sets instance_hint via keyword matching (e.g. "line"→"linechart").
+    # Clients often omit instance_hint in their confirm payload, breaking DELETE
+    # resolution for multi-instance capabilities.
+    actions = req.actions or proposed_actions
+    if req.actions:
+        proposed_map = {a.get("target_capability"): a for a in proposed_actions if a.get("instance_hint")}
+        for action in actions:
+            cap = action.get("target_capability")
+            if cap in proposed_map and "instance_hint" not in action:
+                action["instance_hint"] = proposed_map[cap]["instance_hint"]
+
     confirmed_intent = {
         "contract_id": req.contract_id or interpretation.get("contract_id", ""),
         "contract_version": req.contract_version or interpretation.get("contract_version", 1),
-        "actions": req.actions or interpretation.get("proposed_actions", []),
+        "actions": actions,
         "params": req.params or interpretation.get("params_proposed", {}),
         "user_message": req.user_message,
     }

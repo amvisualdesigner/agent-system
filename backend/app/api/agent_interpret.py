@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -53,20 +54,42 @@ def agent_interpret(req: InterpretRequest):
     except Exception as e:
         logger.warning("Could not load StructuralIndex snapshot: %s", e)
 
-    draft = interpret(
-        message=req.message,
-        conversation=req.conversation,
-        index_snapshot=index_snapshot,
-    )
+    try:
+        draft = interpret(
+            message=req.message,
+            conversation=req.conversation,
+            index_snapshot=index_snapshot,
+        )
+    except Exception as e:
+        logger.error("interpret() raised for run_id=%s message=%r: %s\n%s",
+                      run_id, req.message, e, traceback.format_exc())
+        return {
+            "status": "error",
+            "interpretation_id": "",
+            "contract_id": "",
+            "contract_version": 0,
+            "proposed_actions": [],
+            "alternatives": [],
+            "params_proposed": {},
+            "worktree_capabilities": [],
+            "clarification_question": (
+                "An internal error occurred while processing your request. "
+                "Please try again or rephrase."
+            ),
+        }
 
     draft_dict = draft.to_dict()
 
     # Persist state: store interpretation draft, transition to awaiting_confirmation
-    from app.state.run_state import save_run_state, transition_phase
-    save_run_state(run_id, {
-        "interpretation_draft": draft_dict,
-        "phase": RunPhase.AWAITING_CONFIRMATION.value,
-    })
-    transition_phase(run_id, RunPhase.AWAITING_CONFIRMATION)
+    try:
+        from app.state.run_state import save_run_state, transition_phase
+        save_run_state(run_id, {
+            "interpretation_draft": draft_dict,
+            "phase": RunPhase.AWAITING_CONFIRMATION.value,
+        })
+        transition_phase(run_id, RunPhase.AWAITING_CONFIRMATION)
+    except Exception as e:
+        logger.error("Failed to persist interpret state for run_id=%s: %s\n%s",
+                      run_id, e, traceback.format_exc())
 
     return draft_dict

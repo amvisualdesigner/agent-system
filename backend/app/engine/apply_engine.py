@@ -254,6 +254,15 @@ def _discover_repo_capability_files(workspace_root: str) -> dict[str, list[str]]
     return cap_files
 
 
+def _stem_matches_hint(fp: str, hint_stem: str) -> bool:
+    """Exact filename stem match (no substring).
+
+    hint_stem is already lowercased and .tsx-stripped.
+    """
+    stem = os.path.splitext(os.path.basename(fp))[0].lower()
+    return stem == hint_stem or stem.replace("-", "").replace("_", "") == hint_stem
+
+
 def _build_audit(
     graph, fileops, exec_ctx, contract,
     skill_ir_obj, config,
@@ -553,9 +562,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
         # Gate 2: StructuralCoverageValidator
         sreport = StructuralCoverageValidator.validate(structural_ir, contract)
-    except (ValueError, SemanticConflictError, StructuralIntegrityError) as e:
+    except (ValueError, SemanticConflictError, StructuralIntegrityError, AmbiguousStructuralTargetError) as e:
         return {
-            "execution": {"status": "rejected", "reason": f"structural:{e}", "diff": None, "operations": []},
+            "execution": {"status": "clarification_needed" if isinstance(e, AmbiguousStructuralTargetError) else "rejected", "reason": f"structural:{e}", "diff": None, "operations": []},
             "context": {"repo_snapshot": []},
         }
 
@@ -927,27 +936,58 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))
 
     # ── Inject DELETE FileOps for structural DELETE operations ──
+    # MUST follow DELETE RESOLUTION CONTRACT v1
+    # (backend/app/engine/delete_resolution_contract.py)
     delete_targets = [
         op for op in structural_ir.operations
         if op.get("action") == "DELETE"
     ]
-    if delete_targets:
-        cap_files = _discover_repo_capability_files(context.workspace)
-        for op in delete_targets:
-            target = op["target"]
-            hint = op.get("instance_hint")
-            all_files = cap_files.get(target, [])
-            if hint and len(all_files) > 1:
-                # Multi-instance DELETE con hint: filtrar por filename match
-                hint_lower = hint.lower()
-                filtered = [fp for fp in all_files if hint_lower in os.path.basename(fp).lower().replace(".tsx", "")]
-                if filtered:
-                    for fp in filtered:
-                        fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
+    try:
+        if delete_targets:
+            cap_files = _discover_repo_capability_files(context.workspace)
+            for op in delete_targets:
+                target = op["target"]
+                hint = op.get("instance_hint")
+                all_files = cap_files.get(target, [])
+                if len(all_files) == 0:
+                    logger.warning("DELETE target '%s' has no files in workspace", target)
                     continue
-            # Sin hint o sin match: borrar todos los archivos de la capability
-            for fp in all_files:
-                fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
+                if len(all_files) == 1:
+                    fileops.append(FileOp(action="delete", path=all_files[0], content="", pipeline_route="delete_inject"))
+                    continue
+                # Multiple files: must resolve uniquely or raise
+                names = [os.path.basename(fp) for fp in all_files]
+                if hint:
+                    hint_stem = hint.lower().replace(".tsx", "")
+                    matched = [fp for fp in all_files if _stem_matches_hint(fp, hint_stem)]
+                    if len(matched) == 1:
+                        fileops.append(FileOp(action="delete", path=matched[0], content="", pipeline_route="delete_inject"))
+                        continue
+                    elif len(matched) == 0:
+                        raise AmbiguousStructuralTargetError(
+                            f"No file matches '{hint}'. "
+                            f"Available files: {', '.join(names)}. "
+                            f"Try being more specific (e.g., \"remove the {names[0].replace('.tsx', '').lower()}\")."
+                        )
+                    else:
+                        raise AmbiguousStructuralTargetError(
+                            f"'{hint}' matches multiple files: {', '.join(os.path.basename(fp) for fp in matched)}. "
+                            f"Please be more specific."
+                        )
+                # No hint: cannot delete all — ambiguous
+                raise AmbiguousStructuralTargetError(
+                    f"Multiple files to choose from: {', '.join(names)}. "
+                    f"Please specify which one to remove "
+                    f"(e.g., \"remove the {names[0].replace('.tsx', '').lower()}\")."
+                )
+    except AmbiguousStructuralTargetError as e:
+        return {
+            "execution": {
+                "status": "clarification_needed", "reason": "ambiguous_target",
+                "detail": str(e), "diff": None, "operations": [],
+            },
+            "context": {"repo_snapshot": []},
+        }
 
     # ── Translate replace_pairs to file operations ──
     # StructuralIR.replace_pairs preserva intención semántica.

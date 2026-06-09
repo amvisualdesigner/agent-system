@@ -53,7 +53,7 @@ def load_current_state(workspace_root: str) -> dict[str, list[ComponentInstanceI
             short_name = capability.rsplit(".", 1)[-1]
             instances = state.setdefault(capability, [])
             instance_id = str(len(instances))
-            instance_path = short_name if instance_id == 0 else f"{short_name}:{instance_id}"
+            instance_path = short_name if instance_id == "0" else f"{short_name}:{instance_id}"
             instances.append(ComponentInstanceInfo(
                 capability=capability,
                 path=instance_path,

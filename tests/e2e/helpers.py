@@ -25,11 +25,23 @@ def simulate_interpret(message: str) -> dict:
     actions = []
     params = {}
 
-    if "line chart" in lower or "linechart" in lower or "timeseries" in lower or "trend chart" in lower:
+    if "line chart" in lower or "linechart" in lower or "timeseries" in lower or "trend chart" in lower or "chart" in lower:
+        instance_hint = None
+        if "line chart" in lower or "linechart" in lower:
+            instance_hint = "linechart"
+        elif "timeseries" in lower:
+            instance_hint = "timeseries"
+        elif "trend" in lower:
+            instance_hint = "timeseries"
+        action = {"verb": "", "target_capability": "presentation.timeseries", "label": "Trend chart", "confidence": 0.9}
+        if instance_hint:
+            action["instance_hint"] = instance_hint
         if any(v in lower for v in ["remove", "delete", "hide"]):
-            actions.append({"verb": "remove", "target_capability": "presentation.timeseries", "label": "Trend chart", "confidence": 0.9})
+            action["verb"] = "remove"
+            actions.append(action)
         elif any(v in lower for v in ["add", "create", "include", "insert"]):
-            actions.append({"verb": "create", "target_capability": "presentation.timeseries", "label": "Trend chart", "confidence": 0.9})
+            action["verb"] = "create"
+            actions.append(action)
     if "kpi" in lower or "metric" in lower:
         if any(v in lower for v in ["remove", "delete", "hide"]):
             actions.append({"verb": "remove", "target_capability": "presentation.kpi_row", "label": "KPI row", "confidence": 0.9})

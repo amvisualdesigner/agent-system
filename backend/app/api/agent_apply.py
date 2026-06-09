@@ -1,3 +1,6 @@
+import logging
+import traceback
+
 from fastapi import APIRouter, HTTPException
 
 from app.engine.apply_engine import apply_engine
@@ -7,12 +10,28 @@ from app.executor.worktree_manager import ensure_worktree
 from app.intent.models import RunPhase
 from app.utils.run_id import validate_run_id
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
 @router.post("/agent/apply")
 def agent_apply(req: ApplyRequest):
+    try:
+        return _agent_apply(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("apply failed for run_id=%s: %s\n%s",
+                      getattr(req, 'run_id', '?'), e, traceback.format_exc())
+        return {
+            "status": "error",
+            "detail": str(e),
+            "phase": RunPhase.FAILED.value,
+        }
 
+
+def _agent_apply(req: ApplyRequest):
     if not req.run_id:
         raise HTTPException(status_code=400, detail="run_id is required")
     run_id = validate_run_id(req.run_id)

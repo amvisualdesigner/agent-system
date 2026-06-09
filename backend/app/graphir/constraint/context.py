@@ -59,10 +59,8 @@ class ExecutionContext:
     def artifacts(self) -> str:
         if self.artifacts_dir:
             return self.artifacts_dir
-        settings = _get_settings()
-        return os.path.join(
-            getattr(settings, "ARTIFACTS_DIR", "/tmp/artifacts"), self.run_id
-        )
+        s = _get_settings()
+        return os.path.join(s.ARTIFACTS_DIR, self.run_id)
 
     def guard(self, path: str) -> str:
         """Ensure path is within workspace. Raises ValueError if not."""

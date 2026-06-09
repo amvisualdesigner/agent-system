@@ -577,36 +577,40 @@ def _resolve_delete_instance(
     instance_hint: str | None,
     structural_index: StructuralIndex | None,
 ) -> str | None:
-    """Resolve instance_id for DELETE when instance_hint is present.
+    """Resolve instance_id for DELETE.
 
-    Uses StructuralIndex.get_instances() + fuzzy path matching against
-    the hint. Returns instance_id or None (delete all instances).
+    MUST follow DELETE RESOLUTION CONTRACT v1
+    (backend/app/engine/delete_resolution_contract.py).
 
-    None = no hint or no match → full-capability DELETE (backward compat).
+    Structural paths are abstract (short_name:N) and can't distinguish
+    files within the same capability (e.g. Timeseries.tsx vs LineChart.tsx
+    both map to presentation.timeseries). Actual file-level resolution
+    happens in the apply engine's delete loop.
+
+    Returns instance_id or None (single instance, no filtering needed).
+    Raises AmbiguousStructuralTargetError when resolution is impossible.
     """
-    if not instance_hint or structural_index is None:
+    if structural_index is None:
         return None
 
     instances = structural_index.get_instances(capability)
-    if not instances or len(instances) <= 1:
-        return None  # single instance or none → no filtering needed
+    if not instances:
+        return None  # capability not in index
+    if len(instances) <= 1:
+        return None  # single instance → no ambiguity
 
-    hint_lower = instance_hint.lower()
-    for inst in instances:
-        path_lower = inst.path.lower()
-        if hint_lower in path_lower:
-            return inst.instance_id
+    # Multiple instances with abstract paths — defer to apply engine
+    # which has actual filesystem paths. Signal via the hint.
+    if not instance_hint:
+        short = capability.rsplit(".", 1)[-1]
+        from app.engine.errors import AmbiguousStructuralTargetError
+        raise AmbiguousStructuralTargetError(
+            f"There are {len(instances)} {short} components. "
+            f"Please specify which one to remove "
+            f"(e.g. \"remove the line chart\" or \"remove the {short} chart\")."
+        )
 
-    # Fallback: match aliases from apply_engine.FILENAME_ALIASES
-    # e.g. "linechart" → "presentation.timeseries"
-    from app.engine.aliases import FILENAME_ALIASES
-    for alias, cap_target in FILENAME_ALIASES.items():
-        if cap_target == capability and hint_lower in alias.lower():
-            for inst in instances:
-                if alias.lower() in inst.path.lower():
-                    return inst.instance_id
-
-    return None  # no match → full capability delete
+    return None  # defer to apply engine with hint
 
 
 # ── Layout hint extraction (MOVE scope, REPLACE anchor) ───────
