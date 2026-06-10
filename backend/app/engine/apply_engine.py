@@ -15,7 +15,7 @@ from functools import lru_cache
 
 from app.graphir.constraint.executor import FileOpApplier
 from app.policy.policy import validate_plan_policy, validate_operation
-from app.utils.state import write_state
+from app.state.run_state import save_run_state
 from app.executor.diff_generator import generate_diff
 from app.utils.path_guard import guard_within
 from app.config.settings import settings
@@ -1089,7 +1089,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         audit=audit, fidelity=fidelity, verify=verify_result,
     )
 
-    write_state(run_id, "apply")
+    save_run_state(run_id, {"status": "apply"})
 
     return {
         "execution": {
