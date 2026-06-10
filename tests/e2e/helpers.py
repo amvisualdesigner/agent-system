@@ -1,10 +1,10 @@
-"""Shared helpers for E2E pipeline tests — interpret + confirm simulation.
+"""Shared helpers for E2E pipeline tests — interpret + confirm + plan inspection.
 
 These mirror the logic in tests/intent/test_e2e_flow.py but without
 importing from a test module.
 """
 
-from app.intent.models import ConfirmedIntent, IntentAction
+from app.intent.models import ConfirmedIntent, IntentAction, CompiledPlan
 from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import get_contract
 from app.catalog.loader import get_contract_catalog
@@ -118,3 +118,55 @@ def simulate_confirm(interpret_result: dict) -> dict:
         },
         "gate": {"blocked": False},
     }
+
+
+def run_agent(message: str) -> dict:
+    """Interpret + confirm → return plan dict.
+
+    Convenience helper for E2E semantic tests that only need
+    the plan structure (no apply).
+    """
+    interpret = simulate_interpret(message)
+    if interpret.get("status") != "ok":
+        return {"status": "rejected", "reason": interpret.get("status", "interpret_failed")}
+    confirm = simulate_confirm(interpret)
+    return confirm
+
+
+def build_plan_from_actions(
+    actions: list[dict],
+    params: dict | None = None,
+    contract_id: str = "dashboard.sales_overview",
+) -> CompiledPlan:
+    """Build a CompiledPlan directly from action dicts, bypassing interpret.
+
+    Each action dict must have at minimum 'verb' and 'target_capability'.
+    Optional: 'params', 'confidence', 'instance_hint'.
+
+    Returns the CompiledPlan (not dict) for inspection.
+    """
+    contract = get_contract(contract_id, 1)
+    if not contract:
+        raise ValueError(f"Contract '{contract_id}' not found")
+
+    clean = []
+    for a in actions:
+        entry = {
+            "verb": a.get("verb", ""),
+            "target_capability": a.get("target_capability", ""),
+            "params": a.get("params", {}),
+            "confidence": a.get("confidence", 1.0),
+        }
+        if a.get("instance_hint"):
+            entry["instance_hint"] = a["instance_hint"]
+        clean.append(IntentAction(**entry))
+
+    confirmed = ConfirmedIntent(
+        contract_id=contract_id,
+        contract_version=1,
+        actions=clean,
+        params=params or {},
+        user_message="test",
+        interpretation_id="test",
+    )
+    return compile_plan(confirmed)

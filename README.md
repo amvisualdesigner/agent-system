@@ -440,8 +440,7 @@ El sistema usa `Qwen/Qwen2.5-Coder-3B-Instruct`, un modelo pequeño para ejecuci
 
 La estrategia del sistema para mitigar estas limitaciones no es pedirle más al LLM, sino rodearlo con capas deterministas: registry validation, GraphIR pipeline, ReactBackend, executor dumb. El LLM nunca decide directamente qué archivos crear ni qué contenido escribir — solo selecciona capability y rellena parámetros.
 
-
-Aquí tienes 10 prompts para la UI, cubriendo todos los patrones del pipeline:
+# UI prompts
 #	Prompt	Patrón que ejercita
 1	"add a filter panel to the dashboard"	CREATE componente nuevo (no existe en repo), contrato standalone, composition sync con Page
 2	"remove the line chart"	DELETE multi-instance (LineChart es una de las 2 instancias de presentation.timeseries), composition sync → Page MODIFY
@@ -453,6 +452,7 @@ Aquí tienes 10 prompts para la UI, cubriendo todos los patrones del pipeline:
 8	"add an export button"	CREATE componente nuevo (data.export), standalone, sin Page — filler/scaffold
 9	"change the dashboard layout title to Quarterly Overview"	MODIFY Page con params (title), contrato dashboard.sales_overview
 10	"what can I add to this dashboard?"	Sólo interpretación (sin acciones), ejercita IntentInterpreter puro
+
 Cobertura de patrones:
 - CREATE nuevo (1, 4, 8), CREATE existente → instance_only (6)
 - DELETE multi-instance (2, 7), DELETE con composición (5)

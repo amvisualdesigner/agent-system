@@ -47,8 +47,18 @@ class StructuralIndex:
         return None
 
     def resolve_all_paths(self, capability: str) -> list[str]:
-        """Retorna todos los paths conocidos para una capability."""
+        """Retorna todos los instance paths conocidos para una capability."""
         return [inst.path for inst in self._capabilities.get(capability, [])]
+
+    def resolve_all_file_paths(self, capability: str) -> list[str]:
+        """Retorna todos los filesystem paths conocidos para una capability.
+
+        Solo incluye aquellos con file_path no-None.
+        """
+        return [
+            inst.file_path for inst in self._capabilities.get(capability, [])
+            if inst.file_path is not None
+        ]
 
     def get_instances(self, capability: str) -> list[ComponentInstanceInfo]:
         """Retorna todas las instancias conocidas para una capability."""

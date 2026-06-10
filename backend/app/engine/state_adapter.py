@@ -20,6 +20,7 @@ class ComponentInstanceInfo:
     """
     capability: str
     path: str
+    file_path: str | None = None
     instance_id: str = "0"
     anchor: dict | None = None
     slot_id: str | None = None
@@ -50,6 +51,9 @@ def load_current_state(workspace_root: str) -> dict[str, list[ComponentInstanceI
             if capability is None:
                 continue
 
+            full_path = os.path.join(root, fn)
+            rel_path = os.path.relpath(full_path, workspace_root)
+
             short_name = capability.rsplit(".", 1)[-1]
             instances = state.setdefault(capability, [])
             instance_id = str(len(instances))
@@ -57,6 +61,7 @@ def load_current_state(workspace_root: str) -> dict[str, list[ComponentInstanceI
             instances.append(ComponentInstanceInfo(
                 capability=capability,
                 path=instance_path,
+                file_path=rel_path,
                 instance_id=instance_id,
                 slot_id=instance_path,
             ))

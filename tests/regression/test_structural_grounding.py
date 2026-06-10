@@ -659,12 +659,8 @@ class TestResolverFallback:
         )
 
         ir = self.make_ir([(MODIFY, "presentation.kpi_row")])
-        result = resolve(ir, registry, structural_index=idx)
-        assert result.reason is None
-        path = result.capability_to_path.get("presentation.kpi_row")
-        assert path == "test.bi.kpi_row.v1", (
-            f"Deterministic fallback should pick first by sorted path, got '{path}'"
-        )
+        with pytest.raises(AmbiguousStructuralTargetError, match="Multiple candidates"):
+            resolve(ir, registry, structural_index=idx)
 
     def test_no_fallback_when_no_structural_index(self):
         """Sin structural_index → no fallback (unknown_count > 0)."""

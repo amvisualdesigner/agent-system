@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.api.agent_apply import router as agent_apply
 from app.api.agent_interpret import router as agent_interpret_router
 from app.api.agent_confirm import router as agent_confirm_router
-from app.utils.state import read_state
+from app.state.run_state import load_run_state, STATE_DIR
 from app.utils.run_id import validate_run_id
 from app.utils.path_guard import guard_within
 from app.config.settings import settings
@@ -39,11 +39,17 @@ def health():
 
 @app.get("/agent/latest")
 def latest():
-    state = read_state()
-
+    if not os.path.isdir(STATE_DIR):
+        return {"error": "no runs yet"}
+    files = sorted(
+        f for f in os.listdir(STATE_DIR) if f.endswith(".json")
+    )
+    if not files:
+        return {"error": "no runs yet"}
+    latest_file = files[-1]
+    state = load_run_state(latest_file.replace(".json", ""))
     if not state:
         return {"error": "no runs yet"}
-
     return state
 
 @app.get("/maintenance/cleanup")  # local-only debug endpoint

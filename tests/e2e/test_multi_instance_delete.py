@@ -18,7 +18,6 @@ import pytest
 
 from app.engine.apply_engine import (
     apply_engine as _apply_engine,
-    _discover_repo_capability_files,
     _stem_matches_hint,
 )
 from app.engine.errors import AmbiguousStructuralTargetError
@@ -438,10 +437,10 @@ class TestSafetyInvariants:
         ctx = RunContext(run_id=str(uuid.uuid4()), workspace=e2e_workspace,
                          base_dir=e2e_workspace, artifacts=artifacts_dir)
 
-        cap_files = _discover_repo_capability_files(e2e_workspace)
+        si = StructuralIndex.from_worktree(e2e_workspace)
         # Should not crash for any capability with no files
         for cap in ["presentation.timeseries", "presentation.kpi_row"]:
-            files = cap_files.get(cap, [])
+            files = si.resolve_all_file_paths(cap) if cap else []
             assert len(files) == 0, f"Expected no files for {cap}, got {files}"
 
     def test_d2_single_instance_no_hint_no_ambiguity(self, single_timeseries_workspace, artifacts_dir):
@@ -531,9 +530,9 @@ class TestRegressionGuard:
         assert result is None  # No error, just None
 
     def test_e3_discover_files_detects_multi_instance(self, multi_timeseries_workspace):
-        """E: _discover_repo_capability_files detecta ambas instancias."""
-        cap_files = _discover_repo_capability_files(multi_timeseries_workspace)
-        timeseries_files = cap_files.get("presentation.timeseries", [])
+        """E: StructuralIndex detecta ambas instancias."""
+        si = StructuralIndex.from_worktree(multi_timeseries_workspace)
+        timeseries_files = si.resolve_all_file_paths("presentation.timeseries")
         assert len(timeseries_files) >= 2, (
             f"Expected 2+ timeseries files, got {timeseries_files}"
         )

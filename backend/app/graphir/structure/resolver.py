@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from app.engine.structural_index import StructuralIndex
 from app.engine.state_adapter import ComponentInstanceInfo
+from app.engine.errors import AmbiguousStructuralTargetError
 from app.graphir.intent import is_capability_metadata
 from app.graphir.structure.models import StructuralResolution
 from app.graphir.structure.registry import StructuralRegistry
@@ -124,19 +125,12 @@ def resolve(
             continue
 
         if len(candidates) > 1:
-            candidates = sorted(candidates, key=lambda c: c.component_instance_path)
-            best = candidates[0]
-            score = 1.0
-            trace.append(
-                f"op:{action}:{target} → {best.component_instance_path} "
-                f"(instance={instance_id}, score={score:.2f}, "
-                f"{len(candidates)} candidates, "
-                f"deterministic fallback selected first by path)"
+            paths = [c.component_instance_path for c in candidates]
+            raise AmbiguousStructuralTargetError(
+                f"Multiple candidates for '{target}': {', '.join(paths)}. "
+                f"StructuralResolver requires unambiguous targets. "
+                f"Provide an instance_hint to disambiguate."
             )
-            capability_to_path[target] = best.component_instance_path
-            total_score += score
-            resolved_count += 1
-            continue
 
         best = candidates[0]
         score = 1.0

@@ -93,6 +93,47 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
         f.write(diff)
 
 
+def _validate_delete_authority(structural_ir: StructuralIR, plan: dict) -> None:
+    """Gate: every StructuralIR DELETE must be backed by a user-confirmed 'remove' action.
+
+    Raises ValueError if an unconfirmed DELETE is found.
+    """
+    delete_ops = [
+        op for op in structural_ir.operations
+        if op.get("action") == "DELETE"
+    ]
+    if not delete_ops:
+        return
+
+    user_remove_actions = [
+        a for a in (plan.get("actions") or [])
+        if isinstance(a, dict) and a.get("verb") == "remove"
+    ]
+    if not user_remove_actions:
+        raise ValueError(
+            f"DELETE operations found ({len(delete_ops)}) but no user-confirmed "
+            f"'remove' action in plan. "
+            f"Delete targets: {[op.get('target') for op in delete_ops]}"
+        )
+
+    remove_targets = set()
+    for a in user_remove_actions:
+        t = a.get("target_capability", "")
+        if t:
+            remove_targets.add(t)
+        hint = a.get("instance_hint", "")
+        if hint:
+            remove_targets.add(hint)
+
+    for op in delete_ops:
+        target = op.get("target", "")
+        if target not in remove_targets:
+            raise ValueError(
+                f"DELETE operation for '{target}' has no matching user-confirmed "
+                f"'remove' action. Confirmed remove targets: {remove_targets}"
+            )
+
+
 def _compute_semantic_loss(
     bound_nodes: dict[str, dict],
 ) -> dict:
@@ -196,62 +237,6 @@ def _match_file_to_capability(name_lower: str, name_map: dict[str, str]) -> str 
     if normalized in _get_normalized_map():
         return _get_normalized_map()[normalized]
     return None
-
-
-def _discover_repo_capabilities(workspace_root: str) -> set[str]:
-    """Scan workspace para detectar capabilities existentes.
-
-    NO depende del contrato. Escanea archivos del repo y mapea
-    nombres de componente a capability names usando STRUCTURAL_SCHEMA.
-
-    El repo es la fuente de verdad de lo que existe.
-    El contrato solo expresa intención parcial sobre esa realidad.
-    """
-    if not workspace_root or not os.path.isdir(workspace_root):
-        return set()
-
-    name_map = _build_name_map()
-
-    caps: set[str] = set()
-    for root, _dirs, files in os.walk(workspace_root):
-        for fn in files:
-            name, _ext = os.path.splitext(fn)
-            if not name:
-                continue
-            name_lower = name.lower()
-
-            capability = _match_file_to_capability(name_lower, name_map)
-            if capability is not None:
-                caps.add(capability)
-
-    return caps
-
-
-def _discover_repo_capability_files(workspace_root: str) -> dict[str, list[str]]:
-    """Scan workspace y retorna {capability_name: [file_paths]}.
-
-    Los file paths son relativos al workspace_root.
-    """
-    if not workspace_root or not os.path.isdir(workspace_root):
-        return {}
-
-    name_map = _build_name_map()
-    cap_files: dict[str, list[str]] = {}
-
-    for root, _dirs, files in os.walk(workspace_root):
-        for fn in files:
-            full_path = os.path.join(root, fn)
-            rel_path = os.path.relpath(full_path, workspace_root)
-            name, _ext = os.path.splitext(fn)
-            if not name:
-                continue
-            name_lower = name.lower()
-
-            capability = _match_file_to_capability(name_lower, name_map)
-            if capability is not None:
-                cap_files.setdefault(capability, []).append(rel_path)
-
-    return cap_files
 
 
 def _stem_matches_hint(fp: str, hint_stem: str) -> bool:
@@ -547,6 +532,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             structural_index=structural_index,
         )
 
+        # ── Gate: Delete authority — only user-confirmed IntentAction DELETE is valid ──
+        _validate_delete_authority(structural_ir, plan)
+
         # ── Early exit: all capabilities resolved to KEEP ──
         if structural_ir.has_resolved_keep_state:
             logger.info(
@@ -710,16 +698,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         if comp:
             path_map[comp] = f["path"]
 
-    # Build file_path_overrides from real repo layout for existing capabilities.
+    # Build file_path_overrides from structural_index for existing capabilities.
     # This ensures MODIFY operations go to the correct filesystem paths even when
     # the contract's renderer paths don't match the actual repo structure
     # (e.g., SalesOverviewPage.tsx instead of Page.tsx, or frontend/ prefix).
-    cap_files = _discover_repo_capability_files(context.workspace)
     capabilities_map = contract.ast_template.get("capabilities", {})
     file_path_overrides: dict[str, str] = {}
     for comp_type, cap_id in capabilities_map.items():
-        if cap_id in cap_files and cap_files[cap_id]:
-            file_path_overrides[comp_type] = cap_files[cap_id][0]
+        file_paths = structural_index.resolve_all_file_paths(cap_id) if structural_index else []
+        if file_paths:
+            file_path_overrides[comp_type] = file_paths[0]
 
     # Phase 4.5: extract component signatures from worktree
     component_signatures: dict[str, dict] = {}
@@ -755,7 +743,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         from app.graphir.constraint.memory import RepositorySemanticMemory
         from app.graphir.constraint.crl import ConflictResolutionLayer
         from app.graphir.constraint.split_analyzer import SPLITAnalyzer
-        from app.graphir.constraint.deletion import detect_deletions
         from app.graphir.constraint.models import MemoryRecord, Decision
         from app.graphir.constraint.context import PipelineState, RenderContext
 
@@ -803,9 +790,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             decisions, identities, file_nodes, crl_conflicts,
         )
 
-        # Phase 6a: DELETE detection via state difference
-        deletions = detect_deletions(resolved_mapping, identities, file_nodes)
-
         # ── Fix 4: Project render_mode from semantic decision ──
         for dec in decisions.values():
             if dec.decision in (Decision.CREATE, Decision.SPLIT):
@@ -818,7 +802,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             component_nodes=component_nodes,
             decisions=decisions,
             split_plan=split_plan,
-            deletions=deletions,
             resolved_mapping=resolved_mapping,
             exec_ctx=exec_ctx,
         )
@@ -870,47 +853,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         _audit_render_ctx = render_ctx
 
         # Phase 2: Persist new identity→file mappings
-        deleted_fps = {d.fingerprint for d in deletions}
         updated = memory.merge(
             decisions, identities, resolved_mapping,
-            deleted_fingerprints=deleted_fps,
         )
         memory.save(updated)
-
-        # ── Phase 6a: DELETE — state-diff deletion processing ──
-        from app.graphir.constraint.diff import StructuralDiffEngine
-        from app.graphir.constraint.renderer import RepositoryAwareRenderer
-        _del_executor = RepositoryAwareRenderer()._get_executor(exec_ctx.workspace_root)
-        for del_rec in (deletions or []):
-            fn = file_nodes.get(del_rec.file_path)
-            if fn is None:
-                continue
-            component_count = len(getattr(fn, "component_names", []))
-            allow_full_delete = (component_count <= 1)
-            boundary = next(
-                (b for b in getattr(fn, "component_boundaries", []) if b.name == del_rec.component_name),
-                None,
-            )
-            file_path = os.path.join(exec_ctx.workspace_root, del_rec.file_path)
-            existing_content: str = ""
-            existing_lines: list[str] = []
-            if os.path.exists(file_path):
-                with open(file_path) as f:
-                    existing_content = f.read()
-                    existing_lines = existing_content.split("\n")
-            edit = StructuralDiffEngine.compute_delete_edit(
-                del_rec.file_path, existing_lines, boundary,
-                allow_full_delete=allow_full_delete,
-            )
-            if edit is None:
-                logger.warning(
-                    "Skipping unsafe DELETE for %s::%s",
-                    del_rec.file_path, del_rec.component_name,
-                )
-                continue
-            fileops.extend(
-                _del_executor.execute(edit, existing_content=existing_content),
-            )
     else:
         # Direct BackendRenderer
         ReactBackend.reset_emit_log(run_id)
@@ -944,11 +890,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     ]
     try:
         if delete_targets:
-            cap_files = _discover_repo_capability_files(context.workspace)
             for op in delete_targets:
                 target = op["target"]
                 hint = op.get("instance_hint")
-                all_files = cap_files.get(target, [])
+                all_files = structural_index.resolve_all_file_paths(target) if structural_index else []
                 if len(all_files) == 0:
                     logger.warning("DELETE target '%s' has no files in workspace", target)
                     continue
@@ -994,10 +939,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # El renderer ya generó fileops para CREATE del new.
     # Aquí inyectamos DELETE del old.
     if structural_ir.replace_pairs:
-        cap_files = _discover_repo_capability_files(context.workspace)
         for old_cap, _new_cap in structural_ir.replace_pairs:
             if structural_index.exists(old_cap):
-                for fp in cap_files.get(old_cap, []):
+                for fp in (structural_index.resolve_all_file_paths(old_cap) if structural_index else []):
                     fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
 
     # ── Validate replace_pairs consistency ──
