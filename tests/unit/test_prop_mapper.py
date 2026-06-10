@@ -26,15 +26,12 @@ from typing import Any
 import pytest
 
 from app.signature.prop_mapper import (
-    resolve_props,
-    BindingResult,
     Binding,
     DataSourceIR,
     DataSlice,
     compile_binding,
     JSExpression,
     HookBinding,
-    PropBindingStatus,
     _load_data_access_config,
     _find_binding,
     _parse_bindings,
@@ -234,330 +231,15 @@ class TestBindingIR:
         assert hb.transform == "chartData.timeseries"
 
 
-# ── Resolution state machine tests ──
 
 
-class TestExactMatch:
-    """PR1: exact contract match NO LONGER resolves props.
-    
-    Without BindingIR entry, contract params are NOT translated to props.
-    This is correct — BindingResolver is the only resolution path.
-    """
-
-    def test_kpi_row_title_exact_no_resolution(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"title": "Revenue Summary"},
-            component_signature=kpi_row_signature,
-        )
-        # title is optional → FALLBACK_ALLOWED, not resolved
-        assert "title" not in result.props
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-        assert "title" not in result.consumed_params
-
-    def test_page_title_exact_no_resolution(self, page_signature):
-        result = resolve_props(
-            "Page",
-            {"title": "Dashboard"},
-            component_signature=page_signature,
-        )
-        assert "title" not in result.props
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_timeseries_type_exact_no_resolution(self, timeseries_signature):
-        result = resolve_props(
-            "Timeseries",
-            {"type": "line"},
-            component_signature=timeseries_signature,
-        )
-        assert "type" not in result.props
-        assert result.prop_status.get("type") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_no_contract_params_returns_empty(self, kpi_row_signature):
-        result = resolve_props("KpiRow", {}, component_signature=kpi_row_signature)
-        assert result.props == {}
 
 
-class TestAliasMatch:
-    """PR1: aliases NO LONGER resolve props.
-    
-    PARAM_ALIASES was removed. No contract param → prop alias resolution.
-    """
-
-    def test_chart_type_to_type_not_resolved(self, timeseries_signature):
-        result = resolve_props(
-            "Timeseries",
-            {"chart_type": "bar"},
-            component_signature=timeseries_signature,
-        )
-        assert "type" not in result.props
-        assert result.prop_status.get("type") == PropBindingStatus.FALLBACK_ALLOWED
-        assert "chart_type" not in result.consumed_params
-
-    def test_unknown_param_ignored(self, kpi_row_signature):
-        """Params not matching any prop name are not consumed."""
-        result = resolve_props(
-            "KpiRow",
-            {"metrics": ["revenue"]},
-            component_signature=kpi_row_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-        assert "metrics" not in result.consumed_params
 
 
-class TestDataAccessBinding:
-    """BindingIR resolution — global config has no per-component bindings → FALLBACK_ALLOWED."""
-
-    def test_kpi_row_no_binding(self, kpi_row_signature):
-        """Global config has no per-component KpiRow binding → FALLBACK_ALLOWED."""
-        result = resolve_props(
-            "KpiRow",
-            {"metrics": ["revenue", "growth"]},
-            component_signature=kpi_row_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_timeseries_no_binding(self, timeseries_signature):
-        """Global config has no per-component Timeseries binding → FALLBACK_ALLOWED."""
-        result = resolve_props(
-            "Timeseries",
-            {"timeseries_metric": "revenue"},
-            component_signature=timeseries_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_page_no_binding(self, page_signature):
-        """Global config has Page with dataSource (skipped by _parse_bindings) → FALLBACK_ALLOWED."""
-        result = resolve_props(
-            "Page",
-            {},
-            component_signature=page_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_v3_no_per_component_bindings(self, page_signature):
-        """Global config has Page dataSource, not per-component bindings.
-        resolve_props for Page finds no Bindings → data is FALLBACK_ALLOWED."""
-        result = resolve_props(
-            "Page",
-            {},
-            component_signature=page_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_v3_child_no_bindings(self, kpi_row_signature):
-        """Child (KpiRow) with global config finds no per-component
-        binding → FALLBACK_ALLOWED (not BINDING_MISSING)."""
-        result = resolve_props(
-            "KpiRow",
-            {},
-            component_signature=kpi_row_signature,
-        )
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_global_config_returns_datasource_with_slices(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"metrics": ["revenue"]},
-            component_signature=kpi_row_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
 
 
-class TestBindingMissing:
-    """BINDING_MISSING state — requires required_props in signature.
 
-    Global config has no per-component bindings, so required props without
-    binding trigger BINDING_MISSING; optional props are FALLBACK_ALLOWED.
-    """
-
-    def test_binding_missing_when_required_and_no_binding(self, kpi_row_signature):
-        """When data is required and no BindingIR → BINDING_MISSING."""
-        kpi_with_required = dict(kpi_row_signature, required_props=["data"])
-        result = resolve_props(
-            "KpiRow",
-            {},
-            component_signature=kpi_with_required,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.BINDING_MISSING
-        assert "data" in result.binding_missing_props
-        assert any("BINDING_MISSING" in w for w in result.warnings)
-
-    def test_no_binding_missing_when_prop_optional(self, kpi_row_signature):
-        """data is not in required_props → FALLBACK_ALLOWED."""
-        result = resolve_props(
-            "Timeseries",
-            {},
-            component_signature=kpi_row_signature,
-        )
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-        assert result.binding_missing_props == []
-
-    def test_page_not_in_required_stays_fallback(self, page_signature):
-        result = resolve_props(
-            "Page",
-            {},
-            component_signature=page_signature,
-        )
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-        assert result.binding_missing_props == []
-
-    def test_no_binding_missing(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {},
-            component_signature=kpi_row_signature,
-        )
-        assert result.binding_missing_props == []
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-
-class TestFallbackAllowed:
-    """FALLBACK_ALLOWED — optional or non-required props without binding."""
-
-    def test_optional_title_not_in_contract(self, timeseries_signature):
-        result = resolve_props("Timeseries", {}, component_signature=timeseries_signature)
-        assert "title" not in result.props
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_type_not_in_contract(self, timeseries_signature):
-        result = resolve_props("Timeseries", {}, component_signature=timeseries_signature)
-        assert result.prop_status.get("type") == PropBindingStatus.FALLBACK_ALLOWED
-
-
-class TestTitleHeuristic:
-    """PR1: title heuristic from timeseries_metric is REMOVED.
-    
-    No auto-generation of title from timeseries_metric.
-    Title must come from BindingIR or be absent.
-    """
-
-    def test_title_not_generated_from_metric(self, timeseries_signature):
-        result = resolve_props(
-            "Timeseries",
-            {"timeseries_metric": "revenue"},
-            component_signature=timeseries_signature,
-        )
-        assert "title" not in result.props
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_title_not_generated_without_timeseries_metric(self, timeseries_signature):
-        result = resolve_props(
-            "Timeseries",
-            {"metrics": ["revenue"]},
-            component_signature=timeseries_signature,
-        )
-        assert "title" not in result.props
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-
-
-class TestUnconsumedParams:
-    """Unconsumed contract params → warning + semantic degradation."""
-
-    def test_unconsumed_param_adds_warning(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"metrics": ["revenue"], "timeseries_metric": "growth", "unrelated_param": "x"},
-            component_signature=kpi_row_signature,
-        )
-        # No BindingIR → nothing consumed
-        assert result.consumed_params == set()
-        degradation = [w for w in result.warnings if "not consumed" in w]
-        assert len(degradation) >= 1
-        assert any("metrics" in w for w in degradation)
-        assert any("unrelated_param" in w for w in degradation)
-
-    def test_all_params_consumed_no_warnings(self, kpi_row_signature):
-        result = resolve_props("KpiRow", {}, component_signature=kpi_row_signature)
-        no_consumed = [w for w in result.warnings if "not consumed" in w]
-        assert len(no_consumed) == 0
-
-    def test_consumed_params_is_empty_without_binding(self, timeseries_signature):
-        """Without per-component binding, no params are consumed."""
-        result = resolve_props(
-            "Timeseries",
-            {"timeseries_metric": "growth"},
-            component_signature=timeseries_signature,
-        )
-        assert isinstance(result.consumed_params, set)
-        assert "timeseries_metric" not in result.consumed_params
-
-
-class TestNoMatch:
-    """No match → prop not in props, status FALLBACK_ALLOWED."""
-
-    def test_unknown_prop_not_included(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"nonexistent": "value"},
-            component_signature=kpi_row_signature,
-        )
-        assert result.props == {}
-        assert "nonexistent" not in result.consumed_params
-        assert any("nonexistent" in w for w in result.warnings)
-
-    def test_empty_contract_params(self, kpi_row_signature):
-        result = resolve_props("KpiRow", {}, component_signature=kpi_row_signature)
-        assert result.props == {}
-        assert result.consumed_params == set()
-        assert result.warnings == []
-
-    def test_no_signature_returns_empty_props(self):
-        result = resolve_props("KpiRow", {"metrics": ["revenue"]}, component_signature=None)
-        assert result.props == {}
-        assert result.consumed_params == set()
-        assert any("metrics" in w for w in result.warnings)
-
-
-class TestBindingResultStructure:
-    """BindingResult field correctness."""
-
-    def test_imports_are_empty_without_binding(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"metrics": ["revenue", "growth"]},
-            component_signature=kpi_row_signature,
-        )
-        assert result.imports == []
-
-    def test_warnings_are_strings(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"unknown": "value"},
-            component_signature=kpi_row_signature,
-        )
-        assert all(isinstance(w, str) for w in result.warnings)
-
-    def test_prop_status_is_complete(self, kpi_row_signature):
-        result = resolve_props(
-            "KpiRow",
-            {"title": "Hello"},
-            component_signature=kpi_row_signature,
-        )
-        assert "title" in result.prop_status
-        assert "data" in result.prop_status
-        assert result.prop_status.get("title") == PropBindingStatus.FALLBACK_ALLOWED
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-
-    def test_binding_missing_props_is_list(self, kpi_row_signature):
-        """binding_missing_props should be a list of prop names.
-        Only required props with no BindingIR trigger BINDING_MISSING."""
-        sig_with_required = dict(kpi_row_signature, required_props=["data"])
-        result = resolve_props(
-            "KpiRow",
-            {},
-            component_signature=sig_with_required,
-        )
-        assert isinstance(result.binding_missing_props, list)
-        assert "data" in result.binding_missing_props
 
 
 class TestLoadDataAccessConfig:
@@ -655,70 +337,25 @@ class TestParseBindings:
         assert _parse_bindings({}) == {}
 
 
-class TestDriftDetection:
-    """Drift detection with global config (no per-component bindings → no DRIFT)."""
-
-    def test_no_drift_without_per_component_binding(self, timeseries_signature):
-        """No per-component binding → no DRIFT, just unconsumed param warning."""
-        result = resolve_props(
-            "Timeseries",
-            {"metric": "revenue"},
-            component_signature=timeseries_signature,
-        )
-        assert "data" not in result.props
-        assert result.prop_status.get("data") == PropBindingStatus.FALLBACK_ALLOWED
-        drift_warnings = [w for w in result.warnings if "DRIFT" in w]
-        assert len(drift_warnings) == 0
-        unconsumed = [w for w in result.warnings if "not consumed" in w]
-        assert len(unconsumed) >= 1
-
-    def test_unconsumed_params_with_mixed_params(self, timeseries_signature):
-        """Without per-component binding, all params are unconsumed."""
-        result = resolve_props(
-            "Timeseries",
-            {"timeseries_metric": "revenue", "unrelated": "bar"},
-            component_signature=timeseries_signature,
-        )
-        assert isinstance(result.consumed_params, set)
-        assert len(result.consumed_params) == 0
-        unconsumed = [w for w in result.warnings if "not consumed" in w]
-        assert len(unconsumed) >= 2
-
-    def test_backward_compat_parse_v2_dict(self):
-        """_parse_bindings translates old hook format to DataSourceIR."""
-        v2_data = {
-            "components": {
-                "KpiRow": {
-                    "bindings": [{
-                        "targetProp": "data",
-                        "source": {"type": "hook", "name": "useDashboardData"},
-                        "transform": "kpiData",
-                        "consumes": ["metrics"],
-                    }],
-                },
+def test_backward_compat_parse_v2_dict():
+    """_parse_bindings translates old hook format to DataSourceIR."""
+    v2_data = {
+        "components": {
+            "KpiRow": {
+                "bindings": [{
+                    "targetProp": "data",
+                    "source": {"type": "hook", "name": "useDashboardData"},
+                    "transform": "kpiData",
+                    "consumes": ["metrics"],
+                }],
             },
-        }
-        bindings = _parse_bindings(v2_data)
-        b = bindings["KpiRow"][0]
-        assert isinstance(b.source, DataSourceIR)
-        assert b.source.type == "dashboard_data"
-        assert b.transform == "kpiData"
-
-    def test_empty_consumes_no_drift_with_global_config(self, page_signature):
-        """No per-component binding → data is FALLBACK_ALLOWED, title unconsumed."""
-        result = resolve_props(
-            "Page",
-            {"title": "Dashboard"},
-            component_signature=page_signature,
-        )
-        assert "data" not in result.props
-        assert "title" not in result.consumed_params
-        assert len(result.consumed_params) == 0
-        drift_warnings = [w for w in result.warnings if "DRIFT" in w]
-        assert len(drift_warnings) == 0
-        unconsumed = [w for w in result.warnings if "not consumed" in w]
-        assert len(unconsumed) >= 1
-        assert any("title" in w for w in unconsumed)
+        },
+    }
+    bindings = _parse_bindings(v2_data)
+    b = bindings["KpiRow"][0]
+    assert isinstance(b.source, DataSourceIR)
+    assert b.source.type == "dashboard_data"
+    assert b.transform == "kpiData"
 
 
 # ── Phase 6 lock invariants ─────────────────────────────────

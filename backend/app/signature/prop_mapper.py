@@ -139,13 +139,6 @@ class ComponentBinding:
 # ── Resolution state machine ──────────────────────────────────────────────
 
 
-class PropBindingStatus(enum.Enum):
-    RESOLVED = "resolved"               # Explicit BindingIR match
-    INFERRED = "inferred"               # Safe alias or heuristic
-    FALLBACK_ALLOWED = "fallback_allowed"  # Optional prop, no binding
-    BINDING_MISSING = "binding_missing"    # Required, no binding → BLOCKING
-
-
 # ── JSExpression (kept for _emit compatibility) ──────────────────────────
 
 
@@ -179,36 +172,6 @@ class HookBinding:
     hook_name: str
     transform: str | None
     import_stmt: str | None
-
-
-# ── BindingResult with state machine ─────────────────────────────────────
-
-
-@dataclass
-class BindingResult:
-    """Prop binding result with per-prop resolution status + provenance.
-
-    Fields:
-        props: Resolved prop values (only RESOLVED and INFERRED props).
-        prop_status: Per-prop resolution status.
-        binding_missing_props: Props in BINDING_MISSING state.
-        imports: Deduplicated import statements from BindingIR.
-        warnings: Semantic warnings (unconsumed params, degradation).
-        consumed_params: Contract params consumed by any binding.
-        provenance: Traceability map — prop_name → list of contract param
-            names that originated this prop binding. Populated from:
-            - BindingIR binding.consumes (explicit declaration)
-            - Exact match (contract key = prop name)
-            - Alias match (alias contract key)
-            - Title heuristic (timeseries_metric)
-    """
-    props: dict[str, Any]
-    prop_status: dict[str, PropBindingStatus]
-    binding_missing_props: list[str]
-    imports: list[str]
-    warnings: list[str] = field(default_factory=list)
-    consumed_params: set[str] = field(default_factory=set)
-    provenance: dict[str, list[str]] = field(default_factory=dict)
 
 
 # ── v4 Binding format ───────────────────────────────────────────────────
@@ -304,14 +267,6 @@ def compile_binding(binding: Binding, framework: str = "react") -> HookBinding |
     )
 
 
-def _derive_import(source: DataSourceIR) -> str | None:
-    """Derive import statement from a DataSourceIR, or None if no import needed."""
-    hook = _REACT_HOOK_MAP.get(source.type)
-    if hook:
-        return _HOOK_IMPORT_MAP.get(hook)
-    return None
-
-
 # ── Phase 6: Page-level data source loader ────────────────────────────────
 
 
@@ -376,82 +331,7 @@ def _load_data_access_config() -> dict | None:
         return None
 
 
-def _validate_data_access_bindings(data: dict, workspace: str) -> list[str]:
-    """Verify that each BindingIR hook source resolves to a real file.
 
-    Uses DataSourceIR (semantic type) to derive the React hook import,
-    then validates the module exists in the worktree.
-
-    Returns list of failure reasons. Empty list means all imports are valid.
-    FAIL, not warn — fantasy imports produce broken TSX.
-    """
-    failures: list[str] = []
-    src_dir = os.path.join(workspace, "frontend", "src")
-    if not os.path.isdir(src_dir):
-        return ["frontend/src not found in workspace"]
-
-    for comp_name, comp_config in data.get("components", {}).items():
-        # Phase 6 v3: Page has 'dataSource' not 'bindings' — validate dataSource directly
-        if "dataSource" in comp_config:
-            ds_raw = comp_config.get("dataSource", {})
-            ir = _infer_datasource_ir(ds_raw)
-            hook = _REACT_HOOK_MAP.get(ir.type)
-            if hook:
-                import_stmt = _HOOK_IMPORT_MAP.get(hook)
-                if import_stmt:
-                    module = _extract_module_path(import_stmt)
-                    if module is not None:
-                        candidates = [
-                            os.path.join(src_dir, f"{module}.ts"),
-                            os.path.join(src_dir, f"{module}.tsx"),
-                        ]
-                        if not any(os.path.exists(c) for c in candidates):
-                            failures.append(
-                                f"data_access.json[{comp_name}].dataSource: "
-                                f"hook module '{module}' not found in frontend/src/"
-                            )
-            continue  # v3 — no bindings to iterate
-        for entry in comp_config.get("bindings", []):
-            ir = _infer_datasource_ir(entry.get("source", {}))
-            hook = _REACT_HOOK_MAP.get(ir.type)
-            if not hook:
-                continue  # raw_selector or unknown type — no import to validate
-            import_stmt = _HOOK_IMPORT_MAP.get(hook)
-            if not import_stmt:
-                failures.append(
-                    f"data_access.json[{comp_name}].{entry.get('targetProp')}: "
-                    f"no import mapping for DataSourceIR(type={ir.type!r}, "
-                    f"hook={hook!r})"
-                )
-                continue
-            module = _extract_module_path(import_stmt)
-            if module is None:
-                continue
-            candidates = [
-                os.path.join(src_dir, f"{module}.ts"),
-                os.path.join(src_dir, f"{module}.tsx"),
-            ]
-            found = any(os.path.exists(c) for c in candidates)
-            if not found:
-                failures.append(
-                    f"data_access.json[{comp_name}].{entry.get('targetProp')}: "
-                    f"hook module '{module}' not found in frontend/src/"
-                )
-    return failures
-
-
-def _extract_module_path(import_stmt: str) -> str | None:
-    """Extract 'hooks/useDashboardData' from
-    \"import { useDashboardData } from '@/hooks/useDashboardData'\"
-    Strips @/, quotes, and known file extensions (.ts/.tsx/.js/.jsx).
-    """
-    m = re.search(r"from\s+['\"](.+?)['\"]", import_stmt)
-    if not m:
-        return None
-    path = m.group(1)
-    path = re.sub(r"^@\/", "", path)
-    path = re.sub(r"\.(ts|tsx|js|jsx)$", "", path)
-    return path
 
 
 # ── Binding lookup ────────────────────────────────────────────────────────
@@ -542,100 +422,4 @@ def _find_binding(
     return None
 
 
-# ── Main resolver with state machine ──────────────────────────────────────
 
-
-def resolve_props(
-    component_name: str,
-    contract_params: dict[str, Any],
-    component_signature: dict[str, Any] | None = None,
-) -> BindingResult:
-    """Resolve contract params to component props using BindingIR only.
-
-    Resolution:
-      1. BindingIR match → RESOLVED
-      2. No BindingIR + optional → FALLBACK_ALLOWED
-      3. No BindingIR + required → BINDING_MISSING
-
-    No aliases, no exact-match fallback, no heuristics.
-    Contract params that are not consumed by any binding → warning.
-    """
-    props: dict[str, Any] = {}
-    prop_status: dict[str, PropBindingStatus] = {}
-    binding_missing_props: list[str] = []
-    imports: list[str] = []
-    warnings: list[str] = []
-    consumed_params: set[str] = set()
-    provenance: dict[str, list[str]] = {}
-
-    sig = component_signature or {}
-    prop_names: set[str] = set(sig.get("prop_names", []))
-    data_access = _load_data_access_config()
-    bindings_map = _parse_bindings(data_access) if data_access else {}
-
-    for prop_name in prop_names:
-        # ── 1. BindingIR match → RESOLVED ─────────────────────────────
-        binding = _find_binding(component_name, prop_name, bindings_map)
-        if binding is not None:
-            expr = compile_binding(binding)
-            props[prop_name] = expr
-            prop_status[prop_name] = PropBindingStatus.RESOLVED
-            imp = _derive_import(binding.source)
-            if imp:
-                imports.append(imp)
-            provenance[prop_name] = list(binding.consumes)
-            for cp in binding.consumes:
-                if cp in contract_params:
-                    consumed_params.add(cp)
-                else:
-                    msg = (
-                        f"DRIFT: binding '{component_name}.{prop_name}' declares "
-                        f"consumes={{{cp}}} but contract_params has no '{cp}'. "
-                        f"Available: {set(contract_params.keys())}. "
-                        f"Fidelity will not count this binding as consumed."
-                    )
-                    warnings.append(msg)
-                    logger.warning(msg)
-            continue
-
-        # ── 2. BINDING_MISSING or FALLBACK_ALLOWED ────────────────────
-        # PR1: no exact match, no alias, no heuristic. If no BindingIR
-        # entry and the prop is required → BINDING_MISSING.
-        required = sig.get("required_props", [])
-        if prop_name in required:
-            prop_status[prop_name] = PropBindingStatus.BINDING_MISSING
-            binding_missing_props.append(prop_name)
-            msg = (
-                f"BINDING_MISSING: '{component_name}.{prop_name}' has no BindingIR "
-                f"entry. Required prop cannot be resolved. "
-                f"Add a binding to data_access.json or remove the requirement."
-            )
-            warnings.append(msg)
-            logger.error(msg)
-        else:
-            prop_status[prop_name] = PropBindingStatus.FALLBACK_ALLOWED
-
-    # ── Post-check: detect contract params not consumed by any binding ──
-    unconsumed = set(contract_params.keys()) - consumed_params
-    for param in sorted(unconsumed):
-        msg = (
-            f"contract param '{param}={contract_params[param]}' not consumed "
-            f"by any binding for component '{component_name}' — "
-            f"semantic degradation: intent expressed but not rendered"
-        )
-        warnings.append(msg)
-        logger.warning(msg)
-
-    return BindingResult(
-        props=props,
-        prop_status=prop_status,
-        binding_missing_props=binding_missing_props,
-        imports=list(set(imports)),
-        warnings=warnings,
-        consumed_params=consumed_params,
-        provenance=provenance,
-    )
-
-def _render_prop_value(value: Any) -> Any:
-    """Return semantic value as-is. No quoting — _emit handles all JSX quoting."""
-    return value
