@@ -387,7 +387,7 @@ _VERBS_CREATE = frozenset({
     "compose", "design", "include", "insert",
 })
 _VERBS_MOVE = frozenset({"move", "reorder", "relocate"})
-_VERBS_REPLACE = frozenset({"replace", "swap", "substitute"})
+_VERBS_REPLACE = frozenset({"replace", "swap", "substitute", "transform", "convert", "migrate", "morph"})
 
 
 def validate_contract_repo_consistency(

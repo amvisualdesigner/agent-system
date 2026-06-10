@@ -101,6 +101,7 @@ _ACTION_TRIGGERS: dict[str, list[str]] = {
     "modify": ["modify", "update", "change", "set", "edit", "adjust", "replace", "configure"],
     "create": ["create", "add", "build", "generate", "compose", "design", "include", "insert"],
     "keep": ["keep", "maintain", "preserve", "leave"],
+    "transform": ["transform", "swap", "migrate", "convert", "morph"],
 }
 
 _VERB_OBJECT_PATTERNS: list[tuple[str, str, float]] = [
@@ -116,6 +117,9 @@ _VERB_OBJECT_PATTERNS: list[tuple[str, str, float]] = [
     ("modify", "presentation.timeseries", 0.9),
     ("modify", "presentation.table", 0.9),
     ("modify", "layout.page", 0.9),
+    ("transform", "presentation.chart.bar", 0.9),
+    ("transform", "presentation.timeseries", 0.9),
+    ("transform", "presentation.table", 0.9),
 ]
 
 
@@ -256,13 +260,22 @@ RULES:
 CATALOG:
 {catalog_slice}
 
+VERBS:
+- "modify" — update an existing capability (change metrics, layout, etc.)
+- "remove" — delete a capability from the dashboard
+- "create" — add a new capability to the dashboard
+- "keep" — leave as-is, no changes
+- "transform" — replace ONE capability with ANOTHER (e.g. "replace line chart with bar chart").
+  For transform actions, put the SOURCE capability in params.source_capability.
+  Example: {{"verb": "transform", "target_capability": "presentation.chart.bar", "params": {{"source_capability": "presentation.timeseries"}}}}
+
 OUTPUT JSON SCHEMA:
 {{
   "contract_id": "str",
   "contract_version": 1,
   "actions": [
     {{
-      "verb": "modify|remove|create|keep",
+      "verb": "modify|remove|create|keep|transform",
       "target_capability": "capability_id_from_catalog",
       "params": {{}},
       "confidence": 0.0

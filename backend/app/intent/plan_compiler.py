@@ -159,6 +159,10 @@ def _build_semantic_frame_from_actions(
         }
         if action.instance_hint:
             frame_action["instance_hint"] = action.instance_hint
+        # Preserve source_capability for transform/swap/replace actions
+        src = action.params.get("source_capability", action.params.get("source", ""))
+        if src:
+            frame_action["reference"] = src
         frame_actions.append(frame_action)
         objects.append({
             "type": obj,
