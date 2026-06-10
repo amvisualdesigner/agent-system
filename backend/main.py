@@ -317,15 +317,3 @@ def approve_run(run_id: str):
         "merged_into": base_branch
     }
 
-@app.post("/runs/{run_id}/reject")
-def reject_run(run_id: str):
-
-    validate_run_id(run_id)
-
-    # TODO
-
-    return {
-        "status": "ok",
-        "run_id": run_id,
-        "action": "rejected"
-    }
