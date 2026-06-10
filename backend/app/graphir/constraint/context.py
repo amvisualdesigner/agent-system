@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-PipelineRoute = Literal["constraint", "renderer", "shadow", "replay", "unknown"]
+from app.graphir.models import PipelineRoute
 
 
 def _get_settings():
