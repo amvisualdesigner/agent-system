@@ -28,7 +28,6 @@ from app.engine.structural_completion import (
     complete_structure, StructuralIR,
     CREATE, MODIFY, DELETE, KEEP,
 )
-from app.engine.structural_index import StructuralIndex
 
 
 def _commit(ws: str):
@@ -48,14 +47,13 @@ def _run(
     semantic_frame: dict,
     skill_ir: SkillIR,
     contract,
-    structural_index: StructuralIndex | None = None,
 ) -> StructuralIR | None:
     try:
         sem = reconcile(semantic_frame, skill_ir)
     except (ValueError, SemanticConflictError):
         return None
     cr = ContractResolution.from_skillir(skill_ir, contract)
-    return complete_structure(sem, cr, contract, semantic_frame, structural_index=structural_index)
+    return complete_structure(sem, cr, contract, semantic_frame)
 
 
 def _find(ir: StructuralIR | None, name: str):
@@ -102,8 +100,7 @@ class TestStructuralIndexInvariance:
             "actions": [{"verb": "modify", "object": "layout", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        si = StructuralIndex.from_worktree(workspace_with_kpi)
-        result = _run(sf, sir, contract, structural_index=si)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 
@@ -120,8 +117,7 @@ class TestStructuralIndexInvariance:
             "actions": [{"verb": "remove", "object": "kpi", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        si = StructuralIndex.from_worktree(workspace_with_kpi)
-        result = _run(sf, sir, contract, structural_index=si)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 
@@ -133,24 +129,20 @@ class TestStructuralIndexInvariance:
 
     # ── Invariant 2: CREATE on existing → KEEP+instance_only ───────────
 
-    def test_create_on_existing_becomes_keep_instance_only(self, contract, sir, workspace_with_kpi):
-        """CREATE sobre capability existente → action=KEEP + instance_only."""
+    def test_create_on_existing_produces_create(self, contract, sir, workspace_with_kpi):
+        """Phase 3: CREATE on existing → action=CREATE (reconciliation moves to ApplyEngine)."""
         sf = {
             "actions": [{"verb": "create", "object": "kpi", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        si = StructuralIndex.from_worktree(workspace_with_kpi)
-        result = _run(sf, sir, contract, structural_index=si)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 
         rc = _find(result, "presentation.kpi_row")
         assert rc is not None
-        assert rc.action == KEEP, (
-            f"CREATE on existing should become KEEP, got {rc.action}"
-        )
-        assert rc.instance_only is True, (
-            f"CREATE on existing should have instance_only=True"
+        assert rc.action == CREATE, (
+            f"CREATE should remain CREATE in Phase 3 (no repo degradation), got {rc.action}"
         )
 
     def test_create_without_index_produces_create(self, contract, sir, workspace_with_kpi):
@@ -159,7 +151,7 @@ class TestStructuralIndexInvariance:
             "actions": [{"verb": "create", "object": "timeseries", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        result = _run(sf, sir, contract, structural_index=None)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 
@@ -177,8 +169,7 @@ class TestStructuralIndexInvariance:
             "actions": [{"verb": "create", "object": "kpi", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        si = StructuralIndex.from_worktree(workspace_with_kpi)
-        result = _run(sf, sir, contract, structural_index=si)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 
@@ -193,8 +184,7 @@ class TestStructuralIndexInvariance:
             "actions": [{"verb": "modify", "object": "kpi", "params": {}}],
             "params": {"metrics": ["revenue"]},
         }
-        si = StructuralIndex.from_worktree(workspace_with_kpi)
-        result = _run(sf, sir, contract, structural_index=si)
+        result = _run(sf, sir, contract)
         if result is None:
             pytest.skip("reconciliation failed")
 

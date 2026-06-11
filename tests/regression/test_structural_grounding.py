@@ -77,7 +77,6 @@ def run_pipeline(
     """
     ir = complete_structure(
         semantic, contract_res, contract,
-        structural_index=index,
     )
     if ir.has_resolved_keep_state:
         return ir, None
@@ -254,8 +253,8 @@ class TestStructuralGrounding:
             "Builder should reject delete-only drafts"
         )
 
-    def test_empty_repo_creates_all(self, dashboard_contract):
-        """Escenario 4: empty repo + declarative request → CREATE for all caps."""
+    def test_empty_repo_no_intent_no_create(self, dashboard_contract):
+        """Phase 3: declarative mode + no actions → KEEP for all caps (no implicit CREATE)."""
         ir, graph = run_pipeline(
             make_semantic(),
             make_contract_res(dashboard_contract),
@@ -263,13 +262,9 @@ class TestStructuralGrounding:
             structural_index(),  # empty worktree
         )
 
-        assert ir.has_resolved_keep_state is False
-        assert len(ir.operations) > 0, "Should produce operations"
-        assert all(op["action"] == CREATE for op in ir.operations), (
-            f"All operations should be CREATE, got: "
-            f"{[(op['target'], op['action']) for op in ir.operations]}"
-        )
-        assert graph is not None, "Should produce GraphIR"
+        assert ir.has_resolved_keep_state is True
+        assert len(ir.operations) == 0, "No intent → no operations"
+        assert graph is None, "No intent → no GraphIR"
 
     def test_existing_page_add_child_creates_child(self, dashboard_contract):
         """Escenario 5: existing page + 'add kpi' → CREATE kpi_row, MODIFY page (3E).

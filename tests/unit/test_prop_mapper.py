@@ -609,7 +609,6 @@ class TestCompositionChildExpansion:
             semantic_resolution=sem,
             contract_resolution=cr,
             contract=contract,
-            structural_index=idx,
         )
 
         # KpiRow should be INSTANCE (instance_only) after expansion
@@ -661,7 +660,6 @@ class TestCompositionChildExpansion:
             semantic_resolution=sem,
             contract_resolution=cr,
             contract=contract,
-            structural_index=idx,
         )
 
         from app.graphir.builder import build_from_structural

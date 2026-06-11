@@ -525,11 +525,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Phase 2: Contract adaptation from SkillIR proposal
         contract_resolution = ContractResolution.from_skillir(skill_ir_obj, contract)
 
-        # Phase 3: StructuralIR (merges both + slot mapping + lifecycle)
+        # Phase 3: StructuralIR (intent-only lifecycle, no repo state)
         structural_index = StructuralIndex.from_worktree(context.workspace)
         structural_ir = complete_structure(
             semantic_resolution, contract_resolution, contract, semantic_frame,
-            structural_index=structural_index,
         )
 
         # ── Gate: Delete authority — only user-confirmed IntentAction DELETE is valid ──

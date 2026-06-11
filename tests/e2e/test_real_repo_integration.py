@@ -109,7 +109,6 @@ class TestCompleteStructureWithRealRepo:
             semantic_resolution=sem,
             contract_resolution=cr,
             contract=contract,
-            structural_index=idx,
         )
 
         ops = struktural.operations
@@ -140,15 +139,13 @@ class TestCompleteStructureWithRealRepo:
             semantic_resolution=sem,
             contract_resolution=cr,
             contract=contract,
-            structural_index=idx,
         )
 
         ops = struktural.operations
         ts_ops = [o for o in ops if o.get("target") == "presentation.timeseries"]
         assert len(ts_ops) == 1
-        # create-on-existing → INSTANCE (keep file, compose in parent)
-        assert ts_ops[0]["action"] == "INSTANCE"
-        assert ts_ops[0].get("instance_only") is True
+        # Phase 3: create → CREATE (reconciliation moves to ApplyEngine)
+        assert ts_ops[0]["action"] == "CREATE"
 
     def test_modify_dashboard_expands_to_container(self, agent_test_repo_copy):
         """modify dashboard → expande a hijos del contrato."""
@@ -172,7 +169,6 @@ class TestCompleteStructureWithRealRepo:
             semantic_resolution=sem,
             contract_resolution=cr,
             contract=contract,
-            structural_index=idx,
         )
 
         ops = struktural.operations

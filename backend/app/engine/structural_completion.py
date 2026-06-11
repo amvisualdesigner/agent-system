@@ -461,15 +461,13 @@ def _match_actions_to_capabilities(
     actions: list[dict],
     contract_caps: list[str],
     contract: SkillContract | None = None,
-    structural_index: StructuralIndex | None = None,
 ) -> dict[str, str]:
     """Step A: Match action objects to capability names.
 
-    El universo de targets posibles es structural_index ∪ contract_caps.
-    Un action puede referirse a capabilities existentes en el repo
-    aunque el contrato no las declare.
+    Phase 3: contract-first closed-world. Solo contract_caps.
+    No repo expansion. StructuralIndex es post-hoc.
 
-    1. target_hint → match directo contra universo completo
+    1. target_hint → match directo
     2. OBJECT_KEYWORDS mapping (e.g., "kpi" → "kpi_row")
     3. Capability suffix (e.g., "table" → "presentation.table")
     4. Contract template keys (e.g., "Page" → "layout.page")
@@ -481,22 +479,8 @@ def _match_actions_to_capabilities(
 
     matched: dict[str, str] = {}
 
-    # Universo de targets: repo ∪ contract
-    all_targets: set[str] = set(contract_caps)
-    if structural_index is not None:
-        all_targets |= structural_index.capability_set
-    all_targets_list = sorted(all_targets)
-
-    # Build suffix name_map for bidirectional matching
-    # e.g., "bar" → "presentation.chart.bar", "kpirow" → "presentation.kpi_row"
-    suffix_map: dict[str, str] = {}
-    for cap_name in all_targets:
-        suffix = cap_name.rsplit(".", 1)[-1]
-        parts = suffix.split("_")
-        pascal = "".join(p.title() for p in parts)
-        suffix_map[pascal.lower()] = cap_name
-        suffix_map[suffix.replace("_", "").lower()] = cap_name
-        suffix_map[suffix.lower()] = cap_name
+    # Universo de targets: solo contract caps (Phase 3 closed-world)
+    all_targets_list = sorted(set(contract_caps))
 
     # Build reverse lookup from contract template keys (e.g., "Page" → "layout.page")
     template_reverse: dict[str, str] = {}
@@ -518,7 +502,7 @@ def _match_actions_to_capabilities(
         if not verb:
             continue
 
-        # Express lane: target_hint pre-resuelto contra universo completo
+        # Express lane: target_hint pre-resuelto contra contract caps
         if target_hint and target_hint in all_targets:
             matched[target_hint] = verb
             continue
@@ -564,40 +548,34 @@ def _match_actions_to_capabilities(
 def _resolve_action(
     capability: str,
     action_verb: str | None,
-    structural_index: StructuralIndex | None,
 ) -> str:
-    """Step B: Determinar lifecycle action para una capability.
+    """Step B: lifecycle action puramente semántica.
 
-    Regla determinista:
-      - existe en repo + verb delete  → DELETE
-      - existe en repo + verb modify  → MODIFY
-      - existe en repo + verb move    → MODIFY (layout-only, mismos params)
-      - existe en repo + verb replace → MODIFY (old; new se añade aparte)
-      - existe en repo + sin verb     → KEEP
-      - no existe + verb create       → CREATE
-      - no existe + sin verb          → CREATE (contract default)
-      - no existe + verb move/replace → KEEP (error → clarification)
+    Phase 3: contract-first closed-world. Sin structural_index.
+    La acción se deriva SOLO del verbo de intención del usuario.
+    ApplyEngine reconcilia después con la realidad del repo.
+
+    DELETE  → DELETE
+    MODIFY  → MODIFY
+    CREATE  → CREATE
+    MOVE    → MODIFY
+    REPLACE → MODIFY (old cap)
+    None    → KEEP  (sin intención → preservar)
     """
-    exists = structural_index is not None and structural_index.exists(capability)
-
     if action_verb:
         vl = action_verb.lower()
         if vl in _VERBS_DELETE:
-            return DELETE if exists else KEEP
+            return DELETE
         if vl in _VERBS_MODIFY:
-            return MODIFY if exists else CREATE
+            return MODIFY
         if vl in _VERBS_CREATE:
-            return MODIFY if exists else CREATE
+            return CREATE
         if vl in _VERBS_MOVE:
-            return MODIFY if exists else KEEP
+            return MODIFY
         if vl in _VERBS_REPLACE:
-            return MODIFY if exists else KEEP
-        if exists:
-            return MODIFY  # unrecognized verb on existing → modify
+            return MODIFY
 
-    if exists:
-        return KEEP
-    return CREATE
+    return KEEP
 
 
 def _resolve_delete_instance(
@@ -646,21 +624,15 @@ def _resolve_delete_instance(
 def _match_single_object(
     obj: str,
     contract_caps: list[str],
-    structural_index: StructuralIndex | None,
 ) -> str | None:
     """Match a single object string to a capability name.
 
-    Reusa la lógica de _match_actions_to_capabilities sin depender
-    de una action dict completa.
+    Phase 3: contract-first closed-world. Solo contract_caps.
     """
     from app.graphir.semantic_frame import _OBJECT_KEYWORDS
 
-    all_targets = set(contract_caps)
-    if structural_index is not None:
-        all_targets |= structural_index.capability_set
-
     obj_lower = obj.lower()
-    for cap in sorted(all_targets):
+    for cap in sorted(set(contract_caps)):
         cap_lower = cap.lower()
         suffix = cap.rsplit(".", 1)[-1].lower()
         if suffix in obj_lower or obj_lower in suffix or obj_lower == suffix:
@@ -674,7 +646,6 @@ def _match_single_object(
 def _extract_layout_hints(
     semantic_resolution: SemanticResolution,
     contract_caps: list[str],
-    structural_index: StructuralIndex | None,
 ) -> dict[str, dict]:
     """Convierte acciones MOVE/REPLACE en layout_hints para StructuralIR.
 
@@ -694,16 +665,16 @@ def _extract_layout_hints(
         if not verb or not obj:
             continue
         if verb in _VERBS_MOVE and ref:
-            target_cap = _match_single_object(obj, contract_caps, structural_index)
-            ref_cap = _match_single_object(ref, contract_caps, structural_index)
+            target_cap = _match_single_object(obj, contract_caps)
+            ref_cap = _match_single_object(ref, contract_caps)
             if target_cap and ref_cap and target_cap != ref_cap:
                 hints[target_cap] = {
                     "move_after": ref_cap,
                     "scope": "layout",
                 }
         elif verb in _VERBS_REPLACE and ref:
-            old_cap = _match_single_object(obj, contract_caps, structural_index)
-            new_cap = _match_single_object(ref, contract_caps, structural_index)
+            old_cap = _match_single_object(obj, contract_caps)
+            new_cap = _match_single_object(ref, contract_caps)
             if old_cap and new_cap and old_cap != new_cap:
                 hints[new_cap] = {"replace_anchor": old_cap}
     return hints
@@ -712,7 +683,6 @@ def _extract_layout_hints(
 def _extract_replace_pairs(
     semantic_resolution: SemanticResolution,
     contract_caps: list[str],
-    structural_index: StructuralIndex | None,
 ) -> list[SubstitutionRecord]:
     """Extrae SubstitutionRecords de acciones REPLACE.
 
@@ -727,8 +697,8 @@ def _extract_replace_pairs(
         obj = action.get("object", "")
         ref = action.get("reference", "")
         if verb in _VERBS_REPLACE and obj and ref:
-            old_cap = _match_single_object(obj, contract_caps, structural_index)
-            new_cap = _match_single_object(ref, contract_caps, structural_index)
+            old_cap = _match_single_object(obj, contract_caps)
+            new_cap = _match_single_object(ref, contract_caps)
             if old_cap and new_cap and old_cap != new_cap:
                 records.append(SubstitutionRecord(
                     source_capability=old_cap,
@@ -783,9 +753,8 @@ def _resolve_field(
 def _ensure_graph_viability(
     resolved: list[ResolvedCapability],
     warnings: list[str],
-    structural_index: StructuralIndex | None = None,
 ) -> None:
-    """Fase 2.5b + 3C: Anchor preservation — garantizar GraphIR no vacío.
+    """Phase 3: Anchor preservation — no repo state, purely semantic.
 
     SAFE_SKIP nunca puede eliminar TODOS los nodos del grafo.
     Si todas las capabilities resultarían en 0 nodos builder
@@ -796,10 +765,7 @@ def _ensure_graph_viability(
       2. Hay al menos un KEEP (hay intención estructural de preservar)
       3. NO todas son KEEP (si todas son KEEP → noop válido por has_resolved_keep_state)
 
-    3C: Preferir capabilities que EXISTEN en el index para evitar scaffolds espurios.
-    Solo si ninguna capability existe en disco, se recurre al scaffold (comportamiento legacy).
-
-    Prioridad (3C): existing > layout.page > domain.* > primera capability válida.
+    Prioridad semántica (sin repo): layout.page > domain.* > primera capability válida.
     """
     has_builder_node = any(rc.action in (CREATE, MODIFY) for rc in resolved)
     if has_builder_node:
@@ -813,34 +779,19 @@ def _ensure_graph_viability(
     if not has_keep or all_keep:
         return
 
-    def _on_disk(cap_name: str) -> bool:
-        """Check if capability exists on disk via StructuralIndex."""
-        if structural_index is None:
-            return True  # No index → assume exists (no contamination risk)
-        return structural_index.exists(cap_name)
-
-    # 3C: Preferir capabilities que existen on-disk
-    for rc in resolved:
-        if _on_disk(rc.name):
-            _preserve_anchor(resolved, rc, warnings)
-            return
-
-    # Fallback legacy: sin index, preferir layout.page
+    # Prioridad semántica: layout.page > domain.* > primera válida
     for rc in resolved:
         if rc.name == "layout.page":
             _preserve_anchor(resolved, rc, warnings)
             return
-
-    # Fallback legacy: domain.*
     for rc in resolved:
         if rc.name.startswith("domain."):
             _preserve_anchor(resolved, rc, warnings)
             return
-
-    # Último recurso: primera capability (puede generar scaffold espurio)
     for rc in resolved:
-        _preserve_anchor(resolved, rc, warnings)
-        return
+        if rc.name and rc.action != DELETE:
+            _preserve_anchor(resolved, rc, warnings)
+            return
 
 
 def _preserve_anchor(
@@ -1028,17 +979,17 @@ def complete_structure(
     contract_resolution: ContractResolution,
     contract: SkillContract,
     frame_dict: dict | None = None,
-    structural_index: StructuralIndex | None = None,
 ) -> StructuralIR:
     """Convierte SemanticResolution + ContractResolution en StructuralIR.
+
+    Phase 3: contract-first closed-world. Sin repo state.
+    Lifecycle decisions solo desde IntentAction.
 
     Args:
         semantic_resolution: Params del lenguaje del usuario + actions.
         contract_resolution: Params del contrato (SkillIR + defaults).
         contract: SkillContract seleccionado.
         frame_dict: Dict del StructuredSemanticFrame (para hint augmentation).
-        structural_index: Estado del worktree. Si es None, se asume
-                          repositorio vacío (todo CREATE).
 
     Returns:
         StructuralIR con capabilities resueltas y ownership definitivo.
@@ -1047,13 +998,6 @@ def complete_structure(
         ValueError: si el contrato no es compatible.
     """
     warnings: list[str] = []
-
-    # Paso 0: validación consistencia contrato ↔ repositorio
-    if structural_index is not None:
-        contract_caps = _infer_capabilities_from_contract(contract)
-        warnings.extend(validate_contract_repo_consistency(
-            contract_caps, structural_index, contract.contract_id,
-        ))
 
     # Paso 1: scope bootstrap según modo
     # Siempre se parte de las capabilities del contrato como base.
@@ -1066,37 +1010,32 @@ def complete_structure(
         )
 
     # Paso 2b: Step A — match actions from semantic layer to capabilities
-    # El universo de matching es el scope actual (contract caps ± augmentation)
+    # Phase 3: contract-first closed-world. Solo contract caps.
     contract_caps_for_matching = capabilities
     action_map = _match_actions_to_capabilities(
         semantic_resolution.actions, contract_caps_for_matching, contract,
-        structural_index=structural_index,
     )
 
     # ── Post-passes 3B: action_map enrichment ─────────────────────
+    # Phase 3: contract-first closed-world. Sin guards de structural_index.
 
     # Post-pass A: metrics/params signal → MODIFY kpi_row
-    # Si el usuario mencionó métricas (revenue, growth, …) y kpi_row
-    # existe en repo, añadir modify aunque el verbo cayera en page.
-    if structural_index is not None and semantic_resolution.semantic_params:
+    # Phase 3: solo si hay acciones semánticas (sin intent → no lifecycle).
+    if semantic_resolution.actions and semantic_resolution.semantic_params:
         metrics_signals = {"metrics", "mentioned_metrics", "columns", "values"}
         if metrics_signals & semantic_resolution.semantic_params.keys():
-            if structural_index.exists("presentation.kpi_row") and "presentation.kpi_row" not in action_map:
+            if "presentation.kpi_row" not in action_map:
                 action_map["presentation.kpi_row"] = "modify"
 
     # Post-pass B: "modify dashboard" → MODIFY presentational children.
-    # Solo aplica a capabilities del CONTRATO (no a todo el index).
-    # Invariante: complete_structure no introduce capabilities no pedidas
-    # salvo cuando la capability confirmada es explícitamente un contenedor
-    # (layout.page, dashboard). Ver AGENTS.md: "Fronteras de responsabilidad".
-    if structural_index is not None:
-        for action in semantic_resolution.actions:
-            verb = action.get("verb", "").lower()
-            obj = action.get("object", "").lower()
-            if verb in _VERBS_MODIFY and obj in ("dashboard",):
-                for cap in contract_caps_for_matching:
-                    if cap.startswith("presentation.") and cap not in action_map:
-                        action_map[cap] = "modify"
+    # Solo aplica a capabilities del CONTRATO.
+    for action in semantic_resolution.actions:
+        verb = action.get("verb", "").lower()
+        obj = action.get("object", "").lower()
+        if verb in _VERBS_MODIFY and obj in ("dashboard",):
+            for cap in contract_caps_for_matching:
+                if cap.startswith("presentation.") and cap not in action_map:
+                    action_map[cap] = "modify"
 
     # Ampliar scope con targets de acciones que no están en capabilities
     # (tanto repo-only como CREATE targets que no existen en repo aún)
@@ -1113,10 +1052,10 @@ def complete_structure(
             else capabilities
         )
         layout_hints = _extract_layout_hints(
-            semantic_resolution, contract_caps_for_hints, structural_index,
+            semantic_resolution, contract_caps_for_hints,
         )
         substitutions = _extract_replace_pairs(
-            semantic_resolution, contract_caps_for_hints, structural_index,
+            semantic_resolution, contract_caps_for_hints,
         )
         # Añadir nuevas capabilities del substitution al scope
         for sub in substitutions:
@@ -1141,59 +1080,24 @@ def complete_structure(
     for cap in capabilities:
         action_verb = action_map.get(cap)
 
-        # Fase 2.5: Contract injection guard + repo-capability filter
-        # Solo en modo operacional (el usuario explicitó actions).
-        # Si la capability no tiene action_verb, no existe en repo,
-        # y vino de contract expansion → skip (no crear nodos no pedidos)
-        if action_verb is None and structural_index is not None and semantic_resolution.actions:
-            if not structural_index.exists(cap):
-                warnings.append(f"{cap}: contract-injected, not in repo — skipping")
-                resolved.append(ResolvedCapability(
-                    name=cap,
-                    params={},
-                    mode=CompletionMode.SAFE_SKIP,
-                    action=KEEP,
-                ))
-                continue
-
-        action = _resolve_action(cap, action_verb, structural_index)
-
-        # NEW: CREATE-on-existing → instance_only (no regenerar archivo fuente)
-        # El usuario pide "create X" pero X ya existe en repo.
-        # La intención es instanciar X en el contenedor, no reescribir X.tsx.
+        action = _resolve_action(cap, action_verb)
         instance_only = False
-        user_verb = action_map.get(cap)
-        if (
-            action == MODIFY
-            and user_verb is not None
-            and user_verb in _VERBS_CREATE
-            and structural_index is not None
-            and structural_index.exists(cap)
-        ):
-            action = KEEP
-            instance_only = True
-            warnings.append(
-                f"{cap}: exists in repo with create intent — "
-                f"instance_only (parent composition sync)"
-            )
 
         # DELETE → no resuelven params (repo pierde la capacidad)
+        # Phase 3: instance_id resolution moves to ApplyEngine (Step 6).
         if action == DELETE:
             hint = instance_hints.get(cap)
-            instance_id = _resolve_delete_instance(
-                cap, hint, structural_index,
-            )
             resolved.append(ResolvedCapability(
                 name=cap,
                 params={},
                 mode=CompletionMode.SAFE_SKIP,
                 action=DELETE,
-                instance_id=instance_id,
+                instance_id=None,
                 instance_hint=hint,
             ))
             warnings.append(f"{cap}: marked for deletion")
-            if instance_id:
-                warnings.append(f"{cap}: limiting delete to instance_id={instance_id} (hint={hint})")
+            if hint:
+                warnings.append(f"{cap}: instance_hint={hint}")
             continue
 
         schema = STRUCTURAL_SCHEMA.get(cap)
@@ -1223,19 +1127,13 @@ def complete_structure(
 
         missing_required = [r for r in schema.get("required", []) if r not in cap_params]
 
-        # KEEP: preserve contract params for composition (no file generation).
-        # Skip mode/missing_required checks — existing component, params are
-        # composition hints only. SAFE_SKIP tells the coverage validator that
-        # this capability was intentionally not completed (it already exists).
-        # When _expand_composition_children promotes KEEP to INSTANCE, the
-        # params carry forward for resolve_props.
+        # KEEP: Phase 3 no-op. No params, no inference.
         if action == KEEP:
             resolved.append(ResolvedCapability(
                 name=cap,
-                params=cap_params,
+                params={},
                 mode=CompletionMode.SAFE_SKIP,
                 action=KEEP,
-                provenance=cap_provenance,
                 instance_only=instance_only,
             ))
             continue
@@ -1279,10 +1177,9 @@ def complete_structure(
             instance_only=instance_only,
         ))
 
-    # Fase 2.5b + 3C: Graph viability invariant — anchor preservation
+    # Phase 3: Graph viability invariant — anchor preservation
     # Ensure at least one capability produces a builder node
-    # 3C: pass structural_index to prefer existing caps and avoid spurious scaffolds
-    _ensure_graph_viability(resolved, warnings, structural_index=structural_index)
+    _ensure_graph_viability(resolved, warnings)
 
     # 3E: Composition sync — parent page regeneration on child CREATE/DELETE.
     # After anchor preservation, promote parent to MODIFY when a child is

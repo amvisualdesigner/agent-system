@@ -106,11 +106,13 @@ def make_semantic(
     params: dict | None = None,
     provenance: dict | None = None,
     confidence: float = 0.8,
+    actions: list[dict] | None = None,
 ) -> SemanticResolution:
     return SemanticResolution(
         semantic_params=params or {},
         semantic_provenance=provenance or {},
         confidence=confidence,
+        actions=actions or [],
     )
 
 
@@ -271,9 +273,11 @@ class TestCompleteStructureStrictFail:
         assert rc.mode == CompletionMode.SAFE_SKIP
         assert rc.params == {}
 
-    def test_domain_all_required_present_passes(self, dashboard_contract):
+    def test_domain_modify_all_required_present(self, dashboard_contract):
+        """Phase 3: explicit modify intent resolves params and produces STRICT_FAIL mode."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"], "dimensions": ["region"]},
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8}],
         )
         contract = make_contract(
             params={"metrics": ["net_revenue"], "dimensions": ["region"]},
@@ -290,7 +294,11 @@ class TestCompleteStructureStrictFail:
 
 class TestCompleteStructureSafeSkip:
     def test_domain_low_confidence_skips_node(self, dashboard_contract):
-        semantic = make_semantic(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        """Phase 3: explicit modify + low confidence → SAFE_SKIP + warning."""
+        semantic = make_semantic(
+            params={"metrics": ["net_revenue"]}, confidence=0.5,
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.5}],
+        )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
         rc = _cap(ready, "domain.sales")
@@ -299,7 +307,11 @@ class TestCompleteStructureSafeSkip:
         assert any("domain.sales" in w for w in ready.completion_warnings)
 
     def test_presentation_still_completed_when_domain_skipped(self, dashboard_contract):
-        semantic = make_semantic(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        """Phase 3: explicit modify on kpi resolves params even when domain is skipped."""
+        semantic = make_semantic(
+            params={"metrics": ["net_revenue"]}, confidence=0.5,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
+        )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
@@ -311,9 +323,11 @@ class TestCompleteStructureSafeSkip:
 
 class TestCompleteStructureSafeComplete:
     def test_kpi_metrics_from_semantic(self, dashboard_contract):
+        """Phase 3: explicit modify intent resolves params."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -321,7 +335,10 @@ class TestCompleteStructureSafeComplete:
 
     def test_timeseries_metric_from_contract_slot_mapping(self, dashboard_contract):
         """timeseries gets metric via slot mapping: metric ← timeseries_metric."""
-        semantic = make_semantic(confidence=0.5)
+        semantic = make_semantic(
+            confidence=0.5,
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+        )
         contract = make_contract(
             params={"timeseries_metric": "growth"},
             confidence=0.5,
@@ -331,7 +348,10 @@ class TestCompleteStructureSafeComplete:
 
     def test_timeseries_metric_via_contract_default(self, dashboard_contract):
         """Without SkillIR, contract default 'revenue' flows via slot mapping."""
-        semantic = make_semantic(confidence=0.5)
+        semantic = make_semantic(
+            confidence=0.5,
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+        )
         # Create ContractResolution from SkillIR without timeseries_metric
         from app.contracts.skill_ir import SkillIR
         skill_ir = SkillIR(
@@ -347,7 +367,10 @@ class TestCompleteStructureSafeComplete:
 
     def test_timeseries_missing_metric_uses_contract_default(self, dashboard_contract):
         """No semantic, no contract params → contract input_schema default 'revenue' via slot mapping."""
-        semantic = make_semantic(confidence=0.5)
+        semantic = make_semantic(
+            confidence=0.5,
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+        )
         contract = make_contract(confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
         rc = _cap(ready, "presentation.timeseries")
@@ -356,9 +379,11 @@ class TestCompleteStructureSafeComplete:
         assert rc.params == {"metric": "revenue"}
 
     def test_timeseries_time_granularity_from_semantic(self, dashboard_contract):
+        """Phase 3: explicit modify intent resolves params from semantic and contract."""
         semantic = make_semantic(
             params={"time_granularity": "monthly"},
             confidence=0.5,
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
         )
         contract = make_contract(params={"timeseries_metric": "revenue"}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -380,14 +405,21 @@ class TestCompleteStructureSafeComplete:
         assert rc.params == {}
 
     def test_table_columns_from_semantic(self, table_contract):
-        semantic = make_semantic(params={"columns": ["revenue", "growth"]})
+        """Phase 3: explicit modify intent resolves table columns from semantic."""
+        semantic = make_semantic(
+            params={"columns": ["revenue", "growth"]},
+            actions=[{"verb": "modify", "object": "table", "confidence": 0.8}],
+        )
         contract = make_contract(params={"columns": ["revenue", "growth"]})
         ready = complete_structure(semantic, contract, table_contract)
         assert _cap(ready, "presentation.table").params["columns"] == ["revenue", "growth"]
 
     def test_kpi_metrics_from_contract_when_semantic_empty(self, dashboard_contract):
         """When semantic layer has no metrics, contract provides them via slot mapping."""
-        semantic = make_semantic(confidence=0.5)
+        semantic = make_semantic(
+            confidence=0.5,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
+        )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
         assert _cap(ready, "presentation.kpi_row").params["metrics"] == ["net_revenue"]
@@ -397,6 +429,7 @@ class TestCompleteStructureSafeComplete:
         semantic = make_semantic(
             params={"metrics": ["user_specified_metric"]},
             confidence=0.8,
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.8}],
         )
         contract = make_contract(params={"metrics": ["contract_default"]}, confidence=0.8)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -422,6 +455,7 @@ class TestCompleteStructureHintAugmentation:
         assert "presentation.table" in _cap_names(ready)
 
     def test_table_hint_with_columns_from_semantic(self, dashboard_contract):
+        """Phase 3: frame augments capabilities in declarative mode, but no intent → KEEP + empty params."""
         semantic = make_semantic(
             params={"columns": ["revenue"], "metrics": ["net_revenue"]},
             confidence=0.5,
@@ -436,7 +470,10 @@ class TestCompleteStructureHintAugmentation:
         }
         ready = complete_structure(semantic, contract, dashboard_contract, frame_dict=frame)
         assert "presentation.table" in _cap_names(ready)
-        assert "columns" in _cap(ready, "presentation.table").params
+        # Phase 3: no intent → KEEP → empty params (no provisioning without intent)
+        rc = _cap(ready, "presentation.table")
+        assert rc.action == "KEEP"
+        assert rc.params == {}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -482,15 +519,16 @@ class TestStructuralIR:
         assert "churn" not in all_params
 
     def test_warnings_for_skipped_capabilities(self, dashboard_contract):
+        """Phase 3: explicit modify with missing required fields produces skip warning."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
-            confidence=0.5,
+            confidence=0.8,
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8}],
         )
-        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
+        contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.8)
         ready = complete_structure(semantic, contract, dashboard_contract)
         warnings = " ".join(ready.completion_warnings)
         # domain.sales is skipped (missing dimensions)
-        # timeseries gets metric from contract default via slot mapping
         assert "domain.sales" in warnings
         assert "skipped" in warnings
 
@@ -550,6 +588,10 @@ class TestPipelineInvariants:
         semantic = make_semantic(
             params={"metrics": ["net_revenue"], "time_granularity": "monthly"},
             confidence=0.8,
+            actions=[
+                {"verb": "modify", "object": "kpi", "confidence": 0.8},
+                {"verb": "modify", "object": "timeseries", "confidence": 0.8},
+            ],
         )
         contract = make_contract(
             params={"metrics": ["net_revenue"], "timeseries_metric": "net_revenue"},
@@ -593,7 +635,8 @@ class TestPipelineInvariants:
         sreport = StructuralCoverageValidator.validate(structural_ir, dashboard_contract)
         assert sreport.is_valid
         assert sreport.completeness > 0
-        assert sreport.safe_skip_count == 1  # domain.sales
+        # Phase 3: no action targets domain.sales or layout.page → both are KEEP → SAFE_SKIP
+        assert sreport.safe_skip_count == 2
 
         # ── 6. Structural determinism ──
         for cap in structural_ir.capabilities:
@@ -670,45 +713,29 @@ class TestActionLifecycle:
         }
         return StructuralIndex.from_mapping(mapping)
 
-    def test_create_when_not_exists_and_create_verb(self):
-        from app.engine.structural_completion import _resolve_action, CREATE, MODIFY, DELETE, KEEP
-        assert _resolve_action("presentation.table", "create", None) == CREATE
+    def test_create_verb_produces_create(self):
+        from app.engine.structural_completion import _resolve_action, CREATE
+        assert _resolve_action("presentation.table", "create") == CREATE
 
-    def test_modify_when_exists_and_modify_verb(self):
+    def test_modify_verb_produces_modify(self):
         from app.engine.structural_completion import _resolve_action, MODIFY
-        idx = self._make_index("presentation.table")
-        assert _resolve_action("presentation.table", "modify", idx) == MODIFY
+        assert _resolve_action("presentation.table", "modify") == MODIFY
 
-    def test_delete_when_exists_and_delete_verb(self):
+    def test_delete_verb_produces_delete(self):
         from app.engine.structural_completion import _resolve_action, DELETE
-        idx = self._make_index("presentation.table")
-        assert _resolve_action("presentation.table", "remove", idx) == DELETE
+        assert _resolve_action("presentation.table", "delete") == DELETE
 
-    def test_keep_when_exists_no_verb(self):
+    def test_no_verb_produces_keep(self):
         from app.engine.structural_completion import _resolve_action, KEEP
-        idx = self._make_index("presentation.table")
-        assert _resolve_action("presentation.table", None, idx) == KEEP
+        assert _resolve_action("presentation.table", None) == KEEP
 
-    def test_create_when_not_exists_no_verb(self):
+    def test_add_verb_produces_create(self):
         from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", None, None) == CREATE
+        assert _resolve_action("presentation.table", "add") == CREATE
 
-    def test_modify_not_exists_becomes_create(self):
-        from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", "modify", None) == CREATE
-
-    def test_delete_not_exists_becomes_keep(self):
+    def test_unrecognized_verb_produces_keep(self):
         from app.engine.structural_completion import _resolve_action, KEEP
-        assert _resolve_action("presentation.table", "delete", None) == KEEP
-
-    def test_add_not_exists_becomes_create(self):
-        from app.engine.structural_completion import _resolve_action, CREATE
-        assert _resolve_action("presentation.table", "add", None) == CREATE
-
-    def test_unrecognized_verb_on_existing_becomes_modify(self):
-        from app.engine.structural_completion import _resolve_action, MODIFY
-        idx = self._make_index("presentation.table")
-        assert _resolve_action("presentation.table", "custom_action", idx) == MODIFY
+        assert _resolve_action("presentation.table", "custom_action") == KEEP
 
 
 class TestCompleteStructureWithActions:
@@ -724,17 +751,18 @@ class TestCompleteStructureWithActions:
         return StructuralIndex.from_mapping(mapping)
 
     def test_create_default_when_no_repo(self, dashboard_contract):
+        """Phase 3: explicit CREATE actions produce CREATE lifecycle for contract caps."""
         semantic = SemanticResolution(
             semantic_params={"metrics": ["revenue"]},
             semantic_provenance={"metrics": "user_explicit"},
             confidence=0.9,
-            actions=[],
+            actions=[{"verb": "create", "object": "kpi", "confidence": 0.9}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
         )
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=None)
-        assert all(c.action == "CREATE" for c in ir.capabilities if c.mode == CompletionMode.SAFE_COMPLETE)
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
+        assert _cap(ir, "presentation.kpi_row").action == "CREATE"
 
     def test_keep_capabilities_in_repo(self, dashboard_contract):
         semantic = SemanticResolution(
@@ -747,7 +775,7 @@ class TestCompleteStructureWithActions:
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         keeps = [c for c in ir.capabilities if c.action == "KEEP"]
         assert len(keeps) > 0
         for k in keeps:
@@ -765,7 +793,7 @@ class TestCompleteStructureWithActions:
             MockSkillIR({"metrics": ["growth"]}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         kpi = next(c for c in ir.capabilities if c.name == "presentation.kpi_row")
         assert kpi.action == "MODIFY"
         assert kpi.params.get("metrics") is not None
@@ -781,15 +809,16 @@ class TestCompleteStructureWithActions:
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"presentation.kpi_row", "presentation.timeseries", "layout.page"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         ts = next(c for c in ir.capabilities if c.name == "presentation.timeseries")
         assert ts.action == "DELETE"
         assert ts.params == {}
 
-    def test_delete_repo_only_capability(self, dashboard_contract):
-        """Action targets a capability in repo but not in the contract
-        (e.g., 'remove barchart' → presentation.chart.bar exists in repo
-        but dashboard.sales_overview contract doesn't declare it)."""
+    def test_repo_only_capability_not_in_lifecycle(self, dashboard_contract):
+        """Phase 3: contract-first closed-world.
+        A capability in repo but not in the contract does NOT enter lifecycle.
+        'remove barchart' → presentation.chart.bar exists in repo
+        but dashboard.sales_overview contract doesn't declare it → NO lifecycle."""
         semantic = SemanticResolution(
             semantic_params={},
             semantic_provenance={},
@@ -803,15 +832,11 @@ class TestCompleteStructureWithActions:
             "presentation.kpi_row", "presentation.timeseries", "layout.page",
             "presentation.chart.bar",
         }
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         names = {c.name: c.action for c in ir.capabilities}
-        assert "presentation.chart.bar" in names, (
-            f"Repo-only cap not in resolved list: {names}"
+        assert "presentation.chart.bar" not in names, (
+            f"Repo-only cap leaked into lifecycle: {names}"
         )
-        assert names["presentation.chart.bar"] == "DELETE"
-        ops = ir.operations
-        bar_deletes = [o for o in ops if o["action"] == "DELETE" and "chart.bar" in str(o)]
-        assert len(bar_deletes) == 1, f"No DELETE for chart.bar in operations: {ops}"
 
 
 class TestCompositionSync:
@@ -853,7 +878,7 @@ class TestCompositionSync:
             MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"layout.page", "presentation.kpi_row"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         actions = {c.name: c.action for c in ir.capabilities}
         assert actions.get("presentation.timeseries") == "CREATE", str(actions)
         assert actions.get("layout.page") == "MODIFY", (
@@ -872,7 +897,7 @@ class TestCompositionSync:
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"layout.page", "presentation.kpi_row", "presentation.timeseries"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         actions = {c.name: c.action for c in ir.capabilities}
         assert actions.get("presentation.kpi_row") == "DELETE", str(actions)
         assert actions.get("layout.page") == "MODIFY", (
@@ -891,7 +916,7 @@ class TestCompositionSync:
             MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"layout.page", "presentation.kpi_row", "presentation.timeseries"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         actions = {c.name: c.action for c in ir.capabilities}
         assert actions.get("presentation.kpi_row") == "MODIFY", str(actions)
         # MODIFY on child should NOT promote parent — no composition change needed
@@ -910,7 +935,7 @@ class TestCompositionSync:
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"columns": ["A", "B"]}, "analytics.table"), table_contract,
         )
-        ir = complete_structure(semantic, contract_res, table_contract, structural_index=None)
+        ir = complete_structure(semantic, contract_res, table_contract)
         # Only presentation.table should exist (no page, no composition)
         caps = [c for c in ir.capabilities if c.action != "KEEP"]
         # The key assertion: no parent capability gets promoted spuriously
@@ -935,7 +960,7 @@ class TestCompositionSync:
             MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"layout.page", "presentation.kpi_row"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         actions = {c.name: c.action for c in ir.capabilities}
         # layout.page should be MODIFY (from "modify dashboard")
         assert actions.get("layout.page") == "MODIFY", str(actions)
@@ -958,7 +983,7 @@ class TestCompositionSync:
             MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
         )
         repo = {"layout.page", "presentation.kpi_row"}
-        ir = complete_structure(semantic, contract_res, dashboard_contract, structural_index=self._make_index(*repo))
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
         sync_warnings = [w for w in ir.completion_warnings if "composition sync" in w]
         assert len(sync_warnings) >= 1, (
             f"Expected composition sync warning, got: {ir.completion_warnings}"
