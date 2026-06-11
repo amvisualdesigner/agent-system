@@ -248,6 +248,166 @@ def _stem_matches_hint(fp: str, hint_stem: str) -> bool:
     return stem == hint_stem or stem.replace("-", "").replace("_", "") == hint_stem
 
 
+def _create_component_file(
+    capability: str, workspace: str, contract,
+) -> str | None:
+    """Create a minimal component file for a capability if it doesn't exist.
+
+    Returns the created file path, or None if creation failed/skipped.
+    Phase 4: substitution target creation — NO lifecycle, NO renderer.
+    """
+    from app.engine.structural_completion import STRUCTURAL_SCHEMA
+
+    name_map = _build_name_map()
+    target_path = None
+    for suffix, cap in name_map.items():
+        if cap == capability:
+            component_name = extract_component_name(suffix)
+            break
+    else:
+        component_name = capability.rsplit(".", 1)[-1]
+        # Try PascalCase
+        component_name = "".join(p.title() for p in component_name.split("_"))
+
+    contract_file_entries = (contract.renderer or {}).get("files", [])
+    for entry in contract_file_entries:
+        fname = os.path.basename(entry.get("path", ""))
+        name_part = os.path.splitext(fname)[0].lower()
+        if component_name.lower().startswith(name_part) or name_part in component_name.lower():
+            target_path = os.path.join(workspace, entry["path"])
+            break
+
+    if not target_path:
+        return None
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    if not os.path.exists(target_path):
+        schema = STRUCTURAL_SCHEMA.get(capability, {})
+        template = _render_minimal_component(component_name, schema)
+        with open(target_path, "w") as f:
+            f.write(template)
+        return target_path
+    return None
+
+
+def _render_minimal_component(name: str, schema: dict) -> str:
+    """Render a minimal React component skeleton."""
+    import json
+    stub_props = {}
+    for req in schema.get("required", []):
+        stub_props[req] = "null"
+    props_str = json.dumps(stub_props) if stub_props else "{}"
+    return (
+        f"import React from 'react';\n\n"
+        f"interface {name}Props {props_str.replace('null', 'any')}\n\n"
+        f"const {name}: React.FC<{name}Props> = (props) => {{\n"
+        f"  return <div>{name} component</div>;\n"
+        f"}};\n\n"
+        f"export default {name};\n"
+    )
+
+
+def _redirect_imports(
+    old_capability: str,
+    new_capability: str,
+    workspace: str,
+    contract,
+) -> list[str]:
+    """Redirect imports from old_capability to new_capability across all files.
+
+    Phase 4: import redirection — NO filesystem delete, NO lifecycle mutation.
+    Returns list of modified file paths.
+    """
+    name_map = _build_name_map()
+    old_component = None
+    new_component = None
+    for suffix, cap in name_map.items():
+        if cap == old_capability and old_component is None:
+            old_component = extract_component_name(suffix)
+        if cap == new_capability and new_component is None:
+            new_component = extract_component_name(suffix)
+
+    if not old_component or not new_component:
+        return []
+
+    modified: list[str] = []
+    for root, _dirs, files in os.walk(workspace):
+        for fname in files:
+            if not fname.endswith((".tsx", ".ts", ".jsx", ".js")):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath) as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            # Skip binary or huge files
+            if len(content) > 50000:
+                continue
+
+            # Check if this file imports the old component
+            orig = content
+            # Pattern: `from './OldComponent'` or `from './path/OldComponent'`
+            import_patterns = [
+                f"from './{old_component}'",
+                f'from "./{old_component}"',
+                f"from './{old_component.lower()}'",
+                f'from "./{old_component.lower()}"',
+            ]
+            changes = False
+            for pattern in import_patterns:
+                replacement = pattern.replace(old_component, new_component)
+                if pattern in content:
+                    content = content.replace(pattern, replacement)
+                    changes = True
+
+            if changes:
+                with open(fpath, "w") as f:
+                    f.write(content)
+                modified.append(fpath)
+    return modified
+
+
+def apply_substitutions(
+    structural_ir: StructuralIR,
+    workspace: str,
+    contract,
+    dry_run: bool = False,
+) -> dict:
+    """Phase 4: execute substitution_ops independently of lifecycle.
+
+    For each SubstitutionOp:
+      1. create_if_missing(target) — create minimal component file
+      2. redirect_imports(source → target) — update all imports
+      🚫 NO delete, NO modify, NO lifecycle mutation
+
+    Returns summary dict {created: [...], redirected: [...], warnings: [...]}.
+    """
+    subs = list(structural_ir.substitution_ops)
+    if not subs:
+        return {"created": [], "redirected": [], "warnings": []}
+
+    result: dict[str, list] = {"created": [], "redirected": [], "warnings": []}
+
+    for sub in subs:
+        # Step 1: create target file if missing
+        if not dry_run:
+            created = _create_component_file(sub.target, workspace, contract)
+            if created:
+                result["created"].append(created)
+                logger.info("substitution: created target file %s for %s", created, sub.target)
+
+        # Step 2: redirect imports from source to target
+        if not dry_run:
+            modified = _redirect_imports(sub.source, sub.target, workspace, contract)
+            result["redirected"].extend(modified)
+            for fp in modified:
+                logger.info("substitution: redirected imports %s → %s in %s", sub.source, sub.target, fp)
+
+    return result
+
+
 def _build_audit(
     graph, fileops, exec_ctx, contract,
     skill_ir_obj, config,
@@ -933,15 +1093,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
-    # ── Validate substitutions consistency ──
-    # Substitution es semántica: la source NO se elimina.
-    # No hay inyección de DELETE — el viejo archivo queda en disco.
-    from app.engine.structural_completion import validate_replace_consistency
-    replace_warnings = validate_replace_consistency(
+    # ── Validate substitution ops consistency (post-hoc, no lifecycle effect) ──
+    from app.engine.structural_completion import _validate_substitution_ops_consistency
+    sub_warnings = _validate_substitution_ops_consistency(
         structural_ir, fileops, structural_index=structural_index,
     )
-    for w in replace_warnings:
-        logger.warning("replace_consistency: %s", w)
+    for w in sub_warnings:
+        logger.warning("substitution_consistency: %s", w)
 
     ok, vreason = validate_fileops(fileops)
     if not ok:
@@ -957,6 +1115,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "apply: contract_id=%s version=%d params=%s fileops_count=%d",
         skill_ir_obj.contract_id, skill_ir_obj.version, skill_ir_obj.params, len(fileops),
     )
+
+    # ── Phase 4: Apply substitutions (independent stream, no lifecycle effect) ──
+    sub_result = apply_substitutions(
+        structural_ir, context.workspace, contract, dry_run=dry_run,
+    )
+    if sub_result["created"] or sub_result["redirected"]:
+        logger.info(
+            "substitution_ops: created=%d redirected=%d",
+            len(sub_result["created"]), len(sub_result["redirected"]),
+        )
 
     # ── Fase 4: Verify BEFORE git commit ────────────────────────────
     verify_result = None

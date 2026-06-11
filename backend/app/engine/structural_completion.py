@@ -135,22 +135,41 @@ class ResolvedCapability:
 
 
 @dataclass(frozen=True)
+class SubstitutionOp:
+    """Operación de sustitución semántica — NO es lifecycle.
+
+    Phase 4: SubstitutionOp es un stream independiente del lifecycle.
+    No tiene CREATE/MODIFY/DELETE/KEEP — solo redirección semántica.
+
+    source: capability que se reemplaza (NO se elimina)
+    target: capability que reemplaza (se crea si no existe)
+    """
+    source: str
+    target: str
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        """(old, new) tuple para backward compat."""
+        return (self.source, self.target)
+
+
+@dataclass(frozen=True)
 class SubstitutionRecord:
-    """Registro de sustitución semántica.
+    """DEPRECATED — use SubstitutionOp instead.
 
-    A diferencia de DELETE+CREATE, SubstitutionRecord preserva
-    la intención: source es reemplazada por target, pero source
-    NO se elimina (su lifecycle queda frozen).
-
-    Representación canónica de 'replace X with Y'.
+    Mantenido temporalmente para backward compat.
+    Phase 4: todo nuevo código usa SubstitutionOp.
     """
     source_capability: str
     target_capability: str
 
     @property
     def pair(self) -> tuple[str, str]:
-        """Backward compat: (old, new) tuple."""
         return (self.source_capability, self.target_capability)
+
+    def to_op(self) -> SubstitutionOp:
+        """Convert to canonical Phase 4 SubstitutionOp."""
+        return SubstitutionOp(source=self.source_capability, target=self.target_capability)
 
 
 @dataclass(frozen=True)
@@ -166,8 +185,9 @@ class StructuralIR:
     operations es la vista explícita del diff plan.
     capabilities incluye todas (para auditoría/trazabilidad).
     layout_hints: metadata de layout (MOVE scope, REPLACE anchor).
-    substitutions: representación canónica de reemplazos semánticos.
-                   Sustitución ≠ DELETE. La source nunca se elimina.
+    substitution_ops: stream de SubstitutionOp — independiente del lifecycle.
+                      Phase 4: la sustitución NO afecta CREATE/MODIFY/DELETE/KEEP.
+    substitutions: tuple[SubstitutionRecord, ...] heredado (DEPRECATED).
     """
     contract_id: str
     contract_version: int
@@ -176,16 +196,20 @@ class StructuralIR:
     confidence: float
     completion_warnings: tuple[str, ...] = ()
     layout_hints: dict[str, dict] = field(default_factory=dict)
+    substitution_ops: tuple[SubstitutionOp, ...] = ()
     substitutions: tuple[SubstitutionRecord, ...] = ()
 
     @property
     def replace_pairs(self) -> list[tuple[str, str]]:
-        """Backward compat: deriva de substitutions como lista de tuplas (old, new)."""
-        return [s.pair for s in self.substitutions]
+        """Backward compat: deriva de substitution_ops como lista de tuplas (old, new)."""
+        return [s.pair for s in self.substitution_ops] or [s.pair for s in self.substitutions]
 
     @property
     def replace_pairs_index(self) -> dict[str, str]:
         """Backward compat: lookup O(1) new_cap → old_cap."""
+        ops_idx = {s.target: s.source for s in self.substitution_ops}
+        if ops_idx:
+            return ops_idx
         return {s.target_capability: s.source_capability for s in self.substitutions}
 
     @property
@@ -204,10 +228,14 @@ class StructuralIR:
 
     def is_replacement(self, capability: str) -> bool:
         """¿Esta capability reemplaza a otra? (es el 'new' de un replace)"""
+        if any(s.target == capability for s in self.substitution_ops):
+            return True
         return any(s.target_capability == capability for s in self.substitutions)
 
     def is_replace_target(self, capability: str) -> bool:
         """¿Esta capability fue reemplazada por otra? (es el 'old' de un replace)"""
+        if any(s.source == capability for s in self.substitution_ops):
+            return True
         return any(s.source_capability == capability for s in self.substitutions)
 
     @property
@@ -559,7 +587,7 @@ def _resolve_action(
     MODIFY  → MODIFY
     CREATE  → CREATE
     MOVE    → MODIFY
-    REPLACE → MODIFY (old cap)
+    REPLACE → KEEP  (solo SubstitutionOp, sin lifecycle)
     None    → KEEP  (sin intención → preservar)
     """
     if action_verb:
@@ -571,8 +599,6 @@ def _resolve_action(
         if vl in _VERBS_CREATE:
             return CREATE
         if vl in _VERBS_MOVE:
-            return MODIFY
-        if vl in _VERBS_REPLACE:
             return MODIFY
 
     return KEEP
@@ -680,18 +706,21 @@ def _extract_layout_hints(
     return hints
 
 
-def _extract_replace_pairs(
+def _extract_substitution_ops(
     semantic_resolution: SemanticResolution,
     contract_caps: list[str],
-) -> list[SubstitutionRecord]:
-    """Extrae SubstitutionRecords de acciones REPLACE.
+) -> list[SubstitutionOp]:
+    """Extrae SubstitutionOps de acciones REPLACE.
+
+    Phase 4: stream independiente del lifecycle.
+    NO toca _resolve_action, NO produce CREATE/MODIFY/DELETE/KEEP.
 
     {"verb": "replace", "object": "table", "reference": "bar chart"}
-    → [SubstitutionRecord(source="presentation.table", target="presentation.chart.bar")]
+    → [SubstitutionOp(source="presentation.table", target="presentation.chart.bar")]
 
     La sustitución es semántica: la source NO se elimina.
     """
-    records: list[SubstitutionRecord] = []
+    ops: list[SubstitutionOp] = []
     for action in semantic_resolution.actions:
         verb = action.get("verb", "")
         obj = action.get("object", "")
@@ -700,11 +729,8 @@ def _extract_replace_pairs(
             old_cap = _match_single_object(obj, contract_caps)
             new_cap = _match_single_object(ref, contract_caps)
             if old_cap and new_cap and old_cap != new_cap:
-                records.append(SubstitutionRecord(
-                    source_capability=old_cap,
-                    target_capability=new_cap,
-                ))
-    return records
+                ops.append(SubstitutionOp(source=old_cap, target=new_cap))
+    return ops
 
 
 def _resolve_field(
@@ -1042,9 +1068,9 @@ def complete_structure(
     for target in set(action_map) - set(capabilities):
         capabilities.append(target)
 
-    # Extraer layout_hints y substitutions de acciones semánticas
+    # Extraer layout_hints y substitution_ops de acciones semánticas
     layout_hints: dict[str, dict] = {}
-    substitutions: tuple[SubstitutionRecord, ...] = ()
+    substitution_ops: tuple[SubstitutionOp, ...] = ()
     if semantic_resolution.actions:
         contract_caps_for_hints = (
             _infer_capabilities_from_contract(contract)
@@ -1054,13 +1080,14 @@ def complete_structure(
         layout_hints = _extract_layout_hints(
             semantic_resolution, contract_caps_for_hints,
         )
-        substitutions = _extract_replace_pairs(
+        substitution_ops = tuple(_extract_substitution_ops(
             semantic_resolution, contract_caps_for_hints,
-        )
+        ))
         # Añadir nuevas capabilities del substitution al scope
-        for sub in substitutions:
-            if sub.target_capability not in capabilities:
-                capabilities.append(sub.target_capability)
+        # (necesario para que el target participe en composición)
+        for sub in substitution_ops:
+            if sub.target not in capabilities:
+                capabilities.append(sub.target)
 
     # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
@@ -1208,7 +1235,8 @@ def complete_structure(
         confidence=contract_resolution.confidence,
         completion_warnings=tuple(warnings),
         layout_hints=layout_hints,
-        substitutions=tuple(substitutions),
+        substitution_ops=substitution_ops,
+        substitutions=(),
     )
 
 
@@ -1223,12 +1251,12 @@ def _capability_from_path(path: str) -> str | None:
     return _match_file_to_capability(name.lower(), name_map)
 
 
-def validate_replace_consistency(
+def _validate_substitution_ops_consistency(
     structural_ir: StructuralIR,
     fileops: list,
     structural_index: StructuralIndex | None = None,
 ) -> list[str]:
-    """Valida consistencia entre substitutions del IR y fileops reales.
+    """Valida consistencia entre substitution_ops del IR y fileops reales.
 
     Reglas (invariante: sustitución ≠ DELETE):
       1. Cada substitution (source→target) debe tener:
@@ -1240,7 +1268,11 @@ def validate_replace_consistency(
     Returns lista de warnings (vacía = todo consistente).
     """
     warnings: list[str] = []
-    if not structural_ir.substitutions:
+    substitutions = list(structural_ir.substitution_ops)
+    # Fallback a deprecated substitutions si no hay substitution_ops
+    if not substitutions:
+        substitutions = [s.to_op() for s in structural_ir.substitutions]
+    if not substitutions:
         return warnings
 
     ops_by_target: dict[str, list[str]] = {}
@@ -1251,9 +1283,9 @@ def validate_replace_consistency(
         if target:
             ops_by_target.setdefault(target, []).append(fop_action)
 
-    for sub in structural_ir.substitutions:
-        source = sub.source_capability
-        target = sub.target_capability
+    for sub in substitutions:
+        source = sub.source
+        target = sub.target
         source_ops = ops_by_target.get(source, [])
         source_exists = structural_index is not None and structural_index.exists(source)
         # Invariante: source NO se elimina
