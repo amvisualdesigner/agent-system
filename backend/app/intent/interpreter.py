@@ -101,7 +101,7 @@ _ACTION_TRIGGERS: dict[str, list[str]] = {
     "modify": ["modify", "update", "change", "set", "edit", "adjust", "replace", "configure"],
     "create": ["create", "add", "build", "generate", "compose", "design", "include", "insert"],
     "keep": ["keep", "maintain", "preserve", "leave"],
-    "transform": ["transform", "swap", "migrate", "convert", "morph"],
+    "transform": ["transform", "swap", "migrate", "convert", "morph", "substitute"],
 }
 
 _VERB_OBJECT_PATTERNS: list[tuple[str, str, float]] = [
@@ -266,8 +266,8 @@ VERBS:
 - "create" — add a new capability to the dashboard
 - "keep" — leave as-is, no changes
 - "transform" — replace ONE capability with ANOTHER (e.g. "replace line chart with bar chart").
-  For transform actions, put the SOURCE capability in params.source_capability.
-  Example: {{"verb": "transform", "target_capability": "presentation.chart.bar", "params": {{"source_capability": "presentation.timeseries"}}}}
+  For transform actions, put the SOURCE capability in the top-level field source_capability.
+  Example: {{"verb": "transform", "source_capability": "presentation.timeseries", "target_capability": "presentation.chart.bar"}}
 
 OUTPUT JSON SCHEMA:
 {{
@@ -277,6 +277,7 @@ OUTPUT JSON SCHEMA:
     {{
       "verb": "modify|remove|create|keep|transform",
       "target_capability": "capability_id_from_catalog",
+      "source_capability": "capability_id_from_catalog (only for transform)",
       "params": {{}},
       "confidence": 0.0
     }}
@@ -311,10 +312,17 @@ def _validate_output(
     for action in raw.get("actions", []):
         cap = action.get("target_capability", "")
         verb = action.get("verb", "")
+        src = action.get("source_capability", "")
 
         if cap not in cap_ids:
             warnings.append(f"Unknown capability '{cap}' — not in catalog")
             action["target_capability"] = ""
+
+        if verb in ("transform",) and not src:
+            warnings.append("Transform action without source_capability — specify what is being replaced")
+        elif src and src not in cap_ids:
+            warnings.append(f"Unknown source_capability '{src}' — not in catalog")
+            action["source_capability"] = ""
 
         if verb and cap in cap_verbs and verb not in cap_verbs[cap]:
             allowed = cap_verbs[cap]
@@ -517,9 +525,11 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
     enriched = []
     for a in actions:
         cap = a.get("target_capability", "")
+        src = a.get("source_capability", "")
         enriched.append({
             "verb": a.get("verb", ""),
             "target_capability": cap,
+            "source_capability": src or None,
             "label": cap_labels.get(cap, cap),
             "confidence": a.get("confidence", 0.8),
             "reason": f"{a.get('verb', '')} {cap_labels.get(cap, cap)}",

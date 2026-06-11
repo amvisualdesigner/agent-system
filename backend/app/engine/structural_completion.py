@@ -135,6 +135,25 @@ class ResolvedCapability:
 
 
 @dataclass(frozen=True)
+class SubstitutionRecord:
+    """Registro de sustitución semántica.
+
+    A diferencia de DELETE+CREATE, SubstitutionRecord preserva
+    la intención: source es reemplazada por target, pero source
+    NO se elimina (su lifecycle queda frozen).
+
+    Representación canónica de 'replace X with Y'.
+    """
+    source_capability: str
+    target_capability: str
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        """Backward compat: (old, new) tuple."""
+        return (self.source_capability, self.target_capability)
+
+
+@dataclass(frozen=True)
 class StructuralIR:
     """Plan de diff estructural — operaciones sobre el repo existente.
 
@@ -147,8 +166,8 @@ class StructuralIR:
     operations es la vista explícita del diff plan.
     capabilities incluye todas (para auditoría/trazabilidad).
     layout_hints: metadata de layout (MOVE scope, REPLACE anchor).
-    replace_pairs: preserva intención semántica de reemplazo.
-    replace_pairs_index: lookup O(1) new_cap → old_cap.
+    substitutions: representación canónica de reemplazos semánticos.
+                   Sustitución ≠ DELETE. La source nunca se elimina.
     """
     contract_id: str
     contract_version: int
@@ -157,8 +176,17 @@ class StructuralIR:
     confidence: float
     completion_warnings: tuple[str, ...] = ()
     layout_hints: dict[str, dict] = field(default_factory=dict)
-    replace_pairs: list[tuple[str, str]] = field(default_factory=list)
-    replace_pairs_index: dict[str, str] = field(default_factory=dict)
+    substitutions: tuple[SubstitutionRecord, ...] = ()
+
+    @property
+    def replace_pairs(self) -> list[tuple[str, str]]:
+        """Backward compat: deriva de substitutions como lista de tuplas (old, new)."""
+        return [s.pair for s in self.substitutions]
+
+    @property
+    def replace_pairs_index(self) -> dict[str, str]:
+        """Backward compat: lookup O(1) new_cap → old_cap."""
+        return {s.target_capability: s.source_capability for s in self.substitutions}
 
     @property
     def has_resolved_keep_state(self) -> bool:
@@ -176,11 +204,11 @@ class StructuralIR:
 
     def is_replacement(self, capability: str) -> bool:
         """¿Esta capability reemplaza a otra? (es el 'new' de un replace)"""
-        return capability in self.replace_pairs_index
+        return any(s.target_capability == capability for s in self.substitutions)
 
     def is_replace_target(self, capability: str) -> bool:
         """¿Esta capability fue reemplazada por otra? (es el 'old' de un replace)"""
-        return any(old == capability for old, _ in self.replace_pairs)
+        return any(s.source_capability == capability for s in self.substitutions)
 
     @property
     def operations(self) -> list[dict]:
@@ -685,16 +713,15 @@ def _extract_replace_pairs(
     semantic_resolution: SemanticResolution,
     contract_caps: list[str],
     structural_index: StructuralIndex | None,
-) -> list[tuple[str, str]]:
-    """Extrae replace_pairs de acciones REPLACE.
+) -> list[SubstitutionRecord]:
+    """Extrae SubstitutionRecords de acciones REPLACE.
 
     {"verb": "replace", "object": "table", "reference": "bar chart"}
-    → [("presentation.table", "presentation.chart.bar")]
+    → [SubstitutionRecord(source="presentation.table", target="presentation.chart.bar")]
 
-    El par semántico se preserva en StructuralIR. El renderer traduce
-    a DELETE+CREATE fileops, pero el IR mantiene la intención.
+    La sustitución es semántica: la source NO se elimina.
     """
-    pairs: list[tuple[str, str]] = []
+    records: list[SubstitutionRecord] = []
     for action in semantic_resolution.actions:
         verb = action.get("verb", "")
         obj = action.get("object", "")
@@ -703,8 +730,11 @@ def _extract_replace_pairs(
             old_cap = _match_single_object(obj, contract_caps, structural_index)
             new_cap = _match_single_object(ref, contract_caps, structural_index)
             if old_cap and new_cap and old_cap != new_cap:
-                pairs.append((old_cap, new_cap))
-    return pairs
+                records.append(SubstitutionRecord(
+                    source_capability=old_cap,
+                    target_capability=new_cap,
+                ))
+    return records
 
 
 def _resolve_field(
@@ -1073,9 +1103,9 @@ def complete_structure(
     for target in set(action_map) - set(capabilities):
         capabilities.append(target)
 
-    # Extraer layout_hints y replace_pairs de acciones semánticas
+    # Extraer layout_hints y substitutions de acciones semánticas
     layout_hints: dict[str, dict] = {}
-    replace_pairs: list[tuple[str, str]] = []
+    substitutions: tuple[SubstitutionRecord, ...] = ()
     if semantic_resolution.actions:
         contract_caps_for_hints = (
             _infer_capabilities_from_contract(contract)
@@ -1085,13 +1115,13 @@ def complete_structure(
         layout_hints = _extract_layout_hints(
             semantic_resolution, contract_caps_for_hints, structural_index,
         )
-        replace_pairs = _extract_replace_pairs(
+        substitutions = _extract_replace_pairs(
             semantic_resolution, contract_caps_for_hints, structural_index,
         )
-        # Añadir nuevas capabilities de replace_pairs al scope
-        for _old, new in replace_pairs:
-            if new not in capabilities:
-                capabilities.append(new)
+        # Añadir nuevas capabilities del substitution al scope
+        for sub in substitutions:
+            if sub.target_capability not in capabilities:
+                capabilities.append(sub.target_capability)
 
     # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
@@ -1273,8 +1303,6 @@ def complete_structure(
             if k not in all_provenance:
                 all_provenance[k] = v
 
-    replace_pairs_index = {new: old for old, new in replace_pairs}
-
     return StructuralIR(
         contract_id=contract.contract_id,
         contract_version=contract.version,
@@ -1283,8 +1311,7 @@ def complete_structure(
         confidence=contract_resolution.confidence,
         completion_warnings=tuple(warnings),
         layout_hints=layout_hints,
-        replace_pairs=replace_pairs,
-        replace_pairs_index=replace_pairs_index,
+        substitutions=tuple(substitutions),
     )
 
 
@@ -1304,19 +1331,19 @@ def validate_replace_consistency(
     fileops: list,
     structural_index: StructuralIndex | None = None,
 ) -> list[str]:
-    """Valida consistencia entre replace_pairs del IR y fileops reales.
+    """Valida consistencia entre substitutions del IR y fileops reales.
 
-    Reglas:
-      1. Cada (old, new) en replace_pairs debe tener:
-         - Un DELETE fileop para old (o el old debe estar en structural_index)
-         - Un CREATE/MODIFY fileop para new
-      2. new no debe tener DELETE fileop
-      3. old no debe tener CREATE fileop
+    Reglas (invariante: sustitución ≠ DELETE):
+      1. Cada substitution (source→target) debe tener:
+         - La source NO debe tener DELETE fileop (no se elimina)
+         - Un CREATE/MODIFY fileop para target
+      2. target no debe tener DELETE fileop
+      3. source no debe tener CREATE fileop
 
     Returns lista de warnings (vacía = todo consistente).
     """
     warnings: list[str] = []
-    if not structural_ir.replace_pairs:
+    if not structural_ir.substitutions:
         return warnings
 
     ops_by_target: dict[str, list[str]] = {}
@@ -1327,29 +1354,33 @@ def validate_replace_consistency(
         if target:
             ops_by_target.setdefault(target, []).append(fop_action)
 
-    for old_cap, new_cap in structural_ir.replace_pairs:
-        old_ops = ops_by_target.get(old_cap, [])
-        old_exists = structural_index is not None and structural_index.exists(old_cap)
-        if "delete" not in old_ops and old_exists:
+    for sub in structural_ir.substitutions:
+        source = sub.source_capability
+        target = sub.target_capability
+        source_ops = ops_by_target.get(source, [])
+        source_exists = structural_index is not None and structural_index.exists(source)
+        # Invariante: source NO se elimina
+        if "delete" in source_ops and source_exists:
             warnings.append(
-                f"replace_pair ({old_cap}→{new_cap}): "
-                f"old '{old_cap}' exists in repo but no DELETE fileop produced"
+                f"substitution ({source}→{target}): "
+                f"source '{source}' has DELETE fileop — "
+                f"substitution must not delete source"
             )
-        new_ops = ops_by_target.get(new_cap, [])
-        if "create" not in new_ops and "modify" not in new_ops:
+        target_ops = ops_by_target.get(target, [])
+        if "create" not in target_ops and "modify" not in target_ops:
             warnings.append(
-                f"replace_pair ({old_cap}→{new_cap}): "
-                f"new '{new_cap}' has no CREATE/MODIFY fileop"
+                f"substitution ({source}→{target}): "
+                f"target '{target}' has no CREATE/MODIFY fileop"
             )
-        if "delete" in new_ops:
+        if "delete" in target_ops:
             warnings.append(
-                f"replace_pair ({old_cap}→{new_cap}): "
-                f"new '{new_cap}' has DELETE fileop — inconsistent"
+                f"substitution ({source}→{target}): "
+                f"target '{target}' has DELETE fileop — inconsistent"
             )
-        if "create" in old_ops:
+        if "create" in source_ops:
             warnings.append(
-                f"replace_pair ({old_cap}→{new_cap}): "
-                f"old '{old_cap}' has CREATE fileop — should be DELETE or no-op"
+                f"substitution ({source}→{target}): "
+                f"source '{source}' has CREATE fileop — should be no-op"
             )
 
     return warnings

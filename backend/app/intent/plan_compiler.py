@@ -33,6 +33,7 @@ def _build_actions(
         entry = {
             "verb": action.verb,
             "target_capability": action.target_capability,
+            "source_capability": action.source_capability,
             "params": dict(action.params),
             "confidence": action.confidence,
         }
@@ -54,10 +55,13 @@ def _build_intents(
             f"{action.verb} {cap}", cap,
             seed=interpretation_id,
         )
+        params = dict(action.params)
+        if action.source_capability:
+            params["source_capability"] = action.source_capability
         intent = Intent(
             id=intent_id,
             capability=cap,
-            params=dict(action.params),
+            params=params,
             task_fragment=f"{action.verb} {cap}",
             weight=action.confidence,
             source="confirmed_intent",
@@ -160,7 +164,7 @@ def _build_semantic_frame_from_actions(
         if action.instance_hint:
             frame_action["instance_hint"] = action.instance_hint
         # Preserve source_capability for transform/swap/replace actions
-        src = action.params.get("source_capability", action.params.get("source", ""))
+        src = action.source_capability or action.params.get("source", "")
         if src:
             frame_action["reference"] = src
         frame_actions.append(frame_action)

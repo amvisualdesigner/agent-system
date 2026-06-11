@@ -934,17 +934,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
-    # ── Translate replace_pairs to file operations ──
-    # StructuralIR.replace_pairs preserva intención semántica.
-    # El renderer ya generó fileops para CREATE del new.
-    # Aquí inyectamos DELETE del old.
-    if structural_ir.replace_pairs:
-        for old_cap, _new_cap in structural_ir.replace_pairs:
-            if structural_index.exists(old_cap):
-                for fp in (structural_index.resolve_all_file_paths(old_cap) if structural_index else []):
-                    fileops.append(FileOp(action="delete", path=fp, content="", pipeline_route="delete_inject"))
-
-    # ── Validate replace_pairs consistency ──
+    # ── Validate substitutions consistency ──
+    # Substitution es semántica: la source NO se elimina.
+    # No hay inyección de DELETE — el viejo archivo queda en disco.
     from app.engine.structural_completion import validate_replace_consistency
     replace_warnings = validate_replace_consistency(
         structural_ir, fileops, structural_index=structural_index,

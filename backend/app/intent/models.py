@@ -85,6 +85,7 @@ class RunState:
 class IntentAction:
     verb: str
     target_capability: str
+    source_capability: str | None = None
     params: dict = field(default_factory=dict)
     confidence: float = 1.0
     instance_hint: str | None = None
