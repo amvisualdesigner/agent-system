@@ -12,6 +12,9 @@ __all__ = [
     "CompiledPlan",
     "RunPhase",
     "RunState",
+    "RefactorChange",
+    "PendingDeletion",
+    "FallbackExecutionRequest",
 ]
 
 
@@ -167,3 +170,70 @@ class CompiledPlan:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class RefactorChange:
+    """Registro de un cambio de refactorización en el pipeline de ejecución.
+
+    change_type: "import_redirect" (sustitución de imports en archivos)
+                 | "composition_sync" (promoción de parent page por hijo CREATE/DELETE)
+    source: nombre de la capability origen (old)
+    target: nombre de la capability destino (new)
+    file_path: ruta del archivo modificado (None para composition_sync)
+    reason: descripción legible del cambio
+    """
+    change_type: str
+    source: str
+    target: str
+    file_path: str | None = None
+    reason: str = ""
+
+
+@dataclass
+class FallbackExecutionRequest:
+    """Adaptador estándar para fallos del pipeline de ejecución.
+
+    No reemplaza excepciones internas — las envuelve en un formato
+    estándar para la capa de API.
+    """
+    reason: str
+    conflict_type: Literal[
+        "ambiguity",
+        "collision",
+        "unconfirmed_deletion",
+        "substitution_overflow",
+        "missing_component",
+        "missing_required_param",
+        "delete_authority",
+    ]
+    level: int  # 0=info, 1=warning, 2=blocking
+    details: dict = field(default_factory=dict)
+    options: list[dict] = field(default_factory=list)
+
+    def to_result(self) -> dict:
+        status = "clarification_needed" if self.level >= 2 else "warning"
+        return {
+            "execution": {
+                "status": status,
+                "conflict": self.conflict_type,
+                "detail": self.reason,
+                "diff": None,
+                "operations": [],
+            },
+            "context": {"fallback": True},
+        }
+
+
+@dataclass
+class PendingDeletion:
+    """Eliminación pendiente de confirmación por el usuario.
+
+    Phase 5B: derivada de StructuralIR.capabilities en el plan_preview.
+    NO contiene paths — los paths se resuelven desde StructuralIndex
+    SOLO en el momento de ejecución.
+
+    confirmed: el usuario confirmó esta eliminación (set por /apply).
+    """
+    capability: str
+    instance_hint: str | None = None

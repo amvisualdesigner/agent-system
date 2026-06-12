@@ -28,6 +28,7 @@ class ConfirmRequest(BaseModel):
 
 class ApplyRequest(BaseModel):
     dry_run: bool = False
+    confirmed_deletions: list[str] = []
 
 
 class SSEEvent(BaseModel):

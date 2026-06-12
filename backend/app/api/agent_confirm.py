@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.config.feature_flags import FEATURE_FLAGS
-from app.intent.models import ConfirmedIntent, IntentAction, RunPhase
+from app.intent.models import ConfirmedIntent, IntentAction, RunPhase, PendingDeletion
 from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.utils.run_id import validate_run_id
@@ -182,11 +182,19 @@ def _agent_confirm(req: ConfirmRequest):
         )
         route_counts[route] = route_counts.get(route, 0) + 1
 
+    # Phase 5B: Derive pending_deletions from confirmed actions
+    pending_deletions = [
+        PendingDeletion(capability=a.target_capability, instance_hint=a.instance_hint)
+        for a in confirmed.actions
+        if a.verb.lower() in ("remove", "delete")
+    ]
+
     plan_preview = {
         "summary_human": summary,
         "structural_operations": structural_ops,
         "estimated_files": estimated_files,
         "routes": route_counts.copy(),
+        "pending_deletions": [(pd.capability, pd.instance_hint) for pd in pending_deletions],
     }
 
     result = {

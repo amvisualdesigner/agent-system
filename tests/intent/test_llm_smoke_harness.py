@@ -795,10 +795,10 @@ class TestSubstitutionInvariants:
             # apply_substitutions runs without error; creation depends on
             # contract file mapping, which is empty so no file created.
             # The key invariant: no crash, no lifecycle side-effects.
-            assert isinstance(result, dict)
-            assert "created" in result
-            assert "redirected" in result
-            assert "warnings" in result
+            fileops, summary, refactor_changes = result
+            assert isinstance(fileops, list)
+            assert isinstance(summary, dict)
+            assert isinstance(refactor_changes, list)
 
     def test_substitution_is_not_lifecycle(self):
         """SubstitutionOp NO es un lifecycle operation."""
@@ -835,18 +835,21 @@ class TestSubstitutionInvariants:
             with open(other, "w") as f:
                 f.write("import React from 'react';\n")
 
-            modified = _redirect_imports(
+            fileops = _redirect_imports(
                 "presentation.table",
                 "presentation.chart.bar",
                 tmpdir,
                 contract,
             )
 
-            # The importer file should be modified
-            assert importer in modified, f"expected {importer} in {modified}"
-            with open(importer) as f:
-                content = f.read()
-            # Old import path should be redirected to new
-            assert "'./bar'" in content  # new import path
+            # _redirect_imports returns list[FileOp] with pipeline_route="substitution"
+            assert len(fileops) > 0, "No FileOps produced"
+            dashboard_fops = [op for op in fileops if "Dashboard.tsx" in op.path]
+            assert len(dashboard_fops) == 1, f"Dashboard.tsx not in {[op.path for op in fileops]}"
+            assert dashboard_fops[0].action == "modify"
+            assert dashboard_fops[0].pipeline_route == "substitution"
+            # Content should have the redirected import
+            assert "'./bar'" in dashboard_fops[0].content
+
             # Unrelated file should NOT be modified
-            assert other not in modified
+            assert not any("Unrelated.tsx" in op.path for op in fileops), "Unrelated.tsx should not be modified"

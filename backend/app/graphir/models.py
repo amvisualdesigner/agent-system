@@ -262,7 +262,7 @@ class GraphIRDraft:
         )
 
 
-PipelineRoute = Literal["constraint", "renderer", "composition_sync", "delete_inject", "shadow", "replay", "unknown"]
+PipelineRoute = Literal["constraint", "renderer", "composition_sync", "delete_inject", "substitution", "shadow", "replay", "unknown"]
 
 
 @dataclass

@@ -45,7 +45,11 @@ async def call_apply_node(state: AgentState) -> dict:
 
     start = time.time()
     try:
-        apply_result = await backend_call_apply(run_id, state["plan"])
+        confirmed_deletions = state.get("confirmed_deletions")
+        apply_result = await backend_call_apply(
+            run_id, state["plan"],
+            confirmed_deletions=confirmed_deletions,
+        )
         latency = int((time.time() - start) * 1000)
     except Exception as e:
         latency = int((time.time() - start) * 1000)

@@ -352,11 +352,22 @@ function onPlanPreviewReady(data) {
     html += "</div>";
   }
 
+  const pendingDeletions = preview.pending_deletions || [];
+  if (pendingDeletions.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Eliminaciones pendientes (${pendingDeletions.length})</strong></div><ul class="file-list" style="color:#f87171">`;
+    pendingDeletions.forEach(pd => {
+      const [cap, hint] = Array.isArray(pd) ? pd : [pd.capability || pd, pd.instance_hint || null];
+      html += `<li>🗑 ${esc(cap)}${hint ? ` <em>(${esc(hint)})</em>` : ''}</li>`;
+    });
+    html += "</ul>";
+  }
+
   html += `<div class="action-bar" style="margin-top:12px;padding-top:10px;border-top:1px solid #334155">
     <button onclick="handleApply(this)" class="btn-primary">⚡ Apply</button>
     <button onclick="handleRejectApply(this)" class="btn-outline">✗ Rechazar</button>
   </div>`;
 
+  window._lastPlanPreview = preview;
   bodyEl("panel-confirm").innerHTML = html;
 }
 
@@ -675,11 +686,21 @@ async function handleApply(btn) {
   const parent = btn.closest(".action-bar");
   if (parent) parent.style.display = "none";
 
+  const preview = window._lastPlanPreview || {};
+  const pendingDeletions = preview.pending_deletions || [];
+  const confirmedDeletions = pendingDeletions
+    .map(pd => Array.isArray(pd) ? pd[0] : (pd.capability || pd))
+    .filter(Boolean);
+
   try {
+    const body = { dry_run: dryRunCheck.checked };
+    if (confirmedDeletions.length > 0) {
+      body.confirmed_deletions = confirmedDeletions;
+    }
     const resp = await fetch(`${ORCH}/run/${runId}/apply`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: dryRunCheck.checked }),
+      body: JSON.stringify(body),
     });
     if (!resp.ok) {
       const err = await resp.json();

@@ -29,11 +29,14 @@ async def call_confirm(payload: dict) -> Dict[str, Any]:
         return r.json()
 
 
-async def call_apply(run_id: str, plan: dict, dry_run: bool = False) -> Dict[str, Any]:
+async def call_apply(run_id: str, plan: dict, dry_run: bool = False, confirmed_deletions: list[str] | None = None) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=120) as client:
+        payload: dict = {"run_id": run_id, "plan": plan, "dry_run": dry_run}
+        if confirmed_deletions is not None:
+            payload["confirmed_deletions"] = confirmed_deletions
         r = await client.post(
             f"{BACKEND_URL}/agent/apply",
-            json={"run_id": run_id, "plan": plan, "dry_run": dry_run},
+            json=payload,
         )
         r.raise_for_status()
         return r.json()

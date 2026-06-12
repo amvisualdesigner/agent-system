@@ -74,7 +74,7 @@ def _agent_apply(req: ApplyRequest):
     plan = req.plan or state.get("compiled_plan")
 
     try:
-        result = apply_engine(run_id, plan, context, dry_run=req.dry_run)
+        result = apply_engine(run_id, plan, context, dry_run=req.dry_run, confirmed_deletions=req.confirmed_deletions)
         transition_phase(run_id, RunPhase.COMPLETED)
         return result
     except Exception as e:

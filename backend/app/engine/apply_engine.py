@@ -28,6 +28,7 @@ from app.engine.errors import AmbiguousStructuralTargetError
 from app.engine.structural_completion import (
     complete_structure,
     StructuralIR,
+    SubstitutionOp,
 )
 from app.engine.structural_index import StructuralIndex
 from app.graphir.structure.models import StructuralResolution
@@ -43,6 +44,7 @@ from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops, FileOp
 from app.graphir.utils import extract_component_name
 from app.graphir.utils import check_repo_integrity
+from app.intent.models import FallbackExecutionRequest, RefactorChange
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 
@@ -91,6 +93,36 @@ def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: li
         json.dump(payload, f, indent=2)
     with open(f"{artifacts_dir}/diff.patch", "w") as f:
         f.write(diff)
+
+
+def _validate_confirmed_deletions(
+    structural_ir: StructuralIR,
+    confirmed_deletions: list[str] | None,
+) -> dict | None:
+    """Phase 5B: Validate that all pending deletions are confirmed.
+
+    When confirmed_deletions is None (direct apply_engine call without API),
+    auto-confirm all pending deletions (backward compat with tests).
+    The API layer (/agent/apply) always passes confirmed_deletions.
+
+    Returns None if OK, or a result dict if rejected.
+    """
+    pending = structural_ir.pending_deletions
+    if pending and confirmed_deletions is not None:
+        confirmed = set(confirmed_deletions)
+        for pd in pending:
+            if pd.capability not in confirmed:
+                return {
+                    "execution": {
+                        "status": "rejected",
+                        "reason": f"unconfirmed_deletion:{pd.capability}",
+                        "detail": f"Pending deletion '{pd.capability}' must be confirmed via confirmed_deletions. "
+                                 f"Confirmed: {confirmed}",
+                        "diff": None, "operations": [],
+                    },
+                    "context": {"repo_snapshot": []},
+                }
+    return None
 
 
 def _validate_delete_authority(structural_ir: StructuralIR, plan: dict) -> None:
@@ -248,48 +280,6 @@ def _stem_matches_hint(fp: str, hint_stem: str) -> bool:
     return stem == hint_stem or stem.replace("-", "").replace("_", "") == hint_stem
 
 
-def _create_component_file(
-    capability: str, workspace: str, contract,
-) -> str | None:
-    """Create a minimal component file for a capability if it doesn't exist.
-
-    Returns the created file path, or None if creation failed/skipped.
-    Phase 4: substitution target creation — NO lifecycle, NO renderer.
-    """
-    from app.engine.structural_completion import STRUCTURAL_SCHEMA
-
-    name_map = _build_name_map()
-    target_path = None
-    for suffix, cap in name_map.items():
-        if cap == capability:
-            component_name = extract_component_name(suffix)
-            break
-    else:
-        component_name = capability.rsplit(".", 1)[-1]
-        # Try PascalCase
-        component_name = "".join(p.title() for p in component_name.split("_"))
-
-    contract_file_entries = (contract.renderer or {}).get("files", [])
-    for entry in contract_file_entries:
-        fname = os.path.basename(entry.get("path", ""))
-        name_part = os.path.splitext(fname)[0].lower()
-        if component_name.lower().startswith(name_part) or name_part in component_name.lower():
-            target_path = os.path.join(workspace, entry["path"])
-            break
-
-    if not target_path:
-        return None
-
-    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-    if not os.path.exists(target_path):
-        schema = STRUCTURAL_SCHEMA.get(capability, {})
-        template = _render_minimal_component(component_name, schema)
-        with open(target_path, "w") as f:
-            f.write(template)
-        return target_path
-    return None
-
-
 def _render_minimal_component(name: str, schema: dict) -> str:
     """Render a minimal React component skeleton."""
     import json
@@ -307,16 +297,74 @@ def _render_minimal_component(name: str, schema: dict) -> str:
     )
 
 
+def _reconcile_substitution_targets(
+    substitution_ops: tuple[SubstitutionOp, ...],
+    structural_index,
+    workspace: str,
+    contract,
+) -> list[FileOp]:
+    """Check each substitution target against StructuralIndex.
+
+    Phase 5A: uses structural_index.exists(target) — NOT os.path.exists().
+    Only produces FileOp(create) if target does NOT exist in the index.
+    NO lifecycle mutation — does not read or write StructuralIR.capabilities.
+
+    Returns list of FileOp(action="create", pipeline_route="substitution").
+    """
+    from app.engine.structural_completion import STRUCTURAL_SCHEMA
+
+    name_map = _build_name_map()
+    fileops: list[FileOp] = []
+
+    for op in substitution_ops:
+        if structural_index.exists(op.target):
+            continue
+
+        # Target does not exist — find contract file path
+        target_path = None
+        for suffix, cap in name_map.items():
+            if cap == op.target:
+                component_name = extract_component_name(suffix)
+                break
+        else:
+            component_name = op.target.rsplit(".", 1)[-1]
+            component_name = "".join(p.title() for p in component_name.split("_"))
+
+        contract_file_entries = (contract.renderer or {}).get("files", [])
+        for entry in contract_file_entries:
+            fname = os.path.basename(entry.get("path", ""))
+            name_part = os.path.splitext(fname)[0].lower()
+            if component_name.lower().startswith(name_part) or name_part in component_name.lower():
+                target_path = entry["path"]
+                break
+
+        if not target_path:
+            continue
+
+        schema = STRUCTURAL_SCHEMA.get(op.target, {})
+        template = _render_minimal_component(component_name, schema)
+        fileops.append(FileOp(
+            action="create",
+            path=target_path,
+            content=template,
+            pipeline_route="substitution",
+            metadata={"target_capability": op.target},
+        ))
+
+    return fileops
+
+
 def _redirect_imports(
     old_capability: str,
     new_capability: str,
     workspace: str,
     contract,
-) -> list[str]:
+) -> list[FileOp]:
     """Redirect imports from old_capability to new_capability across all files.
 
+    Phase 4+5A: returns list of FileOp(modify) instead of writing directly.
     Phase 4: import redirection — NO filesystem delete, NO lifecycle mutation.
-    Returns list of modified file paths.
+    Phase 5A: all writes go through FileOpApplier.
     """
     name_map = _build_name_map()
     old_component = None
@@ -330,7 +378,7 @@ def _redirect_imports(
     if not old_component or not new_component:
         return []
 
-    modified: list[str] = []
+    fileops: list[FileOp] = []
     for root, _dirs, files in os.walk(workspace):
         for fname in files:
             if not fname.endswith((".tsx", ".ts", ".jsx", ".js")):
@@ -363,49 +411,100 @@ def _redirect_imports(
                     changes = True
 
             if changes:
-                with open(fpath, "w") as f:
-                    f.write(content)
-                modified.append(fpath)
-    return modified
+                rel_path = os.path.relpath(fpath, workspace)
+                fileops.append(FileOp(
+                    action="modify",
+                    path=rel_path,
+                    content=content,
+                    pipeline_route="substitution",
+                    metadata={"old_capability": old_capability, "new_capability": new_capability},
+                ))
+    return fileops
+
+
+def build_substitution_fileops(
+    substitution_ops: tuple[SubstitutionOp, ...],
+    structural_index,
+    workspace: str,
+    contract,
+) -> tuple[list[FileOp], list[RefactorChange]]:
+    """Coordina reconciliation + import redirect para substitution_ops.
+
+    Phase 5A: execution planner layer.
+    Phase 5C: returns refactor_changes alongside fileops.
+    Semantic stream (SubstitutionOp) → FileOps.
+    NO muta StructuralIR. NO escribe directo a disco.
+
+    Returns (list[FileOp], list[RefactorChange]) con pipeline_route="substitution".
+    """
+    fileops: list[FileOp] = []
+    refactor_changes: list[RefactorChange] = []
+
+    # 1. Reconcile targets: create files if missing
+    create_ops = _reconcile_substitution_targets(
+        substitution_ops, structural_index, workspace, contract,
+    )
+    for op in create_ops:
+        fileops.append(op)
+        refactor_changes.append(RefactorChange(
+            change_type="import_redirect",
+            source=op.metadata.get("source_capability", ""),
+            target=op.metadata.get("target_capability", ""),
+            file_path=op.path,
+            reason=f"create target file for substitution: {op.path}",
+        ))
+
+    # 2. Redirect imports: modify files with updated import paths
+    for op in substitution_ops:
+        redirect_ops = _redirect_imports(
+            op.source, op.target, workspace, contract,
+        )
+        for fop in redirect_ops:
+            fileops.append(fop)
+            refactor_changes.append(RefactorChange(
+                change_type="import_redirect",
+                source=op.source,
+                target=op.target,
+                file_path=fop.path,
+                reason=f"redirect imports {op.source} → {op.target} in {fop.path}",
+            ))
+
+    return fileops, refactor_changes
 
 
 def apply_substitutions(
     structural_ir: StructuralIR,
     workspace: str,
     contract,
+    structural_index=None,
     dry_run: bool = False,
-) -> dict:
-    """Phase 4: execute substitution_ops independently of lifecycle.
+) -> tuple[list[FileOp], dict, list[RefactorChange]]:
+    """Phase 4+5A+5C: execute substitution_ops via build_substitution_fileops().
 
-    For each SubstitutionOp:
-      1. create_if_missing(target) — create minimal component file
-      2. redirect_imports(source → target) — update all imports
-      🚫 NO delete, NO modify, NO lifecycle mutation
+    Phase 4: semantic stream (SubstitutionOp) — no lifecycle effect.
+    Phase 5A: all writes go through FileOp pipeline, not direct disk.
+    Phase 5C: returns refactor_changes for execution trace.
 
-    Returns summary dict {created: [...], redirected: [...], warnings: [...]}.
+    Returns (fileops, summary_dict, refactor_changes).
     """
-    subs = list(structural_ir.substitution_ops)
+    subs = structural_ir.substitution_ops
     if not subs:
-        return {"created": [], "redirected": [], "warnings": []}
+        return [], {"created": [], "redirected": [], "warnings": []}, []
 
-    result: dict[str, list] = {"created": [], "redirected": [], "warnings": []}
+    if structural_index is None:
+        from app.engine.structural_index import StructuralIndex
+        structural_index = StructuralIndex.from_worktree(workspace)
 
-    for sub in subs:
-        # Step 1: create target file if missing
-        if not dry_run:
-            created = _create_component_file(sub.target, workspace, contract)
-            if created:
-                result["created"].append(created)
-                logger.info("substitution: created target file %s for %s", created, sub.target)
+    fileops, refactor_changes = build_substitution_fileops(subs, structural_index, workspace, contract)
 
-        # Step 2: redirect imports from source to target
-        if not dry_run:
-            modified = _redirect_imports(sub.source, sub.target, workspace, contract)
-            result["redirected"].extend(modified)
-            for fp in modified:
-                logger.info("substitution: redirected imports %s → %s in %s", sub.source, sub.target, fp)
+    summary: dict[str, list] = {"created": [], "redirected": [], "warnings": []}
+    for fop in fileops:
+        if fop.action == "create":
+            summary["created"].append(fop.path)
+        elif fop.action == "modify":
+            summary["redirected"].append(fop.path)
 
-    return result
+    return fileops, summary, refactor_changes
 
 
 def _build_audit(
@@ -609,7 +708,7 @@ def _build_audit(
         return output
 
 
-def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict"):
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict", confirmed_deletions: list[str] | None = None):
     """Execute a plan against a workspace using the StructuralIR pipeline.
 
     Pipeline:
@@ -692,7 +791,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         )
 
         # ── Gate: Delete authority — only user-confirmed IntentAction DELETE is valid ──
-        _validate_delete_authority(structural_ir, plan)
+        try:
+            _validate_delete_authority(structural_ir, plan)
+        except ValueError as e:
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="delete_authority", level=2,
+            ).to_result()
 
         # ── Early exit: all capabilities resolved to KEEP ──
         if structural_ir.has_resolved_keep_state:
@@ -710,8 +814,12 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Gate 2: StructuralCoverageValidator
         sreport = StructuralCoverageValidator.validate(structural_ir, contract)
     except (ValueError, SemanticConflictError, StructuralIntegrityError, AmbiguousStructuralTargetError) as e:
+        if isinstance(e, AmbiguousStructuralTargetError):
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="ambiguity", level=2,
+            ).to_result()
         return {
-            "execution": {"status": "clarification_needed" if isinstance(e, AmbiguousStructuralTargetError) else "rejected", "reason": f"structural:{e}", "diff": None, "operations": []},
+            "execution": {"status": "rejected", "reason": f"structural:{e}", "diff": None, "operations": []},
             "context": {"repo_snapshot": []},
         }
 
@@ -768,13 +876,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                         },
                     }
         except AmbiguousStructuralTargetError as e:
-            return {
-                "execution": {
-                    "status": "clarification_needed", "reason": "ambiguous_target",
-                    "detail": str(e), "diff": None, "operations": [],
-                },
-                "context": {"repo_snapshot": []},
-            }
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="ambiguity", level=2,
+                details={"canonicalization_trace": canon_trace.to_dict() if canon_trace else {}},
+            ).to_result()
 
     # ── Step 2: GraphIR pipeline (build_from_structural + layout + validate) ──
     try:
@@ -783,13 +888,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             resolution=resolution,
         )
     except AmbiguousStructuralTargetError as e:
-        return {
-            "execution": {
-                "status": "clarification_needed", "reason": "ambiguous_target",
-                "detail": str(e), "diff": None, "operations": [],
-            },
-            "context": {"repo_snapshot": []},
-        }
+        return FallbackExecutionRequest(
+            reason=str(e), conflict_type="ambiguity", level=2,
+        ).to_result()
     except ValueError as e:
         return {
             "execution": {"status": "rejected", "reason": f"graphir:{e}", "diff": None, "operations": []},
@@ -995,14 +1096,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 resolved_bindings=resolved_bindings,
             )
         except MISSING_REQUIRED_PROPS as e:
-            return {
-                "execution": {
-                    "status": "rejected",
-                    "reason": str(e),
-                    "diff": None, "operations": [],
-                },
-                "context": {"repo_snapshot": []},
-            }
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="missing_required_param", level=2,
+            ).to_result()
 
         # Collect constraint vars for audit
         _audit_decisions = decisions
@@ -1028,17 +1124,17 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         try:
             fileops = backend.render(graph, graph_layout, backend_config, resolved_bindings=resolved_bindings)
         except MISSING_REQUIRED_PROPS as e:
-            return {
-                "execution": {
-                    "status": "rejected",
-                    "reason": str(e),
-                    "diff": None, "operations": [],
-                },
-                "context": {"repo_snapshot": []},
-            }
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="missing_required_param", level=2,
+            ).to_result()
 
     # ── Capture emitted props ──
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))
+
+    # ── Phase 5B: Validate confirmed_deletions covers all pending deletions ──
+    confirmed_result = _validate_confirmed_deletions(structural_ir, confirmed_deletions)
+    if confirmed_result is not None:
+        return confirmed_result
 
     # ── Inject DELETE FileOps for structural DELETE operations ──
     # MUST follow DELETE RESOLUTION CONTRACT v1
@@ -1093,6 +1189,22 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "context": {"repo_snapshot": []},
         }
 
+    # ── Phase 5A+5C: Build substitution FileOps and add to pipeline ──
+    sub_fileops: list[FileOp] = []
+    sub_summary: dict = {"created": [], "redirected": [], "warnings": []}
+    sub_refactor_changes: list[RefactorChange] = []
+    if structural_ir.substitution_ops:
+        sub_fileops, sub_summary, sub_refactor_changes = apply_substitutions(
+            structural_ir, context.workspace, contract,
+            structural_index=structural_index, dry_run=dry_run,
+        )
+        fileops.extend(sub_fileops)
+        if sub_summary["created"] or sub_summary["redirected"]:
+            logger.info(
+                "substitution_ops: created=%d redirected=%d",
+                len(sub_summary["created"]), len(sub_summary["redirected"]),
+            )
+
     # ── Validate substitution ops consistency (post-hoc, no lifecycle effect) ──
     from app.engine.structural_completion import _validate_substitution_ops_consistency
     sub_warnings = _validate_substitution_ops_consistency(
@@ -1100,6 +1212,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     )
     for w in sub_warnings:
         logger.warning("substitution_consistency: %s", w)
+
+    # ── Collision detection ──
+    from app.graphir.utils import validate_fileop_collisions
+    collisions = validate_fileop_collisions(fileops)
+    if collisions:
+        return FallbackExecutionRequest(
+            reason=f"FileOp collisions detected: {len(collisions)}",
+            conflict_type="collision", level=2,
+            details={"collisions": collisions},
+        ).to_result()
 
     ok, vreason = validate_fileops(fileops)
     if not ok:
@@ -1115,16 +1237,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "apply: contract_id=%s version=%d params=%s fileops_count=%d",
         skill_ir_obj.contract_id, skill_ir_obj.version, skill_ir_obj.params, len(fileops),
     )
-
-    # ── Phase 4: Apply substitutions (independent stream, no lifecycle effect) ──
-    sub_result = apply_substitutions(
-        structural_ir, context.workspace, contract, dry_run=dry_run,
-    )
-    if sub_result["created"] or sub_result["redirected"]:
-        logger.info(
-            "substitution_ops: created=%d redirected=%d",
-            len(sub_result["created"]), len(sub_result["redirected"]),
-        )
 
     # ── Fase 4: Verify BEFORE git commit ────────────────────────────
     verify_result = None
@@ -1194,11 +1306,31 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     save_run_state(run_id, {"status": "apply"})
 
+    # ── Aggregate refactor changes from composition_sync + substitution ──
+    all_refactor_changes: list[dict] = []
+    for rc in structural_ir.composition_sync_trace:
+        all_refactor_changes.append({
+            "change_type": rc.change_type,
+            "source": rc.source,
+            "target": rc.target,
+            "file_path": rc.file_path,
+            "reason": rc.reason,
+        })
+    for rc in sub_refactor_changes:
+        all_refactor_changes.append({
+            "change_type": rc.change_type,
+            "source": rc.source,
+            "target": rc.target,
+            "file_path": rc.file_path,
+            "reason": rc.reason,
+        })
+
     return {
         "execution": {
             "status": execution_status,
             "diff": diff or None,
             "operations": [fop.to_dict() for fop in fileops],
+            "refactor_changes": all_refactor_changes,
         },
         "context": {
             "run_id": run_id,

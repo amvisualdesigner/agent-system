@@ -40,6 +40,31 @@ def validate_fileops(fileops: list[FileOp]) -> tuple[bool, str]:
     return True, "ok"
 
 
+def validate_fileop_collisions(fileops: list[FileOp]) -> list[dict]:
+    """Detect conflicting FileOps on the same path.
+
+    A collision occurs when two FileOps target the same path
+    with different actions (e.g. create vs modify, create vs delete).
+
+    Returns list of collision dicts, empty if no collisions.
+    """
+    seen: dict[str, FileOp] = {}
+    collisions: list[dict] = []
+    for i, op in enumerate(fileops):
+        prev = seen.get(op.path)
+        if prev is not None and prev.action != op.action:
+            collisions.append({
+                "path": op.path,
+                "op_a_index": fileops.index(prev),
+                "op_a_action": prev.action,
+                "op_b_index": i,
+                "op_b_action": op.action,
+            })
+        elif prev is None:
+            seen[op.path] = op
+    return collisions
+
+
 def check_repo_integrity(workspace_root: str) -> dict:
     """Lightweight post-write checks on the repository.
 

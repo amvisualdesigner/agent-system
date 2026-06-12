@@ -7,3 +7,4 @@ class ApplyRequest(BaseModel):
     run_id: Optional[str] = None
     plan: dict | None = None
     dry_run: bool = False
+    confirmed_deletions: list[str] = []

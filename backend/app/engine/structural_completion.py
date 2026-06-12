@@ -29,6 +29,7 @@ from app.contracts.semantic_resolution import SemanticResolution
 from app.contracts.contract_resolution import ContractResolution
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.engine.structural_index import StructuralIndex
+from app.intent.models import RefactorChange
 
 
 
@@ -188,6 +189,7 @@ class StructuralIR:
     substitution_ops: stream de SubstitutionOp — independiente del lifecycle.
                       Phase 4: la sustitución NO afecta CREATE/MODIFY/DELETE/KEEP.
     substitutions: tuple[SubstitutionRecord, ...] heredado (DEPRECATED).
+    composition_sync_trace: Phase 5C — traza de syncs de composición.
     """
     contract_id: str
     contract_version: int
@@ -198,6 +200,7 @@ class StructuralIR:
     layout_hints: dict[str, dict] = field(default_factory=dict)
     substitution_ops: tuple[SubstitutionOp, ...] = ()
     substitutions: tuple[SubstitutionRecord, ...] = ()
+    composition_sync_trace: tuple[RefactorChange, ...] = ()
 
     @property
     def replace_pairs(self) -> list[tuple[str, str]]:
@@ -237,6 +240,20 @@ class StructuralIR:
         if any(s.source == capability for s in self.substitution_ops):
             return True
         return any(s.source_capability == capability for s in self.substitutions)
+
+    @property
+    def pending_deletions(self) -> tuple[PendingDeletion, ...]:
+        """Derivado de capabilities con action=DELETE.
+
+        Phase 5B: NO contiene paths. Los paths se resuelven desde
+        StructuralIndex en el momento de ejecución.
+        """
+        from app.intent.models import PendingDeletion
+        return tuple(
+            PendingDeletion(capability=rc.name, instance_hint=rc.instance_hint)
+            for rc in self.capabilities
+            if rc.action == DELETE
+        )
 
     @property
     def operations(self) -> list[dict]:
@@ -881,7 +898,7 @@ def _sync_composition_parents(
     resolved: list[ResolvedCapability],
     contract: SkillContract,
     warnings: list[str],
-) -> None:
+) -> list[RefactorChange]:
     """Post-pass C: When a child capability is CREATE/DELETE/instance_only,
     ensure parent page is MODIFY.
 
@@ -896,12 +913,17 @@ def _sync_composition_parents(
       4. No composition map (contract without Page + slots) → no-op
       5. instance_only means the child exists in repo and was requested
          as CREATE → parent needs reference, child file stays untouched.
+
+    Returns list of RefactorChange for composition_sync trace.
     """
+    from app.intent.models import RefactorChange
+
     child_to_parent = _build_contract_composition_map(contract)
     if not child_to_parent:
-        return
+        return []
 
     resolved_map = {rc.name: i for i, rc in enumerate(resolved)}
+    trace: list[RefactorChange] = []
 
     for rc in resolved:
         is_composition_trigger = (
@@ -936,6 +958,15 @@ def _sync_composition_parents(
         warnings.append(
             f"{parent_cap}: composition sync ({trigger} {rc.name})"
         )
+        trace.append(RefactorChange(
+            change_type="composition_sync",
+            source=rc.name,
+            target=parent_cap,
+            file_path=None,
+            reason=f"{parent_cap}: composition sync ({trigger} {rc.name})",
+        ))
+
+    return trace
 
 
 def _expand_composition_children(
@@ -1083,12 +1114,6 @@ def complete_structure(
         substitution_ops = tuple(_extract_substitution_ops(
             semantic_resolution, contract_caps_for_hints,
         ))
-        # Añadir nuevas capabilities del substitution al scope
-        # (necesario para que el target participe en composición)
-        for sub in substitution_ops:
-            if sub.target not in capabilities:
-                capabilities.append(sub.target)
-
     # Paso 3: resolver cada capability con lifecycle action (Step B)
     resolved: list[ResolvedCapability] = []
 
@@ -1212,7 +1237,7 @@ def complete_structure(
     # After anchor preservation, promote parent to MODIFY when a child is
     # created or deleted, so the renderer regenerates the page with correct
     # imports/JSX references.
-    _sync_composition_parents(resolved, contract, warnings)
+    composition_sync_trace = _sync_composition_parents(resolved, contract, warnings)
 
     # 3E (C2): Composition child expansion — when parent Page is MODIFY/CREATE,
     # promote KEEP slot children to INSTANCE so they appear in GraphIR composition.
@@ -1237,6 +1262,7 @@ def complete_structure(
         layout_hints=layout_hints,
         substitution_ops=substitution_ops,
         substitutions=(),
+        composition_sync_trace=tuple(composition_sync_trace),
     )
 
 
