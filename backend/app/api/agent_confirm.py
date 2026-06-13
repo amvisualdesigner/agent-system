@@ -194,7 +194,10 @@ def _agent_confirm(req: ConfirmRequest):
         "structural_operations": structural_ops,
         "estimated_files": estimated_files,
         "routes": route_counts.copy(),
-        "pending_deletions": [(pd.capability, pd.instance_hint) for pd in pending_deletions],
+        "pending_deletions": [
+            {"capability": pd.capability, "instance_hint": pd.instance_hint}
+            for pd in pending_deletions
+        ],
     }
 
     result = {

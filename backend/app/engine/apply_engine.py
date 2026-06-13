@@ -11,6 +11,7 @@ import json
 import hashlib
 import subprocess
 import logging
+from dataclasses import asdict
 from functools import lru_cache
 
 from app.graphir.constraint.executor import FileOpApplier
@@ -1307,23 +1308,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     save_run_state(run_id, {"status": "apply"})
 
     # ── Aggregate refactor changes from composition_sync + substitution ──
-    all_refactor_changes: list[dict] = []
-    for rc in structural_ir.composition_sync_trace:
-        all_refactor_changes.append({
-            "change_type": rc.change_type,
-            "source": rc.source,
-            "target": rc.target,
-            "file_path": rc.file_path,
-            "reason": rc.reason,
-        })
-    for rc in sub_refactor_changes:
-        all_refactor_changes.append({
-            "change_type": rc.change_type,
-            "source": rc.source,
-            "target": rc.target,
-            "file_path": rc.file_path,
-            "reason": rc.reason,
-        })
+    all_refactor_changes = [
+        asdict(rc) for rc in structural_ir.composition_sync_trace
+    ]
+    all_refactor_changes.extend(asdict(rc) for rc in sub_refactor_changes)
 
     return {
         "execution": {
