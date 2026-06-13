@@ -35,25 +35,49 @@ from tests.e2e.conftest import seed_file
 @pytest.fixture
 def multi_timeseries_workspace(e2e_workspace):
     """Workspace con LineChart.tsx + Timeseries.tsx (misma capability)."""
-    seed_file(e2e_workspace, "LineChart.tsx",
-              "export const LineChart = () => <div>line</div>;")
-    seed_file(e2e_workspace, "Timeseries.tsx",
-              "export const Timeseries = () => <div>timeseries</div>;")
-    seed_file(e2e_workspace, "SalesOverviewPage.tsx",
-              """\
-import React from 'react';
-import { KpiRow } from '../components/dashboard/KpiRow';
-import { LineChart } from '../components/charts/LineChart';
-import { Timeseries } from '../components/charts/Timeseries';
-export const SalesOverviewPage: React.FC = () => {
+    seed_file(e2e_workspace, "LineChart.tsx", """\
+type Point = { x: number; y: number };
+type Props = { data?: Point[]; title?: string };
+export function LineChart({ data = [], title = "Line" }: Props) {
+  if (!data.length) return <div className="empty">No data</div>;
   return (
-    <div>
-      <KpiRow />
-      <LineChart />
+    <svg viewBox="0 0 400 200">
+      <polyline fill="none" stroke="blue" strokeWidth="2"
+        points={data.map((p, i) => `${i * 40},${200 - p.y}`).join(" ")}
+      />
+    </svg>
+  );
+}
+""")
+    seed_file(e2e_workspace, "Timeseries.tsx", """\
+type Point = { x: string | number; y: number };
+type Props = { data?: Point[]; title?: string };
+export function Timeseries({ data = [], title = "Trend" }: Props) {
+  if (!data.length) return <div className="empty">No data</div>;
+  return (
+    <svg viewBox="0 0 400 200">
+      <polyline fill="none" stroke="black" strokeWidth="2"
+        points={data.map((p, i) => `${i * 40},${200 - p.y * 2}`).join(" ")}
+      />
+      {data.map((point, i) => <circle key={i} cx={i * 40} cy={200 - point.y * 2} r={3} />)}
+    </svg>
+  );
+}
+""")
+    seed_file(e2e_workspace, "SalesOverviewPage.tsx", """\
+import { KpiRow } from './KpiRow';
+import { LineChart } from './LineChart';
+import { Timeseries } from './Timeseries';
+
+export function SalesOverviewPage() {
+  return (
+    <div className="page">
+      <KpiRow data={[]} />
+      <LineChart data={[]} />
       <Timeseries />
     </div>
   );
-};
+}
 """)
     subprocess.run(["git", "add", "-A"], cwd=e2e_workspace, capture_output=True)
     subprocess.run(["git", "commit", "-m", "multi-instance", "--allow-empty"],
@@ -64,15 +88,27 @@ export const SalesOverviewPage: React.FC = () => {
 @pytest.fixture
 def single_timeseries_workspace(e2e_workspace):
     """Workspace con solo Timeseries.tsx + SalesOverviewPage."""
-    seed_file(e2e_workspace, "Timeseries.tsx",
-              "export const Timeseries = () => <div>chart</div>;")
-    seed_file(e2e_workspace, "SalesOverviewPage.tsx",
-              """\
-import React from 'react';
-import { Timeseries } from '../components/charts/Timeseries';
-export const SalesOverviewPage: React.FC = () => {
+    seed_file(e2e_workspace, "Timeseries.tsx", """\
+type Point = { x: string | number; y: number };
+type Props = { data?: Point[]; title?: string };
+export function Timeseries({ data = [], title = "Trend" }: Props) {
+  if (!data.length) return <div className="empty">No data</div>;
+  return (
+    <svg viewBox="0 0 400 200">
+      <polyline fill="none" stroke="black" strokeWidth="2"
+        points={data.map((p, i) => `${i * 40},${200 - p.y * 2}`).join(" ")}
+      />
+      {data.map((point, i) => <circle key={i} cx={i * 40} cy={200 - point.y * 2} r={3} />)}
+    </svg>
+  );
+}
+""")
+    seed_file(e2e_workspace, "SalesOverviewPage.tsx", """\
+import { Timeseries } from './Timeseries';
+
+export function SalesOverviewPage() {
   return (<div><Timeseries /></div>);
-};
+}
 """)
     subprocess.run(["git", "add", "-A"], cwd=e2e_workspace, capture_output=True)
     subprocess.run(["git", "commit", "-m", "single-instance", "--allow-empty"],

@@ -26,29 +26,100 @@ from tests.e2e.conftest import seed_file
 
 
 SALES_PAGE_TSX = """\
-import React from 'react';
-import { KpiRow } from '../components/dashboard/KpiRow';
-import { Timeseries } from '../components/charts/Timeseries';
+import { KpiRow } from './KpiRow';
+import { Timeseries } from './Timeseries';
+import { LineChart } from './LineChart';
+import { BarChart } from './BarChart';
+import { DataTable } from './DataTable';
+import { useDashboardData } from './useDashboardData';
 
-export const SalesOverviewPage: React.FC = () => {
+export function SalesOverviewPage() {
+  const { kpiData, chartData, tableData, isLoading } = useDashboardData();
+  if (isLoading) return <div>Loading...</div>;
   return (
-    <div>
-      <KpiRow />
-      <Timeseries />
-      __COMPOSITION__
+    <div className="page">
+      <h1>Sales Overview</h1>
+      <KpiRow data={kpiData} />
+      <div className="charts">
+        <LineChart data={chartData.line} />
+        <BarChart data={chartData.bar} />
+        <Timeseries data={chartData.timeseries} />
+      </div>
+      <DataTable columns={tableData.columns} data={tableData.rows} />
     </div>
   );
-};
+}
 """
 
 KPI_ROW_TSX = """\
-import { KpiCard } from './KpiCard';
+interface KpiItem {
+  label: string;
+  value: string | number;
+  trend?: 'up' | 'down';
+}
 
-export const KpiRow = () => <div className="row"><KpiCard /></div>;
+interface KpiRowProps {
+  data: KpiItem[];
+}
+
+export function KpiRow({ data }: KpiRowProps) {
+  return (
+    <div className="kpi-row">
+      {data.map((item, i) => (
+        <div key={i} className="kpi-card">
+          <span className="label">{item.label}</span>
+          <span className="value">{item.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 """
 
 TIMESERIES_TSX = """\
-export const Timeseries = () => <div>chart</div>;
+type Point = {
+  x: string | number;
+  y: number;
+};
+
+type Props = {
+  data?: Point[];
+  title?: string;
+};
+
+export function Timeseries({ data = [], title = "Trend" }: Props) {
+  const width = 400;
+  const height = 200;
+  const padding = 20;
+
+  if (!data.length) {
+    return (
+      <div>
+        <div className="title">{title}</div>
+        <div className="empty">No data</div>
+      </div>
+    );
+  }
+
+  const scaleX = (i: number) =>
+    padding + (i / (data.length - 1)) * (width - padding * 2);
+  const scaleY = (v: number) =>
+    padding + (1 - (v - Math.min(...data.map(d => d.y))) / (Math.max(...data.map(d => d.y)) - Math.min(...data.map(d => d.y)) || 1)) * (height - padding * 2);
+
+  return (
+    <div>
+      <div className="title">{title}</div>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
+        <polyline fill="none" stroke="black" strokeWidth="2"
+          points={data.map((p, i) => `${scaleX(i)},${scaleY(p.y)}`).join(" ")}
+        />
+        {data.map((point, i) => (
+          <circle key={i} cx={scaleX(i)} cy={scaleY(point.y)} r={3} fill="black" />
+        ))}
+      </svg>
+    </div>
+  );
+}
 """
 
 
@@ -73,6 +144,22 @@ def _assert_verify_present(result: dict):
     else:
         assert verify is not None, "meta.verify should be present"
         assert verify.get("status") in ("passed", "skipped", "failed", "error"), f"unexpected verify status: {verify}"
+
+
+def _assert_content_quality(ops: list[dict], path_hint: str, *markers: str):
+    """Assert generated create/modify file content contains implementation markers.
+
+    Fails if the renderer produces empty stubs instead of real implementation.
+    """
+    targets = [op for op in ops if op["action"] in ("create", "modify") and path_hint in op["path"]]
+    assert targets, f"No create/modify op matching {path_hint!r} found"
+    for op in targets:
+        content = op.get("content", "")
+        for marker in markers:
+            assert marker in content, (
+                f"Content for {op['path']} missing required marker {marker!r}. "
+                "Signature override likely destroyed implementation."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -212,6 +299,8 @@ class TestAddTimeseries:
         timeseries_ops = [op for op in create_ops if "Timeseries" in op["path"]]
         assert len(timeseries_ops) >= 1
 
+        _assert_content_quality(ops, "Timeseries", "TimeseriesProps", "timeseries-chart")
+
         _assert_verify_present(result)
 
 
@@ -251,6 +340,9 @@ class TestUpdateKpiMetrics:
                          base_dir=e2e_workspace, artifacts=artifacts_dir)
         result = _apply_and_assert(ctx, confirm["plan"])
         assert result["execution"]["status"] == "ok"
+
+        ops = result["execution"]["operations"]
+        _assert_content_quality(ops, "KpiRow", "KpiRowProps", "kpi-row")
 
         _assert_verify_present(result)
 
@@ -299,6 +391,8 @@ class TestUpdateDashboard:
         ops = result["execution"].get("operations", [])
         # At minimum, should produce operations
         assert len(ops) >= 1
+
+        _assert_content_quality(ops, "SalesOverviewPage", "<KpiRow", "<Timeseries")
 
         _assert_verify_present(result)
 
