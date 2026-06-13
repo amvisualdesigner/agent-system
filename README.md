@@ -67,8 +67,8 @@ enforce_graph_purity()               ← frontera
        │
        ▼
 BackendRenderer (ReactBackend)       ← FileOp[]
-       │  - Signature override (Phase 4.5)
-       │  - Prop filtering contra prop_names
+        │  - Signature override (firmas reales del worktree)
+        │  - Prop filtering contra prop_names
        ▼
 FileOpApplier + CompositionSync (3E) ← escribe archivos
        │
@@ -87,7 +87,7 @@ Git commit (solo si verify pasa)
 | **complete_structure()** | Conciliador: dada intención + index → lifecycle por capability |
 | **GraphIRBuilder** | Materializa StructuralIR + resolution → grafo semántico |
 | **ApplyEngine** | Único punto de mezcla entre intención y realidad |
-| **ReactBackend** | GraphIR → TSX code, con override de firmas reales |
+| **ReactBackend** | GraphIR → TSX code, con override de firmas reales del worktree |
 | **VerifyWorktree** | `tsc --noEmit` post-apply, fail-closed |
 
 ---
@@ -131,44 +131,7 @@ entry ──┬→ interpret (POST /agent/interpret)
 - Reanudación via `POST /run/{id}/confirm` y `/apply`
 - SSE events: `interpretation_ready`, `plan_preview_ready`, `result`
 
----
 
-## Phase 4.5 — Component Signature Extraction (✅ COMPLETED)
-
-**Problema:** El renderer generaba tipos genéricos (`any[]`, `ReactNode`) causando `verify_failed` por type mismatch.
-
-**Solución:** Extraer interfaces reales desde `.tsx` del worktree:
-
-| Capa | Archivo | Qué hace |
-|------|---------|----------|
-| Extractor | `signature/extractor.py` | Regex sobre `.tsx`: captura interface/type blocks + `extra_types` + `prop_names` + imports |
-| Registry | `BackendConfig.component_signatures` | `{ComponentType: {props, extra_types, prop_names, imports}}` |
-| Injection | `apply_engine.py` | Antes de BackendConfig, llama `extract_signatures(workspace)` |
-| Override | `react_backend.py:_render_signature()` | Genera archivo: imports filtrados + extra_types + props_block + export |
-| Prop filtering | `_render_children()` + constraint renderer | Filtra props contra `prop_names` conocidos |
-
-**Resultado:** `tsc --noEmit` pasa sin errores de tipo. Los componentes usan interfaces reales. Props no coincidentes se filtran (seguridad, no semántica — el binding semántico es Phase 5).
-
----
-
-## Phase 5 — Semantic Prop Binding (🚀 FUTURE)
-
-**Problema:** Props filtradas = componente sin datos (`<Timeseries />` en vez de `<Timeseries data={...} />`).
-
-**Solución:** `prop_mapper.py` traduce params de contrato (`metric: "revenue"`) a props de componente (`data: fetchTimeseries("revenue")`).
-
-| Objetivo | Detalle |
-|----------|---------|
-| `PARAM_ALIASES` | `metric → data`, `metrics → data`, `timeseries_metric → data` |
-| `data_access.json` | Registro explícito: `{component: {prop: {imports, expression}}}` |
-| Template resolution | `expression: "fetchTimeseries({metric})"` resuelto desde contract_params |
-| Drift guards | 4 reglas de validación contra inconsistencia contrato ↔ data_access |
-| Import pruning | Post-pass opcional sobre imports de composición |
-| BindingResult | Warnings estructurados por categoría (`semantic_drift`, `contract_mismatch`, etc.) |
-
-Plan detallado: `tmp/phase-5-prop-binding-plan.md`
-
----
 
 ## Estructura del Proyecto
 
@@ -183,7 +146,7 @@ backend/
 │   │   └── llm_client.py      # LLM client
 │   ├── catalog/               # capability_catalog.json loader
 │   ├── state/                 # RunState persistence (JSON files by run_id)
-│   ├── signature/             # Component signature extraction (Phase 4.5)
+│   ├── signature/             # Component signature extraction
 │   │   └── extractor.py       # Regex scanner para interfaces TSX
 │   ├── engine/                # ApplyEngine, StructuralIndex, complete_structure
 │   │   ├── apply_engine.py    # Pipeline principal
@@ -195,7 +158,7 @@ backend/
 │   │   ├── pipeline.py        # GraphIRPipeline
 │   │   ├── path_resolver.py   # File path resolution
 │   │   ├── backends/          # ReactBackend + generators
-│   │   ├── constraint/        # Constraint Graph pipeline
+│   │   ├── constraint/        # Identity resolver + renderer constraint-aware
 │   │   └── structure/         # Resolver + canonicalizer
 │   ├── config/                # Settings + feature flags
 │   └── executor/              # Worktree management, file I/O
@@ -206,13 +169,15 @@ orchestrator/                   # LangGraph orquestador (interpret→confirm→a
 ui/                             # Frontend web (single HTML + Vite)
 │
 tests/
-├── intent/                    # 84 tests: interpreter, plan_compiler, state_machine, E2E
-├── e2e/                       # 26 tests E2E de pipeline
+├── unit/                      # Tests unitarios
+├── container/                 # Renderer E2E con mock
+├── intent/                    # IntentInterpreter, PlanCompiler
+├── integration/               # Multi-paso + edge cases
+├── regression/                # Content regression
+├── e2e/                       # Pipeline completo
 ├── conftest.py
 └── helpers.py
 
-tmp/                            # Planes activos
-    └── phase-5-prop-binding-plan.md
 ```
 
 ---
@@ -221,14 +186,17 @@ tmp/                            # Planes activos
 
 | Suite | Tests | Qué cubre |
 |-------|-------|-----------|
-| `tests/intent/` | 84 | Interpreter, PlanCompiler, state machine, E2E flow |
-| `tests/e2e/` | 26 | Pipeline completo (remove/add KPI, update dashboard, etc.) |
-| `tests/` (core) | 467 | Unitarios + integración (2 skipped) |
+| `tests/unit/` | Unitarios | Generadores, content regression, StructuralIndex, PlanCompiler |
+| `tests/container/` | 32 | Renderer E2E con mock de archivos (DELETE, CREATE, MODIFY) |
+| `tests/intent/` | Intent | Interpreter, PlanCompiler, state machine |
+| `tests/integration/` | Integración | Multi-paso, edge cases |
+| `tests/regression/` | Regresión | Content regression, no `_props`, no `__COMPOSITION__` |
+| `tests/e2e/` | E2E | Pipeline completo (remove/add KPI, update dashboard, etc.) |
 
 Ejecución:
 
 ```bash
-REPO_ROOT=/path/to/repo pytest tests/ -q --ignore=tests/e2e
+REPO_ROOT=/path/to/repo pytest tests/ -q
 ```
 
 ---
@@ -242,19 +210,6 @@ REPO_ROOT=/path/to/repo pytest tests/ -q --ignore=tests/e2e
 | `ARTIFACTS_DIR` | No | `/opt/agent-repos/artifacts` | Directorio de artefactos |
 | `LLM_BASE_URL` | No | `http://localhost:7000` | URL del LLM |
 | `LLM_MODEL` | No | `Qwen/Qwen2.5-Coder-3B-Instruct` | Modelo LLM |
-
-Feature flags en `config/feature_flags.py`: `structural_resolver`, `constraint_graph`, `constraint_graph_line_range`.
-
----
-
-## Feature Flags
-
-```python
-FEATURE_FLAGS = {
-    "structural_resolver": True,       # Resolución determinista de identidad
-    "constraint_graph": True,          # Pipeline constraint-aware
-}
-```
 
 ---
 
@@ -438,7 +393,7 @@ El sistema usa `Qwen/Qwen2.5-Coder-3B-Instruct`, un modelo pequeño para ejecuci
 - **Alucinación de paths:** puede inventar rutas que no existen
 - **Sin conocimiento del repositorio:** no entiende la estructura actual sin contexto explícito
 
-La estrategia del sistema para mitigar estas limitaciones no es pedirle más al LLM, sino rodearlo con capas deterministas: registry validation, GraphIR pipeline, ReactBackend, executor dumb. El LLM nunca decide directamente qué archivos crear ni qué contenido escribir — solo selecciona capability y rellena parámetros.
+La estrategia del sistema para mitigar estas limitaciones no es pedirle más al LLM, sino rodearlo con capas deterministas: registry validation, GraphIR pipeline, ReactBackend, FileOpApplier. El LLM nunca decide directamente qué archivos crear ni qué contenido escribir — solo selecciona capability y rellena parámetros.
 
 # UI prompts
 #	Prompt	Patrón que ejercita

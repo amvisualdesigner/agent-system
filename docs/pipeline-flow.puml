@@ -34,7 +34,7 @@ participant "FileOpApplier\n+ Verify" as FO #F8D7DA
 USER --> UI : "remove KPI row"
 UI --> OG : POST /run
 
-== Fase 1: Interpretar ==
+== Etapa 1: Interpretar ==
 OG --> II : interpret(message)
 II --> CAT : leer vocabulario
 CAT --> II : capabilities, sinónimos
@@ -45,7 +45,7 @@ OG --> USER : SSE: interpretation_ready
 
 USER --> OG : POST /run/{id}/confirm
 
-== Fase 2: Compilar Plan ==
+== Etapa 2: Compilar Plan ==
 OG --> PC : confirm(intent)
 PC --> PC : ConfirmedIntent + contrato → CompiledPlan
 PC --> OG : plan (skill_ir, semantic_frame, actions)
@@ -54,7 +54,7 @@ OG --> USER : SSE: plan_preview_ready
 
 USER --> OG : POST /run/{id}/apply
 
-== Fase 3: Aplicar (solo ApplyEngine) ==
+== Etapa 3: Aplicar ==
 OG --> AE : apply(confirmed_intent, plan)
 AE --> SI : StructuralIndex.from_worktree()
 SI --> AE : repo_snapshot

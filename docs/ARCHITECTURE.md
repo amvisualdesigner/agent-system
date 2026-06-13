@@ -75,26 +75,16 @@ Each operation is a dict:
 
 The `INSTANCE` action means "capability exists in repo, do not regenerate, but instantiate in container". Used for `create`-on-existing capabilities.
 
-### Execution Bifurcation: Constraint Graph vs Direct Renderer
+### Execution Path: Unified FileOp Pipeline
 
-Within `apply_engine()`, two render paths exist, gated by the `FEATURE_FLAGS["constraint_graph"]` flag:
+`apply_engine()` follows a single linear pipeline. No bifurcation:
 
-**Constraint Graph path** (when `constraint_graph=True`):
-1. `RepositoryIndexer` indexes the workspace into `file_nodes` + `component_nodes`
-2. `RepositorySemanticMemory` loads persisted identity→file mappings
-3. `IntentFileMatcher` matches GraphIR nodes to files
-4. `IdentityResolver` resolves decisions (CREATE/UPDATE/EXTEND/SPLIT)
-5. `SPLITAnalyzer` detects overloaded files needing split
-6. `detect_deletions()` finds components absent from current intent but present in memory
-7. `RepositoryAwareRenderer` produces FileOps with content generation + structural merge
-8. `memory.merge()` + `memory.save()` persist new identity mappings
+1. `ReactBackend.render()` → pure UIComponentTree → FileOp[] (create/modify)
+2. DELETE operations injected from `StructuralIR.operations` with `action=DELETE`
+3. Substitution/refactor operations from `StructuralIR` produce separate `FileOp[]` via `_redirect_imports()`
+4. All `FileOp[]` converge at `FileOpApplier.apply()` for disk writes and post-apply verification
 
-**Direct Renderer path** (when `constraint_graph=False`, the current default for most operations):
-1. `ReactBackend.render()` → pure UIComponentTree → FileOp pipeline
-2. No file indexing, no memory, no identity matching
-3. DELETE operations injected separately from `StructuralIR.operations`
 
-Both paths converge at `FileOpApplier.apply()` for disk writes and post-apply verification.
 
 ## 3. Full Pipeline Breakdown
 
@@ -331,8 +321,8 @@ Both paths converge at `FileOpApplier.apply()` for disk writes and post-apply ve
 ### FileOp
 - **File:** `backend/app/graphir/models.py`
 - **Purpose:** Atomic file operation — output contract of every renderer
-- **Fields:** `action: str` (create|modify|delete), `path: str`, `content: str`, `pipeline_route: PipelineRoute` (constraint|renderer|composition_sync|delete_inject|unknown), `metadata`
-- **Created by:** `ReactBackend.render_tree()`, `RepositoryAwareRenderer`, `FileOpExecutor`
+- **Fields:** `action: str` (create|modify|delete), `path: str`, `content: str`, `pipeline_route: PipelineRoute` (renderer|composition_sync|delete_inject), `metadata`
+- **Created by:** `ReactBackend.render_tree()`
 - **Consumed by:** `FileOpApplier.apply()` (sole mutation authority)
 
 ## 5. Mutation System
@@ -354,7 +344,7 @@ StructuralIR.operations
 - The GraphIR builder **skips** DELETE operations (no node built for deleted capability)
 - Deleted capabilities have no GraphIR node, no UI component, no file content
 - File deletion is handled by the execution layer (FileOp with `action=delete`)
-- DELETE is also detected by `detect_deletions()` in the constraint layer via state-diff: components present in persisted memory but absent from current intent
+- DELETE requires explicit user confirmation
 
 ### MODIFY Operations
 - Originate from `StructuralIR.operations` with `action=MODIFY`
@@ -395,11 +385,9 @@ StructuralIR.operations
 
 ### Route Transparency (3F)
 Each FileOp carries a `pipeline_route` label:
-- `"constraint"` — produced by constraint-aware renderer
-- `"renderer"` — produced by standard backend renderer
+- `"renderer"` — produced by backend renderer
 - `"composition_sync"` — produced by composition sync post-pass
 - `"delete_inject"` — delete operation injected by the system
-- `"unknown"` — default for legacy/unlabeled operations
 
 ## 6. File/Module Responsibilities
 
@@ -415,9 +403,9 @@ Each FileOp carries a `pipeline_route` label:
 | File | Responsibility | Inputs | Outputs |
 |------|---------------|--------|---------|
 | `structural_completion.py` | Complete_structure: SR+CR → StructuralIR. Action matching, lifecycle resolution, composition sync, anchor preservation. | SemanticResolution, ContractResolution, contract, StructuralIndex | StructuralIR |
-| `structural_index.py` | Query interface over real worktree. `from_worktree()`, `exists()`, `resolve_path()`, `get_instances()` | Workspace path | StructuralIndex dataclass |
+| `structural_index.py` | **Observational query** over real worktree. Does NOT influence lifecycle decisions — purely reports what exists. `from_worktree()`, `exists()`, `resolve_path()`, `get_instances()` | Workspace path | StructuralIndex dataclass |
 | `apply_engine.py` | Orchestrator: StructuralIndex.from_worktree() → complete_structure() → GraphIRPipeline → BindingResolver → ReactBackend → FileOpApplier. Git flow, artifact writing, verification. | run_id, plan, context | Execution result dict |
-| `state_adapter.py` | Legacy state serialization. Multi-instance support via dict[str, list[ComponentInstanceInfo]]. | Workspace structural state | Adapted state dict |
+| `state_adapter.py` | State serialization. Multi-instance support via dict[str, list[ComponentInstanceInfo]]. | Workspace structural state | Adapted state dict |
 | `aliases.py` | FILENAME_ALIASES centralization. | — | Name maps |
 | `gate.py` | Policy gate validation. | Plan, index | Gate result (blocked/allowed) |
 | `errors.py` | AmbiguousStructuralTargetError, other pipeline errors. | — | Exception classes |
@@ -446,22 +434,22 @@ Each FileOp carries a `pipeline_route` label:
 | `react_backend.py` | ReactBackend: UIComponentTree → FileOp[]. ComponentGenerator dispatch, signature override, children injection, hook hoisting. | UIComponentTree + BackendConfig | FileOp[] |
 
 ### `backend/app/graphir/constraint/`
-| File | Responsibility |
-|------|---------------|
-| `context.py` | ExecutionContext, PipelineState, RenderContext — formal execution isolation |
-| `executor.py` | FileOpExecutor (pure EditOperation→FileOp computation) and FileOpApplier (sole mutation authority, atomic writes) |
-| `deletion.py` | detect_deletions() — state-diff based component removal (pure, no IO) |
-| `renderer.py` | RepositoryAwareRenderer — produces FileOps from decisions, content generation, structural merge |
-| `diff.py` | StructuralDiffEngine, BoundaryValidator — edit operations |
-| `generator.py` | ContentGenerator — pure content generation |
-| `models.py` | Decision, FileOpDecision, MemoryRecord, DeletionRecord, etc. |
-| `identity.py` | CanonicalIdentity, build_identities |
-| `resolver.py` | IdentityResolver |
-| `memory.py` | RepositorySemanticMemory |
-| `crl.py` | ConflictResolutionLayer |
-| `indexer.py` | RepositoryIndexer |
-| `matcher.py` | Identity matcher |
-| `split_analyzer.py` | SPLITAnalyzer |
+| File | Responsibility | Status |
+|------|---------------|--------|
+| `context.py` | ExecutionContext, PipelineState, RenderContext — formal execution isolation | Active |
+| `executor.py` | FileOpExecutor (pure EditOperation→FileOp computation) and FileOpApplier (sole mutation authority, atomic writes) | Active |
+| `renderer.py` | RepositoryAwareRenderer — produces FileOps from decisions, content generation, structural merge | Active (container rendering) |
+| `resolver.py` | IdentityResolver | Active |
+| `models.py` | Decision, FileOpDecision, MemoryRecord, DeletionRecord, etc. | Active |
+| `memory.py` | RepositorySemanticMemory | Active |
+| `diff.py` | StructuralDiffEngine, BoundaryValidator — edit operations | Active |
+| `generator.py` | ContentGenerator — pure content generation | Active |
+| `identity.py` | CanonicalIdentity, build_identities | Active |
+| `matcher.py` | Identity matcher | Active |
+| `split_analyzer.py` | SPLITAnalyzer | Active |
+| `indexer.py` | RepositoryIndexer | Active |
+| `crl.py` | ConflictResolutionLayer | Active |
+
 
 ### `backend/app/binding/`
 | File | Responsibility | Inputs | Outputs |
@@ -473,16 +461,14 @@ Each FileOp carries a `pipeline_route` label:
 | File | Responsibility |
 |------|---------------|
 | `extractor.py` | Extract component signatures (props interfaces, types, imports) from .tsx files |
-| `prop_mapper.py` | PropMapper, DataSourceIR, MISSING_REQUIRED_PROPS. Legacy param aliases (deprecated in favor of BindingResolver). |
+| `prop_mapper.py` | PropMapper, DataSourceIR, MISSING_REQUIRED_PROPS. |
 
 ### `backend/app/executor/`
 | File | Responsibility | Status |
 |------|---------------|--------|
 | `worktree_manager.py` | Git worktree creation/isolation. ensure_worktree() + create_worktree(). | Active |
 | `diff_generator.py` | Generate git diff from staged changes. | Active |
-| `patch_executor.py` | Legacy file operation executor (create/modify/delete). | DEPRECATED |
-| `patch_executor_dumb.py` | Even more legacy executor. | DEPRECATED |
-| `skill_resolver.py` | Legacy skill resolution. | DEPRECATED |
+
 
 ### `backend/app/api/`
 | File | Endpoint | Responsibility |
@@ -510,8 +496,8 @@ Each FileOp carries a `pipeline_route` label:
 
 ### What triggers file deletion
 - A `StructuralIR.operation` with `action=DELETE`. The operation originates from `_resolve_action()` when the user verb is "remove"/"delete"/etc. AND the capability exists in the repo.
-- In the constraint graph layer, `detect_deletions()` via state-diff: components in persisted memory but absent from the current intent graph.
 - File deletion is executed by `FileOpApplier._apply_one()` with `fop.action="delete"`.
+- DELETE always requires an explicit user action verb.
 
 ### What triggers graph modification
 - Any CREATE or MODIFY operation in `StructuralIR.operations` causes a new or updated `GraphIRNode` in the graph.
@@ -553,6 +539,30 @@ Each FileOp carries a `pipeline_route` label:
 9. FileOpApplier.apply() → disk mutations
 10. (Optional) verify_worktree.py → tsc/build validation
 
+### Refactor streams vs lifecycle streams
+
+Refactor operations (substitution, import-redirect) live alongside lifecycle operations in
+`StructuralIR` but are **resolved independently**:
+
+- `lifecycle_ops` (CREATE/MODIFY/DELETE/KEEP) → GraphIR → UIComponentTree → FileOp[] (renderer path)
+- `substitutions` / `import_redirects` → `_redirect_imports()` → FileOp[] (inline edit path)
+- The two streams merge at `FileOpApplier.apply()` but never cross during resolution.
+
+This means a refactor (e.g. renaming an import) does NOT influence `_resolve_action()` or
+composition-sync decisions, and vice versa.
+
+### Content Regression Tests as Gate
+
+Every renderer output is guarded by `TestContentRegression` tests that assert:
+
+- No `_props` in generated content (the destructure fix)
+- No `__COMPOSITION__` placeholder strings leaked to output
+- Renderer produces `map(` for collection-based components (not `data.map`)
+- Card/container components appear in output (not raw `polyline`)
+
+These tests live in `tests/unit/test_generators_content_regression.py` and must pass before any
+structural change to generators is merged.
+
 ## 8. Glossary
 
 | Term | Definition (as used in this codebase) |
@@ -568,7 +578,7 @@ Each FileOp carries a `pipeline_route` label:
 | **instance_only** | A capability lifecycle state: KEEP action + instance_only=True. The capability exists on disk and should not be regenerated, but participates in parent composition. |
 | **Composition sync** | Post-pass that promotes parent pages to MODIFY when child capabilities are CREATE/DELETE/instance_only. |
 | **Anchor preservation** | If all capabilities would result in 0 builder nodes (no CREATE/MODIFY), the most structural capability is promoted to MODIFY/SAFE_COMPLETE to keep the graph viable. |
-| **PipelineRoute** | Label on each FileOp indicating which pipeline stage produced it: constraint, renderer, composition_sync, delete_inject, or unknown. |
+| **PipelineRoute** | Label on each FileOp indicating which pipeline stage produced it: renderer, composition_sync, or delete_inject. |
 | **MISSING_REQUIRED_PROPS** | Hard compilation error: a required prop (from component signature) has no binding resolution. Stops the pipeline. |
 | **SSOT gate** | Required Props enforcement: every prop in a component's required_props list must be present in ResolvedBindings. |
 | **Dual-write** | F0 diagnostic: both Page slices and v4 bindings are resolved independently, then compared for divergence. Does not affect output. |
