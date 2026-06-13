@@ -151,9 +151,9 @@ class TestGeneratorContent(unittest.TestCase):
 
 
 class TestSignatureOverridePath(unittest.TestCase):
-    """When a component has a signature override, the generated content
-    must use the signature interface and _props convention without
-    producing empty stubs."""
+    """Signature override enriches generated output with correct types
+    while the generator provides the implementation body (destructured
+    props, real JSX). No stub markers should appear."""
 
     def _make_signature(self, iface_name: str, props_body: str) -> dict:
         return {
@@ -161,8 +161,8 @@ class TestSignatureOverridePath(unittest.TestCase):
             "imports": ["import React from 'react';"],
         }
 
-    def test_signature_override_uses_props_convention(self):
-        """Signature path produces _props declaration and the interface."""
+    def test_signature_override_uses_generator_destructure(self):
+        """Signature path uses signature interface but generator's destructured props."""
         sig = self._make_signature("TimeseriesProps", "metric: string; title?: string;")
         config = BackendConfig(
             output_base_path="src/",
@@ -176,8 +176,9 @@ class TestSignatureOverridePath(unittest.TestCase):
         content = fileops[0].content
 
         self.assertIn("TimeseriesProps", content)
-        self.assertIn("_props", content)
-        self.assertIn("return", content)
+        self.assertNotIn("_props", content)
+        self.assertIn("{ metric }", content)
+        self.assertIn("Card", content)
         self.assertNotIn("__COMPOSITION__", content)
 
     def test_signature_override_with_extra_types(self):
@@ -195,7 +196,8 @@ class TestSignatureOverridePath(unittest.TestCase):
         content = fileops[0].content
 
         self.assertIn("KpiItem", content)
-        self.assertIn("_props", content)
+        self.assertNotIn("_props", content)
+        self.assertIn("metrics.map", content)
 
     def test_signature_override_does_not_produce_empty_body(self):
         """Body should contain meaningful content even with signature."""
@@ -213,6 +215,7 @@ class TestSignatureOverridePath(unittest.TestCase):
         self.assertIn("export const MetricCard: React.FC<MetricCardProps>", content)
         self.assertIn("return", content)
         self.assertNotIn("__COMPOSITION__", content)
+        self.assertNotIn("_props", content)
 
     def test_no_signature_fallback_never_uses_underscore_props(self):
         """Without signature override, hardcoded template uses destructured
@@ -228,6 +231,54 @@ class TestSignatureOverridePath(unittest.TestCase):
         self.assertNotIn("_props", content)
         self.assertIn("TimeseriesProps", content)
         self.assertIn("metric", content)
+
+
+# ── Regression tests: signature override must not produce empty stubs ─────
+
+class TestContentRegression(unittest.TestCase):
+    """Verify that generated code contains real implementation,
+    not stub markers from _render_signature() short-circuit."""
+
+    def _make_sig(self, iface: str, props: str) -> dict:
+        return {
+            "props": f"interface {iface} {{\n  {props}\n}}",
+            "imports": ["import React from 'react';"],
+        }
+
+    def test_kpi_row_contains_metric_rendering(self):
+        sig = self._make_sig("KpiRowProps", "data: KpiItem[];")
+        config = BackendConfig(
+            output_base_path="src/",
+            component_signatures={"KpiRow": sig},
+        )
+        tree = UIComponentTree(root=UIComponentNode(
+            id="kr1", component="KpiRow", props={},
+        ))
+        content = ReactBackend().render_tree(tree, config)[0].content
+
+        self.assertNotIn("_props", content)
+        self.assertNotIn("__COMPOSITION__", content)
+        self.assertIn("map(", content)
+
+    def test_timeseries_contains_chart_logic(self):
+        sig = self._make_sig("TimeseriesProps", "metric: string;")
+        config = BackendConfig(
+            output_base_path="src/",
+            component_signatures={"Timeseries": sig},
+        )
+        tree = UIComponentTree(root=UIComponentNode(
+            id="ts1", component="Timeseries", props={},
+        ))
+        content = ReactBackend().render_tree(tree, config)[0].content
+
+        self.assertNotIn("_props", content)
+        self.assertNotIn("__COMPOSITION__", content)
+        has_chart_markup = (
+            "svg" in content.lower()
+            or "polyline" in content.lower()
+            or "Card" in content
+        )
+        self.assertTrue(has_chart_markup, "No chart/SVG/Card markup found in generated code")
 
 
 if __name__ == "__main__":

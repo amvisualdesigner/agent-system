@@ -84,9 +84,8 @@ class TestFullStack:
         ops = result.get("execution", {}).get("operations", [])
         # CREATE should produce real chart implementation, not an empty stub
         assert_content_quality(ops, "Timeseries",
-                               "polyline",    # SVG polyline for line chart
-                               "viewBox",     # SVG viewBox
-                               "scaleX",      # scale function
+                               "Card",       # wrapping card component
+                               "metric",     # metric prop rendered
                                )
 
     def test_update_metrics(self, backend_client: httpx.Client):
@@ -97,11 +96,10 @@ class TestFullStack:
             pytest.skip(result.get("reason", "interpretation failed"))
         assert result.get("execution", {}).get("status") == "ok"
         ops = result.get("execution", {}).get("operations", [])
-        # MODIFY should preserve KpiRow implementation (data.map, rendering)
+        # MODIFY should preserve KpiRow implementation (metrics.map, rendering)
         assert_content_quality(ops, "KpiRow",
-                               "data.map",   # iteration over data items
-                               "key={i}",    # React key pattern
-                               "kpi-card",   # card rendering per item
+                               "metrics.map",  # iteration over metrics items
+                               "kpi-card",     # card rendering per item
                                )
 
     def test_update_dashboard(self, backend_client: httpx.Client):

@@ -538,10 +538,16 @@ def _build_signature_prefix(node_type: str, config: BackendConfig) -> tuple[str 
     return None, None, None
 
 
-def _render_signature(node_type: str, config: BackendConfig, body_lines: list[str]) -> str | None:
+def _render_signature(
+    node_type: str,
+    config: BackendConfig,
+    body_lines: list[str],
+    destructure: str = "_props",
+) -> str | None:
     """Build full file content from signature override, or None if not available.
 
     Produces: imports + blank + extra_types + props_block + export_with_body
+    ``destructure`` controls the parameter pattern, e.g. ``"{ metrics }"`` or ``""``.
     """
     sig = (config.component_signatures or {}).get(node_type, {})
     if not sig or not sig.get("props"):
@@ -552,8 +558,6 @@ def _render_signature(node_type: str, config: BackendConfig, body_lines: list[st
 
     lines: list[str] = []
     imps = sig.get("imports", [])
-    # Only keep imports that the stub body actually uses: React, type imports.
-    # Drop CSS modules (<...>.css), local component imports, and unused bindings.
     kept_imports: list[str] = []
     for imp in imps:
         if "from 'react'" in imp or 'from "react"' in imp:
@@ -570,7 +574,8 @@ def _render_signature(node_type: str, config: BackendConfig, body_lines: list[st
         lines.append("")
     lines.append(sig["props"])
     lines.append("")
-    lines.append(f"export const {node_type}: React.FC<{iface}> = (_props) => {{")
+    params = destructure if destructure else ""
+    lines.append(f"export const {node_type}: React.FC<{iface}> = ({params}) => {{")
     lines.extend(f"  {l}" if l else "" for l in body_lines)
     lines.append("};")
     lines.append("")
@@ -591,7 +596,7 @@ def _generate_page(
         f"    {close_tag}",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="")
     if sig:
         return sig
 
@@ -616,17 +621,6 @@ def _generate_kpi_row(
     backend: ReactBackend,
     config: BackendConfig,
 ) -> str:
-    body = [
-        "  return (",
-        '    <div className="kpi-row">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
     map_block = (
         '{metrics.map((m) => (\n'
         '      <Card key={m}>\n'
@@ -636,6 +630,16 @@ def _generate_kpi_row(
         '      </Card>\n'
         '    ))}'
     )
+    body = [
+        "  return (",
+        '    <div className="kpi-row">',
+        map_block,
+        "    </div>",
+        "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ metrics }")
+    if sig:
+        return sig
 
     lines = [
         "import React from 'react';",
@@ -646,11 +650,7 @@ def _generate_kpi_row(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ metrics }}) => {{",
-        "  return (",
-        '    <div className="kpi-row">',
-        map_block,
-        "    </div>",
-        "  );",
+        *body,
         "};",
         "",
     ]
@@ -665,12 +665,14 @@ def _generate_timeseries(
 ) -> str:
     body = [
         "  return (",
-        '    <div className="timeseries-wrapper">',
-        "      __COMPOSITION__",
-        "    </div>",
+        "    <Card>",
+        '      <div className="timeseries-chart">',
+        '        <h3>{metric} over time</h3>',
+        "      </div>",
+        "    </Card>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="{ metric }")
     if sig:
         return sig
 
@@ -683,13 +685,7 @@ def _generate_timeseries(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ metric }}) => {{",
-        "  return (",
-        "    <Card>",
-        '      <div className="timeseries-chart">',
-        '        <h3>{metric} over time</h3>',
-        "      </div>",
-        "    </Card>",
-        "  );",
+        *body,
         "};",
         "",
     ]
@@ -704,26 +700,6 @@ def _generate_analytics_table(
 ) -> str:
     body = [
         "  return (",
-        '    <div className="analytics-table-wrapper">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
-    lines = [
-        "import React from 'react';",
-        "import { Card } from '@/components/ui/Card';",
-        "",
-        f"interface {node.type}Props {{",
-        "  columns: string[];",
-        "  rows: Record<string, any>[];",
-        "}",
-        "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ columns, rows = [] }}) => {{",
-        "  return (",
         "    <Card>",
         '      <table className="analytics-table">',
         "        <thead>",
@@ -737,10 +713,25 @@ def _generate_analytics_table(
         '              {columns.map(c => <td key={c}>{row[c] ?? "\u2014"}</td>)}',
         "            </tr>",
         "          ))}",
-        "        </tbody>",
         "      </table>",
         "    </Card>",
         "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ columns, rows = [] }")
+    if sig:
+        return sig
+
+    lines = [
+        "import React from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  columns: string[];",
+        "  rows: Record<string, any>[];",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ columns, rows = [] }}) => {{",
+        *body,
         "};",
         "",
     ]
@@ -757,25 +748,6 @@ def _generate_filter_panel(
     config: BackendConfig,
 ) -> str:
     body = [
-        "  return (",
-        '    <div className="filter-panel">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
-    lines = [
-        "import React, { useState } from 'react';",
-        "import { Card } from '@/components/ui/Card';",
-        "",
-        f"interface {node.type}Props {{",
-        "  filters?: string[];",
-        "}",
-        "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ filters = [] }}) => {{",
         "  const [active, setActive] = useState<string[]>([]);",
         "  return (",
         "    <Card>",
@@ -797,6 +769,21 @@ def _generate_filter_panel(
         "      </div>",
         "    </Card>",
         "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ filters = [] }")
+    if sig:
+        return sig
+
+    lines = [
+        "import React, { useState } from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  filters?: string[];",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ filters = [] }}) => {{",
+        *body,
         "};",
         "",
     ]
@@ -810,26 +797,6 @@ def _generate_bar_chart(
     config: BackendConfig,
 ) -> str:
     body = [
-        "  return (",
-        '    <div className="bar-chart">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
-    lines = [
-        "import React from 'react';",
-        "import { Card } from '@/components/ui/Card';",
-        "",
-        f"interface {node.type}Props {{",
-        "  categories?: string[];",
-        "  values?: number[];",
-        "}",
-        "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ categories = [], values = [] }}) => {{",
         "  const max = Math.max(...values, 1);",
         "  return (",
         "    <Card>",
@@ -845,6 +812,22 @@ def _generate_bar_chart(
         "      </div>",
         "    </Card>",
         "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ categories = [], values = [] }")
+    if sig:
+        return sig
+
+    lines = [
+        "import React from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  categories?: string[];",
+        "  values?: number[];",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ categories = [], values = [] }}) => {{",
+        *body,
         "};",
         "",
     ]
@@ -859,12 +842,15 @@ def _generate_metric_card(
 ) -> str:
     body = [
         "  return (",
-        '    <div className="metric-card">',
-        "      __COMPOSITION__",
-        "    </div>",
+        "    <Card>",
+        '      <div className="metric-card">',
+        '        {value !== undefined && <span className="metric-value">{value}</span>}',
+        '        {label && <span className="metric-label">{label}</span>}',
+        "      </div>",
+        "    </Card>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="{ value, label }")
     if sig:
         return sig
 
@@ -878,14 +864,7 @@ def _generate_metric_card(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ value, label }}) => {{",
-        "  return (",
-        "    <Card>",
-        '      <div className="metric-card">',
-        '        {value !== undefined && <span className="metric-value">{value}</span>}',
-        '        {label && <span className="metric-label">{label}</span>}',
-        "      </div>",
-        "    </Card>",
-        "  );",
+        *body,
         "};",
         "",
     ]
@@ -900,12 +879,12 @@ def _generate_embed(
 ) -> str:
     body = [
         "  return (",
-        '    <div className="embed-container">',
-        "      __COMPOSITION__",
+        "    <div className=\"embed-container\">",
+        '      {src ? <iframe src={src} title={title ?? "embedded content"} /> : null}',
         "    </div>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="{ src, title }")
     if sig:
         return sig
 
@@ -918,16 +897,11 @@ def _generate_embed(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ src, title }}) => {{",
-        "  return (",
-        "    <div className=\"embed-container\">",
-        '      {src ? <iframe src={src} title={title ?? "embedded content"} /> : null}',
-        "    </div>",
-        "  );",
+        *body,
         "};",
         "",
     ]
     return "\n".join(lines)
-
 
 def _generate_search_bar(
     node: GraphIRNode,
@@ -936,25 +910,6 @@ def _generate_search_bar(
     config: BackendConfig,
 ) -> str:
     body = [
-        "  return (",
-        '    <div className="search-bar">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
-    lines = [
-        "import React, { useState } from 'react';",
-        "",
-        f"interface {node.type}Props {{",
-        "  placeholder?: string;",
-        "  onSearch?: (query: string) => void;",
-        "}",
-        "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ placeholder = 'Search...', onSearch }}) => {{",
         "  const [query, setQuery] = useState('');",
         "  return (",
         '    <div className="search-bar">',
@@ -967,6 +922,21 @@ def _generate_search_bar(
         "      <button onClick={() => onSearch?.(query)}>Search</button>",
         "    </div>",
         "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ placeholder = 'Search...', onSearch }")
+    if sig:
+        return sig
+
+    lines = [
+        "import React, { useState } from 'react';",
+        "",
+        f"interface {node.type}Props {{",
+        "  placeholder?: string;",
+        "  onSearch?: (query: string) => void;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ placeholder = 'Search...', onSearch }}) => {{",
+        *body,
         "};",
         "",
     ]
@@ -980,26 +950,6 @@ def _generate_form(
     config: BackendConfig,
 ) -> str:
     body = [
-        "  return (",
-        '    <div className="form-wrapper">',
-        "      __COMPOSITION__",
-        "    </div>",
-        "  );",
-    ]
-    sig = _render_signature(node.type, config, body)
-    if sig:
-        return sig
-
-    lines = [
-        "import React, { useState } from 'react';",
-        "import { Card } from '@/components/ui/Card';",
-        "",
-        f"interface {node.type}Props {{",
-        "  fields?: { label: string; key: string; type: string }[];",
-        "  onSubmit?: (data: Record<string, string>) => void;",
-        "}",
-        "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ fields = [], onSubmit }}) => {{",
         "  const [data, setData] = useState<Record<string, string>>({});",
         "  return (",
         "    <Card>",
@@ -1018,11 +968,26 @@ def _generate_form(
         "      </form>",
         "    </Card>",
         "  );",
+    ]
+    sig = _render_signature(node.type, config, body, destructure="{ fields = [], onSubmit }")
+    if sig:
+        return sig
+
+    lines = [
+        "import React, { useState } from 'react';",
+        "import { Card } from '@/components/ui/Card';",
+        "",
+        f"interface {node.type}Props {{",
+        "  fields?: { label: string; key: string; type: string }[];",
+        "  onSubmit?: (data: Record<string, string>) => void;",
+        "}",
+        "",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({{ fields = [], onSubmit }}) => {{",
+        *body,
         "};",
         "",
     ]
     return "\n".join(lines)
-
 
 def _generate_export_button(
     node: GraphIRNode,
@@ -1033,11 +998,11 @@ def _generate_export_button(
     body = [
         "  return (",
         '    <div className="export-button">',
-        "      __COMPOSITION__",
+        "      <button onClick={onExport}>Export as {format.toUpperCase()}</button>",
         "    </div>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="{ format = 'csv', onExport }")
     if sig:
         return sig
 
@@ -1050,16 +1015,11 @@ def _generate_export_button(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ format = 'csv', onExport }}) => {{",
-        "  return (",
-        '    <div className="export-button">',
-        "      <button onClick={onExport}>Export as {format.toUpperCase()}</button>",
-        "    </div>",
-        "  );",
+        *body,
         "};",
         "",
     ]
     return "\n".join(lines)
-
 
 def _generate_drilldown(
     node: GraphIRNode,
@@ -1069,12 +1029,16 @@ def _generate_drilldown(
 ) -> str:
     body = [
         "  return (",
-        '    <div className="drilldown-link">',
-        "      __COMPOSITION__",
-        "    </div>",
+        "    <a",
+        '      className="drilldown-link"',
+        "      href={target ?? '#'}",
+        '      onClick={e => { if (!target) e.preventDefault(); }}',
+        "    >",
+        "      {label} →",
+        "    </a>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body)
+    sig = _render_signature(node.type, config, body, destructure="{ label = 'View details', target }")
     if sig:
         return sig
 
@@ -1087,15 +1051,7 @@ def _generate_drilldown(
         "}",
         "",
         f"export const {node.type}: React.FC<{node.type}Props> = ({{ label = 'View details', target }}) => {{",
-        "  return (",
-        "    <a",
-        '      className="drilldown-link"',
-        "      href={target ?? '#'}",
-        '      onClick={e => { if (!target) e.preventDefault(); }}',
-        "    >",
-        "      {label} →",
-        "    </a>",
-        "  );",
+        *body,
         "};",
         "",
     ]
