@@ -43,8 +43,8 @@ def e2e_workspace():
 
 PAGE_TSX_CONTENT = """\
 import React from 'react';
-import { Timeseries } from './components/Timeseries';
-import { KpiRow } from './components/KpiRow';
+import { Timeseries } from '../components/Timeseries';
+import { KpiRow } from '../components/KpiRow';
 import { useDashboardData } from '../../hooks/useDashboardData';
 
 interface PageProps {}
@@ -134,6 +134,7 @@ def _init_git_workspace(prefix: str) -> str:
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmpdir, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, capture_output=True)
     os.makedirs(os.path.join(tmpdir, "src", "pages", "dashboard", "components"), exist_ok=True)
+    os.makedirs(os.path.join(tmpdir, "src", "components"), exist_ok=True)
     os.makedirs(os.path.join(tmpdir, "src", "hooks"), exist_ok=True)
     return tmpdir
 
@@ -148,9 +149,9 @@ def composition_workspace():
     """Full workspace: Page + KpiRow + Timeseries + LineChart."""
     tmpdir = _init_git_workspace("comp_")
     seed_file(tmpdir, "src/pages/dashboard/Page.tsx", PAGE_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/KpiRow.tsx", KPI_ROW_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/Timeseries.tsx", TIMESERIES_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/LineChart.tsx", LINECHART_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/KpiRow.tsx", KPI_ROW_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/Timeseries.tsx", TIMESERIES_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/LineChart.tsx", LINECHART_TSX_CONTENT)
     _seed_and_commit(tmpdir, "seed full workspace")
     yield tmpdir
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -161,7 +162,7 @@ def create_workspace():
     """Workspace with Page + LineChart, NO KpiRow — CREATE will bring it back."""
     tmpdir = _init_git_workspace("create_")
     seed_file(tmpdir, "src/pages/dashboard/Page.tsx", PAGE_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/LineChart.tsx", LINECHART_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/LineChart.tsx", LINECHART_TSX_CONTENT)
     _seed_and_commit(tmpdir, "seed create workspace")
     yield tmpdir
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -172,8 +173,8 @@ def replace_workspace():
     """Workspace with Page + Timeseries + LineChart, NO KpiRow — REPLACE creates it."""
     tmpdir = _init_git_workspace("replace_")
     seed_file(tmpdir, "src/pages/dashboard/Page.tsx", PAGE_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/Timeseries.tsx", TIMESERIES_TSX_CONTENT)
-    seed_file(tmpdir, "src/pages/dashboard/components/LineChart.tsx", LINECHART_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/Timeseries.tsx", TIMESERIES_TSX_CONTENT)
+    seed_file(tmpdir, "src/components/LineChart.tsx", LINECHART_TSX_CONTENT)
     _seed_and_commit(tmpdir, "seed replace workspace")
     yield tmpdir
     shutil.rmtree(tmpdir, ignore_errors=True)

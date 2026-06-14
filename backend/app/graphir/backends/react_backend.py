@@ -525,6 +525,40 @@ def _sig_iface_name(sig: dict) -> str | None:
     return m.group(1) if m else None
 
 
+def _reconcile_destructure(
+    sig: dict | None,
+    hardcoded: str,
+    body_lines: list[str],
+) -> tuple[str, list[str]]:
+    """Reconcile hardcoded destructure param names with signature prop_names.
+
+    When a signature says prop_names=["data"] but the generator hardcodes
+    "{ metrics }", replace ``metrics`` with ``data`` in both the
+    destructure and body_lines so they match the real interface.
+
+    Returns (new_destructure, updated_body_lines).
+    """
+    prop_names = (sig or {}).get("prop_names", [])
+    if not prop_names:
+        return hardcoded, body_lines
+
+    inner = hardcoded.strip("{} ")
+    old_names = [p.split("=")[0].split(":")[0].strip()
+                 for p in inner.split(",") if p.strip()]
+
+    new_body = list(body_lines)
+    new_parts: list[str] = []
+
+    for i, old in enumerate(old_names):
+        new_n = prop_names[i] if i < len(prop_names) else old
+        new_parts.append(new_n)
+        if old != new_n:
+            new_body = [line.replace(old, new_n) for line in new_body]
+
+    new_parts.extend(prop_names[len(old_names):])
+    return "{" + ", ".join(new_parts) + "}", new_body
+
+
 def _build_signature_prefix(node_type: str, config: BackendConfig) -> tuple[str | None, str | None, list[str] | None]:
     """Return (props_block, iface_name, extra_types_lines) from config signatures, or (None, None, None)."""
     sig = (config.component_signatures or {}).get(node_type, {})
@@ -637,19 +671,21 @@ def _generate_kpi_row(
         "    </div>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body, destructure="{ metrics }")
-    if sig:
-        return sig
+    sig = (config.component_signatures or {}).get(node.type)
+    destructure, body = _reconcile_destructure(sig, "{ metrics }", body)
+    rendered = _render_signature(node.type, config, body, destructure=destructure)
+    if rendered:
+        return rendered
 
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
         "",
         f"interface {node.type}Props {{",
-        "  metrics: string[];",
+        "  data: KpiItem[];",
         "}",
         "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ metrics }}) => {{",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({destructure}) => {{",
         *body,
         "};",
         "",
@@ -672,19 +708,21 @@ def _generate_timeseries(
         "    </Card>",
         "  );",
     ]
-    sig = _render_signature(node.type, config, body, destructure="{ metric }")
-    if sig:
-        return sig
+    sig = (config.component_signatures or {}).get(node.type)
+    destructure, body = _reconcile_destructure(sig, "{ metric }", body)
+    rendered = _render_signature(node.type, config, body, destructure=destructure)
+    if rendered:
+        return rendered
 
     lines = [
         "import React from 'react';",
         "import { Card } from '@/components/ui/Card';",
         "",
         f"interface {node.type}Props {{",
-        "  metric: string;",
+        "  data: TimeseriesDataPoint[];",
         "}",
         "",
-        f"export const {node.type}: React.FC<{node.type}Props> = ({{ metric }}) => {{",
+        f"export const {node.type}: React.FC<{node.type}Props> = ({destructure}) => {{",
         *body,
         "};",
         "",
