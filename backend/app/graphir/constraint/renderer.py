@@ -20,7 +20,9 @@ Phase 6b (Composition Materialization):
 from __future__ import annotations
 
 import os
+import re
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.binding.models import ResolvedBindings
@@ -44,6 +46,133 @@ from app.graphir.constraint.context import RenderContext, PipelineState
 from app.config.feature_flags import FEATURE_FLAGS
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StructuralPatch:
+    """Parche estructural para aplicar a un componente existente durante MODIFY.
+
+    No contiene TSX — solo las piezas que MODIFY posee (bindings + data wiring).
+    El renderer aplica esto sobre el contenido existente sin invocar al generador.
+    """
+    component_type: str
+    props_interface: str | None = None
+    extra_types: list[str] = field(default_factory=list)
+    data_imports: list[str] = field(default_factory=list)
+    rename_map: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_interface_block(content: str, component_type: str) -> tuple[int, int, str]:
+    """Find interface/type block for component_type in content.
+    Returns (start_line, end_line, block_text) or raises ValueError."""
+    pattern = re.compile(
+        rf'(interface\s+{re.escape(component_type)}Props\s*{{[^}}]+}})',
+        re.DOTALL,
+    )
+    match = pattern.search(content)
+    if not match:
+        raise ValueError(f"No interface block found for {component_type}")
+    start = content[:match.start()].count("\n")
+    end = start + match.group().count("\n")
+    return start, end, match.group(1)
+
+
+def _insert_after_interface(text: str, block: str) -> str:
+    """Insert a type/interface block after the last interface block in text."""
+    iface_end = text.rfind("\n}\n")
+    if iface_end == -1:
+        return text + "\n" + block + "\n"
+    next_nl = text.find("\n", iface_end + 1)
+    if next_nl == -1:
+        return text + "\n" + block + "\n"
+    return text[:next_nl + 1] + block + "\n" + text[next_nl + 1:]
+
+
+def _insert_import(text: str, imp: str) -> str:
+    """Insert a new import line after the last React import."""
+    lines = text.split("\n")
+    last_react_idx = -1
+    for i, line in enumerate(lines):
+        if "from 'react'" in line or 'from "react"' in line:
+            last_react_idx = i
+    insert_at = last_react_idx + 1 if last_react_idx >= 0 else 0
+    lines.insert(insert_at, imp)
+    return "\n".join(lines)
+
+
+def _build_modify_patch(
+    component_type: str,
+    sig: dict | None,
+    data_imports: list[str],
+) -> StructuralPatch:
+    """Build a StructuralPatch from signature + shared COMPONENT_DESTRUCTURE registry.
+
+    No generator call — all data comes from existing structures.
+    """
+    if not sig or not sig.get("props"):
+        return StructuralPatch(component_type=component_type)
+
+    from app.graphir.backends.react_backend import COMPONENT_DESTRUCTURE, _reconcile_destructure
+
+    hardcoded = COMPONENT_DESTRUCTURE.get(component_type, "_props")
+    destructure_str = "{" + hardcoded + "}"
+
+    _, _, rename_map = _reconcile_destructure(
+        sig, destructure_str, [], return_map=True,
+    )
+
+    return StructuralPatch(
+        component_type=component_type,
+        props_interface=sig.get("props"),
+        extra_types=sig.get("extra_types", []),
+        data_imports=data_imports,
+        rename_map=rename_map,
+    )
+
+
+def apply_patch(existing_content: str, patch: StructuralPatch) -> str:
+    """Apply a StructuralPatch to existing file content.
+
+    Operates on structural blocks (interface, imports, export) not on
+    global regex over file text. The only regex-based step (rename_map)
+    is scoped to word-boundary replacements of known prop names.
+    """
+    lines = existing_content.split("\n")
+
+    # ── Block 1: Interface replacement (structural block) ──
+    if patch.props_interface:
+        try:
+            old_start, old_end, _ = _parse_interface_block(
+                existing_content, patch.component_type,
+            )
+            lines[old_start:old_end + 1] = patch.props_interface.split("\n")
+        except ValueError:
+            logger.warning("No interface block found for %s — skipping", patch.component_type)
+
+    # ── Block 2: Extra type injection (structural insertion) ──
+    if patch.extra_types:
+        text = "\n".join(lines)
+        for et in patch.extra_types:
+            if et.strip() not in text:
+                text = _insert_after_interface(text, et)
+        lines = text.split("\n")
+
+    # ── Block 3: Data import injection (structural insertion) ──
+    if patch.data_imports:
+        text = "\n".join(lines)
+        for imp in patch.data_imports:
+            if imp.strip() not in text:
+                text = _insert_import(text, imp)
+        lines = text.split("\n")
+
+    # ── Step 4: rename_map — word-boundary scoped replacement ──
+    if patch.rename_map:
+        for i, line in enumerate(lines):
+            for old, new in patch.rename_map.items():
+                pattern = re.compile(rf'(?<!\w){re.escape(old)}(?!\w)')
+                lines[i] = pattern.sub(new, line)
+
+    return "\n".join(lines)
 
 
 class RepositoryAwareRenderer:
@@ -170,15 +299,30 @@ class RepositoryAwareRenderer:
 
             file_path = decision.target_file or FilePathResolver.resolve(ctx, config)
 
-            # 1) Generate content
-            try:
-                content = self.generator.generate(ctx, layout, config)
-            except KeyError:
-                logger.warning(
-                    "No generator for type '%s' — skipping node '%s'",
-                    ctx.type, ctx.id,
+            # 1) Generate content (or apply StructuralPatch for MODIFY)
+            # Pages with Phase 6 data flow always need the generator —
+            # StructuralPatch can't regenerate _pageData prop bindings.
+            needs_data_flow = uinode.component == "Page" and ui_tree.page_data_source
+            existing = existing_content_by_path.get(decision.target_file) if (
+                decision.decision in (Decision.UPDATE, Decision.EXTEND)
+                and not needs_data_flow
+            ) else None
+            if existing:
+                # MODIFY — no generator call, build patch from signature + registry
+                sig = (config.component_signatures or {}).get(ctx.type)
+                patch = _build_modify_patch(
+                    ctx.type, sig, list(uinode.data_imports),
                 )
-                continue
+                content = apply_patch(existing, patch)
+            else:
+                try:
+                    content = self.generator.generate(ctx, layout, config)
+                except KeyError:
+                    logger.warning(
+                        "No generator for type '%s' — skipping node '%s'",
+                        ctx.type, ctx.id,
+                    )
+                    continue
 
             # PR3: props come from ResolvedBindings.component_props (set in compiler).
             page_hook_decl: str | None = None

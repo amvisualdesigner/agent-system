@@ -362,6 +362,94 @@ class TestPhase6DataFlowWithRealRepo:
         finally:
             shutil.rmtree(artifacts_tmp, ignore_errors=True)
 
+    def test_orphan_create_mounts_into_anchor(self, phase6_repo_copy):
+        """CREATE orphan component (e.g. FilterPanel) must be mounted into
+        an existing anchor file (layout/page/section) via Anchor Resolution.
+
+        This is the critical cross-contract scenario that was broken for
+        weeks: the system must produce BOTH a CREATE op for the component
+        AND a MODIFY op for the anchor file that mounts it.
+
+        Verifies:
+          1. apply_engine succeeds (ok/verify_failed)
+          2. Operations contain CREATE for the component
+          3. Operations contain MODIFY for an existing anchor file
+          4. The modified file contains the component import and JSX
+        """
+        from app.engine.apply_engine import apply_engine
+        from app.runtime.context import RunContext
+        from app.intent.models import ConfirmedIntent, IntentAction
+        from app.intent.plan_compiler import compile_plan
+
+        # Create a FilterPanel — orphan component (no Page parent in contract)
+        confirmed = ConfirmedIntent(
+            contract_id="analytics.filter",
+            contract_version=1,
+            actions=[
+                IntentAction(
+                    verb="create", target_capability="presentation.filter_panel",
+                    params={"filters": ["region", "channel"]},
+                ),
+            ],
+            params={"filters": ["region", "channel"]},
+            user_message="Add a filter panel for region and channel",
+            interpretation_id="e2e-anchor-resolver",
+        )
+        plan = compile_plan(confirmed)
+
+        artifacts_tmp = tempfile.mkdtemp(prefix="artifacts_anchor_", dir=settings.ARTIFACTS_DIR)
+        ctx = RunContext(
+            run_id=str(uuid.uuid4()),
+            base_dir=phase6_repo_copy,
+            workspace=phase6_repo_copy,
+            artifacts=artifacts_tmp,
+        )
+
+        try:
+            result = apply_engine(ctx.run_id, plan.to_dict(), ctx, dry_run=False)
+            assert result["execution"]["status"] in ("ok", "verify_failed"), (
+                f"Expected ok/verify_failed, got {result['execution']['status']}"
+            )
+
+            ops = result["execution"]["operations"]
+
+            # 1. There must be a CREATE op for FilterPanel
+            create_filters = [
+                op for op in ops
+                if op["action"] == "create" and "FilterPanel" in op.get("path", "")
+            ]
+            assert len(create_filters) >= 1, (
+                f"No CREATE FilterPanel found in operations: "
+                f"{[op.get('path') for op in ops]}"
+            )
+
+            # 2. There must be a MODIFY op for an existing anchor file
+            modify_ops = [op for op in ops if op["action"] == "modify"]
+            assert len(modify_ops) >= 1, (
+                f"No MODIFY ops found in operations: "
+                f"{[op.get('path') for op in ops]}"
+            )
+
+            # 3. The modified file content must contain FilterPanel reference
+            anchor_path = modify_ops[0]["path"]
+            abs_path = os.path.join(phase6_repo_copy, anchor_path)
+            if os.path.exists(abs_path):
+                with open(abs_path) as f:
+                    content = f.read()
+                assert "FilterPanel" in content, (
+                    f"Anchor file {anchor_path} should contain FilterPanel. "
+                    f"Got:\n{content}"
+                )
+            else:
+                # Content might be in the op itself
+                content = modify_ops[0].get("content", "")
+                assert "FilterPanel" in content, (
+                    f"MODIFY op for {anchor_path} should contain FilterPanel. "
+                    f"Got:\n{content}"
+                )
+        finally:
+            shutil.rmtree(artifacts_tmp, ignore_errors=True)
+
     def test_phase6_compilation(self, phase6_repo_copy):
         """Generated Page.tsx with Phase 6 data flow must compile under tsc --noEmit."""
         from app.engine.apply_engine import apply_engine

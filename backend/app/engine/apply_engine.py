@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import re
 import subprocess
 import logging
 from dataclasses import asdict
@@ -50,6 +51,226 @@ from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 
 logger = logging.getLogger(__name__)
+
+
+def _inject_component_into_page(
+    page_path: str,
+    component_path: str,
+    workspace: str,
+) -> str | None:
+    """Inject import and JSX mount for a component into an existing Page file.
+
+    Returns modified content or None if the Page can't be read/modified.
+    """
+    abs_page = os.path.join(workspace, page_path)
+    if not os.path.isfile(abs_page):
+        return None
+
+    with open(abs_page) as f:
+        content = f.read()
+
+    comp_name = extract_component_name(component_path)
+    if not comp_name:
+        return None
+
+    # Check if already imported
+    import_pattern = re.compile(
+        r"import\s*\{\s*" + re.escape(comp_name) + r"\s*\}\s*from\s*['\"]",
+    )
+    if import_pattern.search(content):
+        return None
+
+    # Detect frontend/ prefix from page_path and normalize component_path
+    prefix = ""
+    page_dir = os.path.dirname(page_path)
+    if page_path.startswith("frontend/") and not component_path.startswith("frontend/"):
+        prefix = "frontend/"
+    norm_component = prefix + component_path if prefix else component_path
+
+    # Compute relative import path from page dir to component
+    rel_import = os.path.relpath(
+        os.path.splitext(norm_component)[0],
+        page_dir,
+    )
+    if not rel_import.startswith("."):
+        rel_import = "./" + rel_import
+
+    import_line = f"import {{{comp_name}}} from '{rel_import}';"
+
+    # Insert import after last import statement
+    lines = content.split("\n")
+    last_import_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith("import ") and line.strip().endswith(";"):
+            last_import_idx = i
+    if last_import_idx < 0:
+        return None
+
+    lines.insert(last_import_idx + 1, import_line)
+
+    # Find mount point: inside return's JSX (before closing </div> or </>)
+    mount_tag = f"<{comp_name} />"
+    joined = "\n".join(lines)
+    div_close = joined.rfind("</div>")
+    if div_close < 0:
+        frag_close = joined.rfind("</>")
+        if frag_close < 0:
+            return None
+        close_pos = frag_close
+    else:
+        close_pos = div_close
+
+    pre_lines = [l for l in joined[:close_pos].rstrip("\n").split("\n") if l.strip()]
+    last_line = pre_lines[-1] if pre_lines else ""
+    indent = last_line[:len(last_line) - len(last_line.lstrip())]
+
+    new_joined = (
+        joined[:close_pos]
+        + "\n" + indent + mount_tag
+        + "\n" + joined[close_pos:]
+    )
+
+    return new_joined
+
+
+def _check_orphan_components_3layer(
+    fileops: list[FileOp],
+    workspace: str,
+    graph: object | None = None,
+) -> list[str]:
+    """Post-render orphan detection: warn when a CREATE file is not referenced.
+
+    3 layers (none authoritative — orphan only when ALL 3 fail):
+      1. Layer 1 (imports): existing .tsx files import the new component name.
+      2. Layer 2 (GraphIR edges): graph has edges pointing to the component.
+      3. Layer 3 (UIComponentTree): structural_index has it as a child.
+    """
+    created = [fop for fop in fileops if fop.action == "create"]
+    if not created:
+        return []
+
+    si = StructuralIndex.from_worktree(workspace)
+    prefixes = si.detect_component_prefixes() if si else {}
+    orphans: list[str] = []
+
+    for fop in created:
+        name = extract_component_name(fop.path)
+        if name is None:
+            continue
+
+        # Layer 1: imports
+        layer1 = False
+        for rel, existing_path in prefixes.items():
+            if rel == name:
+                continue
+            try:
+                abspath = os.path.join(workspace, existing_path)
+                if os.path.isfile(abspath):
+                    with open(abspath) as f:
+                        content = f.read()
+                    if f"from '{name}" in content or f'from "{name}' in content:
+                        layer1 = True
+                        break
+            except OSError:
+                continue
+
+        # Layer 2: GraphIR edges
+        layer2 = False
+        if graph is not None:
+            for edge in graph.edges:
+                target_node = graph.nodes.get(edge.target)
+                if target_node is not None and name.lower() == target_node.type.lower():
+                    layer2 = True
+                    break
+
+        # Layer 3: data_access.json composition hints
+        layer3 = False
+        data_access_path = os.path.join(workspace, "backend", "config", "data_access.json")
+        if os.path.isfile(data_access_path):
+            try:
+                with open(data_access_path) as f:
+                    da = json.load(f)
+                comp = da.get("composition", {})
+                for parent_key, parent_val in comp.items():
+                    ds = parent_val.get("dataSource", {})
+                    for slice_info in ds.get("slices", []):
+                        if slice_info.get("component") == name:
+                            layer3 = True
+                            break
+                    if layer3:
+                        break
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        if not (layer1 or layer2 or layer3):
+            orphans.append(fop.path)
+            logger.warning(
+                "Orphan component (3 layers): %s — no imports, no graph edges, "
+                "no ui tree parent", fop.path,
+            )
+
+    return orphans
+
+
+def _compose_orphan_creates_into_page(
+    fileops: list[FileOp],
+    workspace: str,
+    structural_index: StructuralIndex,
+) -> list[FileOp]:
+    """After rendering, compose orphan CREATE components into an existing Page.
+
+    When a CREATE fileop targets a non-Page component and no other fileop
+    modifies a Page, check if an existing Page.tsx exists in the workspace.
+    If so, inject import + JSX mount into that Page to compose the new component.
+
+    This handles cross-contract scenarios where a component is created
+    under a contract that doesn't define a Page parent (e.g. analytics.filter).
+    """
+    created_components = [
+        fop for fop in fileops
+        if fop.action == "create"
+        and "Page" not in extract_component_name(fop.path)
+    ]
+    if not created_components:
+        return []
+
+    # Check if any existing fileop already modifies a Page
+    has_page_modify = any(
+        fop.action == "modify" and "Page" in extract_component_name(fop.path)
+        for fop in fileops
+    )
+    if has_page_modify:
+        return []
+
+    # Find an existing Page file in the workspace
+    page_path = None
+    for cap_id in structural_index:
+        for inst in structural_index.get_instances(cap_id):
+            if inst.file_path and "Page" in os.path.basename(inst.file_path):
+                page_path = inst.file_path
+                break
+        if page_path:
+            break
+
+    if not page_path:
+        return []
+
+    page_ops: list[FileOp] = []
+    for fop in created_components:
+        new_content = _inject_component_into_page(page_path, fop.path, workspace)
+        if new_content is not None:
+            page_ops.append(FileOp(
+                action="modify",
+                path=page_path,
+                content=new_content,
+                pipeline_route="cross_contract_composition",
+            ))
+            logger.info(
+                "Cross-contract composition: injected %s into %s",
+                fop.path, page_path,
+            )
+
+    return page_ops
 
 
 def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | None, str | None]:
@@ -516,6 +737,7 @@ def _build_audit(
     render_ctx=None, emit_log=None,
     structural_ir=None, sreport=None,
     semantic_resolution=None, contract_resolution=None,
+    anchor_decisions=None,
 ) -> dict:
     """Build run artifact audit with layered trace (semantic, contract, structural, ui, execution)."""
     anomalies: list[dict] = []
@@ -706,6 +928,10 @@ def _build_audit(
             "repo_integrity": repo_integrity,
             "anomalies": anomalies,
         }
+        # Invariant: anchor_resolution is audit-output-only.
+        # It must never be read back as input to any decision.
+        if anchor_decisions:
+            output["anchor_resolution"] = anchor_decisions
         return output
 
 
@@ -1038,6 +1264,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         resolver = IdentityResolver(
             resolved_mapping=resolved_mapping,
             file_path_overrides=file_path_overrides,
+            structural_index=structural_index,
         )
         renderer = RepositoryAwareRenderer()
 
@@ -1224,6 +1451,28 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             details={"collisions": collisions},
         ).to_result()
 
+    # ── Phase: Anchor Resolution — inject CREATE components into Page ──
+    from app.engine.anchor_resolver import resolve_anchors
+    # anchor_decisions → meta.audit.anchor_resolution only (diagnostic).
+    # Invariant: never read back as input to any decision.
+    anchor_modify_ops, anchor_unresolved, anchor_decisions = resolve_anchors(
+        fileops, structural_index, context.workspace,
+    )
+    if anchor_modify_ops:
+        fileops.extend(anchor_modify_ops)
+        logger.info(
+            "ANCHOR_RESOLVER: %d MODIFY op(s) emitted for %d component(s), "
+            "%d unresolved",
+            len(anchor_modify_ops),
+            len([f for f in fileops if f.action == "create"]),
+            len(anchor_unresolved),
+        )
+    if anchor_unresolved:
+        logger.warning(
+            "ANCHOR_RESOLVER: %d component(s) unresolved: %s",
+            len(anchor_unresolved), anchor_unresolved,
+        )
+
     ok, vreason = validate_fileops(fileops)
     if not ok:
         return {
@@ -1238,6 +1487,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         "apply: contract_id=%s version=%d params=%s fileops_count=%d",
         skill_ir_obj.contract_id, skill_ir_obj.version, skill_ir_obj.params, len(fileops),
     )
+
+    # ── Orphan detection (3-layer, post-hoc — never blocks) ──
+    _check_orphan_components_3layer(fileops, context.workspace, graph)
 
     # ── Fase 4: Verify BEFORE git commit ────────────────────────────
     verify_result = None
@@ -1286,6 +1538,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         workspace_root=context.workspace,
         render_ctx=_audit_render_ctx,
         emit_log=_captured_emit_log,
+        anchor_decisions=anchor_decisions,
     )
 
     # ── Step 5: Build fidelity report ──

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -94,3 +96,38 @@ class StructuralIndex:
             return contract_id
         short_name = capability.rsplit(".", 1)[-1]
         return f"{contract_id}.{short_name}"
+
+    def detect_component_prefixes(self) -> dict[str, str]:
+        """Return {component_name: file_path} for all known component files.
+
+        Uses instance file_paths to detect the actual repo layout
+        (e.g. ``frontend/`` prefix). Only includes entries with
+        a ``.tsx`` file_path.
+        """
+        result: dict[str, str] = {}
+        for instances in self._capabilities.values():
+            for inst in instances:
+                fp = inst.file_path
+                if fp and fp.endswith(".tsx"):
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    result[name] = fp
+        return result
+
+    def most_common_component_prefix(self) -> str | None:
+        """Return the most common directory prefix among component files.
+
+        E.g. ``frontend/src/components`` if most files live under that tree.
+        Used as fallback when creating new files whose path is unknown.
+        Observational only — does not impose architecture.
+        """
+        dirs: Counter = Counter()
+        for instances in self._capabilities.values():
+            for inst in instances:
+                fp = inst.file_path
+                if fp and not fp.endswith("/"):
+                    d = os.path.dirname(fp)
+                    if d:
+                        dirs[d] += 1
+        if not dirs:
+            return None
+        return dirs.most_common(1)[0][0]

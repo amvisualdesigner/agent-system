@@ -514,6 +514,22 @@ class ReactBackend(BackendRenderer):
         return content
 
 
+# ── Component Metadata Registry (shared by CREATE and MODIFY) ──────────
+
+COMPONENT_DESTRUCTURE: dict[str, str] = {
+    "KpiRow": "metrics",
+    "Timeseries": "metric",
+    "AnalyticsTable": "columns, rows = []",
+    "BarChart": "categories = [], values = []",
+    "MetricCard": "value, label",
+    "FilterPanel": "filters = []",
+    "Embed": "src, title",
+    "SearchBar": "placeholder = 'Search...', onSearch",
+    "Form": "fields = [], onSubmit",
+    "ExportButton": "format = 'csv', onExport",
+    "Drilldown": "label = 'View details', target",
+}
+
 # ── Built-in Component Generators ──────────────────────────────────────
 
 
@@ -529,23 +545,36 @@ def _reconcile_destructure(
     sig: dict | None,
     hardcoded: str,
     body_lines: list[str],
-) -> tuple[str, list[str]]:
+    return_map: bool = False,
+) -> tuple[str, list[str]] | tuple[str, list[str], dict[str, str]]:
     """Reconcile hardcoded destructure param names with signature prop_names.
 
     When a signature says prop_names=["data"] but the generator hardcodes
     "{ metrics }", replace ``metrics`` with ``data`` in both the
     destructure and body_lines so they match the real interface.
 
-    Returns (new_destructure, updated_body_lines).
+    Args:
+        sig: Component signature dict with ``prop_names``.
+        hardcoded: Destructure string e.g. "{ metrics }".
+        body_lines: Template body lines to rename variables in.
+        return_map: If True, also return {old: new} mapping.
+
+    Returns:
+        (new_destructure, updated_body_lines) or
+        (new_destructure, updated_body_lines, rename_map) when return_map=True.
     """
     prop_names = (sig or {}).get("prop_names", [])
     if not prop_names:
-        return hardcoded, body_lines
+        return (hardcoded, body_lines, {}) if return_map else (hardcoded, body_lines)
 
     inner = hardcoded.strip("{} ")
     old_names = [p.split("=")[0].split(":")[0].strip()
                  for p in inner.split(",") if p.strip()]
 
+    if not old_names:
+        return (hardcoded, body_lines, {}) if return_map else (hardcoded, body_lines)
+
+    rename_map: dict[str, str] = {}
     new_body = list(body_lines)
     new_parts: list[str] = []
 
@@ -553,10 +582,16 @@ def _reconcile_destructure(
         new_n = prop_names[i] if i < len(prop_names) else old
         new_parts.append(new_n)
         if old != new_n:
-            new_body = [line.replace(old, new_n) for line in new_body]
+            rename_map[old] = new_n
+            pattern = re.compile(rf'(?<!\w){re.escape(old)}(?!\w)')
+            new_body = [pattern.sub(new_n, line) for line in new_body]
 
     new_parts.extend(prop_names[len(old_names):])
-    return "{" + ", ".join(new_parts) + "}", new_body
+    result = "{" + ", ".join(new_parts) + "}"
+
+    if return_map:
+        return result, new_body, rename_map
+    return result, new_body
 
 
 def _build_signature_prefix(node_type: str, config: BackendConfig) -> tuple[str | None, str | None, list[str] | None]:

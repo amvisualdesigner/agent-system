@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+from app.engine.structural_index import StructuralIndex
 from app.graphir.constraint.models import Decision, FileOpDecision, MemoryRecord
 from app.graphir.constraint.identity import CanonicalIdentity
 
@@ -53,9 +54,11 @@ class IdentityResolver:
         self,
         resolved_mapping: dict[str, MemoryRecord] | None = None,
         file_path_overrides: dict[str, str] | None = None,
+        structural_index: StructuralIndex | None = None,
     ):
         self.resolved_mapping = resolved_mapping or {}
         self.file_path_overrides = file_path_overrides or {}
+        self.structural_index = structural_index
 
     def resolve(
         self,
@@ -209,6 +212,13 @@ class IdentityResolver:
             rationale=rationale,
         )
 
-    @staticmethod
-    def _default_path(identity: CanonicalIdentity) -> str:
+    def _default_path(self, identity: CanonicalIdentity) -> str:
+        if self.structural_index is not None:
+            prefixes = self.structural_index.detect_component_prefixes()
+            name = identity.component_name
+            if name in prefixes:
+                return prefixes[name]
+            prefix = self.structural_index.most_common_component_prefix()
+            if prefix is not None:
+                return f"{prefix}/{name}.tsx"
         return f"src/components/{identity.component_name}.tsx"
