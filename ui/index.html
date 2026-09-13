@@ -153,7 +153,7 @@ code { font-size: 0.8rem; }
 </div>
 
 <form id="form">
-  <textarea id="task" rows="3" placeholder='Ej: "Create a sales dashboard showing revenue and growth metrics with timeseries"'></textarea>
+  <textarea id="task" rows="3" placeholder='Ej: "Add filter panel in sales dashboard"'></textarea>
   <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
     <label style="color:#94a3b8;font-size:0.85rem;display:flex;align-items:center;gap:4px">
       <input type="checkbox" id="dryRunCheck" checked>
@@ -255,7 +255,23 @@ function onInterpretationReady(draft) {
     const q = draft.clarification_question || "Could you provide more detail?";
     html += `<div style="color:#f59e0b;font-weight:600;margin-bottom:8px">ℹ️ Necesito más información</div>`;
     html += `<div style="color:#e2e8f0;margin-bottom:12px">${esc(q)}</div>`;
-    html += `<div style="color:#94a3b8;font-size:0.85rem;margin-bottom:8px">Refina tu mensaje arriba y vuelve a ejecutar.</div>`;
+
+    const choices = draft.choices || draft.page_context?.choices || [];
+    if (choices.length > 0) {
+      html += `<div style="margin-bottom:10px"><strong>Elige una opción:</strong></div>`;
+      html += `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">`;
+      choices.forEach((c, i) => {
+        const isCreate = c.id === "create_new";
+        const btnClass = isCreate ? "btn-success" : "btn-outline";
+        html += `<button class="${btnClass}" onclick="handlePageChoice('${esc(c.id)}', this)" style="padding:10px 18px;font-size:0.9rem">
+          ${isCreate ? "➕ " : "📄 "} ${esc(c.page || c.description)}
+        </button>`;
+      });
+      html += `</div>`;
+    } else {
+      html += `<div style="color:#94a3b8;font-size:0.85rem;margin-bottom:8px">Refina tu mensaje arriba y vuelve a ejecutar.</div>`;
+    }
+
     bodyEl("panel-interpret").innerHTML = html;
     runBtn.disabled = false;
     runBtn.textContent = "▶ Run";
@@ -578,6 +594,7 @@ form.onsubmit = async (e) => {
   if (evtSource) evtSource.close();
   panels.innerHTML = "";
   meta.innerHTML = "";
+  currentPageChoice = null;
 
   try {
     const resp = await fetch(`${ORCH}/run`, {
@@ -625,6 +642,21 @@ form.onsubmit = async (e) => {
   }
 };
 
+// ---- page context choice handler ----
+let currentPageChoice = null;
+
+function handlePageChoice(choiceId, btn) {
+  currentPageChoice = choiceId;
+  // Deshabilitar todos los botones excepto el elegido
+  const parent = btn.closest("div");
+  if (parent) {
+    parent.querySelectorAll("button").forEach(b => b.disabled = true);
+    btn.disabled = false;
+    btn.textContent = "✓ " + btn.textContent.trim();
+  }
+  handleConfirm(btn);
+}
+
 // ---- confirm handler ----
 async function handleConfirm(btn) {
   if (!runId || !currentInterpretation) return;
@@ -649,6 +681,9 @@ async function handleConfirm(btn) {
     params: interpretation.params_proposed || {},
     user_message: task.value,
   };
+  if (currentPageChoice) {
+    payload.page_context_choice = currentPageChoice;
+  }
 
   try {
     const resp = await fetch(`${ORCH}/run/${runId}/confirm`, {

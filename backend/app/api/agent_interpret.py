@@ -36,17 +36,18 @@ def agent_interpret(req: InterpretRequest):
 
     run_id = validate_run_id(req.run_id)
 
-    # Optional: load StructuralIndex snapshot for worktree_capabilities
+    # Optional: load StructuralIndex for worktree_capabilities + PageContextResolver
+    structural_index = None
     index_snapshot = None
     try:
-        from app.engine.structural_index import StructuralIndex
+        from app.engine.structural_index import StructuralIndex as _SI
         from app.runtime.context import build_context
         from app.executor.worktree_manager import ensure_worktree
 
         context = build_context(run_id)
         ensure_worktree(context)
-        idx = StructuralIndex.from_worktree(context.workspace)
-        index_snapshot = {cap: idx.resolve_all_paths(cap) for cap in idx}
+        structural_index = _SI.from_worktree(context.workspace)
+        index_snapshot = {cap: structural_index.resolve_all_paths(cap) for cap in structural_index}
         logger.info(
             "worktree_capabilities index: %d caps from workspace=%s",
             len(index_snapshot), context.workspace,
@@ -78,7 +79,34 @@ def agent_interpret(req: InterpretRequest):
             ),
         }
 
+    # ── PageContextResolver (antes de persistir) ──
+    context_decision = None
+    from app.config.feature_flags import FEATURE_FLAGS
+    if FEATURE_FLAGS.get("page_context_resolver", False) and structural_index is not None:
+        try:
+            from app.engine.page_context_resolver import resolve as resolve_page_context
+            context_decision = resolve_page_context(
+                user_message=req.message,
+                structural_index=structural_index,
+            )
+            if context_decision.needs_clarification:
+                draft.status = "needs_clarification"
+                draft.clarification_question = (
+                    f"No encuentro una página '{context_decision.requested_context}' en el proyecto. "
+                    f"¿Dónde quieres añadir los componentes?"
+                )
+        except Exception as e:
+            logger.warning("PageContextResolver failed: %s", e)
+
     draft_dict = draft.to_dict()
+
+    # Merge page_context choices into draft_dict (not part of InterpretationDraft model)
+    if context_decision and context_decision.needs_clarification:
+        try:
+            draft_dict["choices"] = [c.to_dict() for c in context_decision.choices]
+            draft_dict["page_context"] = context_decision.to_dict()
+        except Exception:
+            pass
 
     # Persist state: store interpretation draft, transition to awaiting_confirmation
     try:

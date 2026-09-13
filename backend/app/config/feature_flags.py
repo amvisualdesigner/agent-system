@@ -12,4 +12,7 @@ FEATURE_FLAGS = {
 
     # ── Fase 4: Production shell ──
     "verify_worktree": True,              # Post-apply build verification (tsc --noEmit / npm run build)
+
+    # ── PageContextResolver ──
+    "page_context_resolver": True,        # Enable page context detection + clarification
 }

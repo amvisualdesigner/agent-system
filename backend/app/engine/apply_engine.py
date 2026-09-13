@@ -935,7 +935,7 @@ def _build_audit(
         return output
 
 
-def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict", confirmed_deletions: list[str] | None = None):
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict", confirmed_deletions: list[str] | None = None, forced_anchor_path: str | None = None):
     """Execute a plan against a workspace using the StructuralIR pipeline.
 
     Pipeline:
@@ -1457,6 +1457,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # Invariant: never read back as input to any decision.
     anchor_modify_ops, anchor_unresolved, anchor_decisions = resolve_anchors(
         fileops, structural_index, context.workspace,
+        forced_anchor_path=forced_anchor_path,
     )
     if anchor_modify_ops:
         fileops.extend(anchor_modify_ops)

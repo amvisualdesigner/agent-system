@@ -24,6 +24,7 @@ class ConfirmRequest(BaseModel):
     actions: List[Dict[str, Any]] = []
     params: Dict[str, Any] = {}
     user_message: str = ""
+    page_context_choice: str | None = None
 
 
 class ApplyRequest(BaseModel):

@@ -73,10 +73,72 @@ def _agent_apply(req: ApplyRequest):
     # Use persisted plan when none passed (state machine flow)
     plan = req.plan or state.get("compiled_plan")
 
+    # ── PageCreator pre-apply: create the page file BEFORE apply_engine ──
+    # so the anchor resolver discovers it and can be forced to use it.
+    page_creator_ops_raw = state.get("page_creator_ops", [])
+    forced_anchor_path: str | None = state.get("forced_anchor_path")
+    page_modify_ops_raw: list[dict] = []
+
+    if page_creator_ops_raw and forced_anchor_path and not req.dry_run:
+        from app.graphir.constraint.executor import FileOpApplier
+        from app.graphir.utils import FileOp
+        applier = FileOpApplier(context.workspace)
+        ops = [FileOp(**op) if isinstance(op, dict) else op for op in page_creator_ops_raw]
+        for fop in ops:
+            if fop.action == "CREATE":
+                applier.apply([fop])
+                logger.info("Applied page_creator CREATE: %s", fop.path)
+            elif fop.action == "MODIFY":
+                page_modify_ops_raw.append(fop)
+        # Rebuild context to pick up the new page file
+        context = build_context(run_id)
+        ensure_worktree(context)
+
     try:
-        result = apply_engine(run_id, plan, context, dry_run=req.dry_run, confirmed_deletions=req.confirmed_deletions)
-        transition_phase(run_id, RunPhase.COMPLETED)
-        return result
+        result = apply_engine(
+            run_id, plan, context,
+            dry_run=req.dry_run,
+            confirmed_deletions=req.confirmed_deletions,
+            forced_anchor_path=forced_anchor_path,
+        )
     except Exception as e:
         transition_phase(run_id, RunPhase.FAILED)
         raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Apply page_creator MODIFY (router) ops AFTER apply_engine ──
+    if page_modify_ops_raw and not req.dry_run:
+        try:
+            from app.graphir.constraint.executor import FileOpApplier
+            from app.graphir.utils import FileOp
+            applier = FileOpApplier(context.workspace)
+            for fop in page_modify_ops_raw:
+                applier.apply([fop])
+            logger.info("Applied %d page_creator MODIFY ops for run_id=%s", len(page_modify_ops_raw), run_id)
+            existing = result.get("fileops", [])
+            result["fileops"] = existing + [op.to_dict() if hasattr(op, 'to_dict') else op for op in page_modify_ops_raw]
+        except Exception as e:
+            logger.warning("Failed to apply page_creator MODIFY ops: %s", e)
+            result["page_creator_warning"] = str(e)
+
+    # ── Backward compat: apply page_creator_ops after apply_engine
+    #    when forced_anchor_path is not set (old confirm state) ──
+    if page_creator_ops_raw and not forced_anchor_path and not req.dry_run:
+        try:
+            from app.graphir.constraint.executor import FileOpApplier
+            from app.graphir.utils import FileOp
+            applier = FileOpApplier(context.workspace)
+            ops = [FileOp(**op) if isinstance(op, dict) else op for op in page_creator_ops_raw]
+            for fop in ops:
+                applier.apply([fop])
+            logger.info("Applied %d page_creator_ops (backward compat) for run_id=%s", len(ops), run_id)
+            existing = result.get("fileops", [])
+            result["fileops"] = existing + [op.to_dict() if hasattr(op, 'to_dict') else op for op in ops]
+        except Exception as e:
+            logger.warning("Failed to apply page_creator_ops (backward compat): %s", e)
+            result["page_creator_warning"] = str(e)
+
+    if page_creator_ops_raw and req.dry_run:
+        result["page_creator_ops"] = page_creator_ops_raw
+
+    transition_phase(run_id, RunPhase.COMPLETED)
+    return result

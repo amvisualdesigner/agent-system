@@ -44,6 +44,7 @@ class ConfirmRequest(BaseModel):
     actions: list[dict] = []
     params: dict = {}
     user_message: str = ""
+    page_context_choice: str | None = None
 
 
 @router.post("/agent/confirm")
@@ -86,6 +87,26 @@ def _agent_confirm(req: ConfirmRequest):
             "reason": f"Cannot confirm in phase '{current_phase.value}'. Expected 'awaiting_confirmation' or 'confirmed'.",
             "gate": {"blocked": True, "reason": "wrong_phase"},
         }
+
+    # ── Clarification guard: do not confirm if interpretation still needs clarification ──
+    draft = state.get("interpretation_draft", {})
+    draft_status = draft.get("status") if isinstance(draft, dict) else None
+    if draft_status == "needs_clarification":
+        has_choices = bool(draft.get("choices"))
+        has_page_choice = bool(req.page_context_choice)
+        if has_choices and not has_page_choice:
+            return {
+                "status": "rejected",
+                "reason": "Clarification required: choose a page context via page_context_choice.",
+                "gate": {"blocked": True, "reason": "needs_clarification"},
+            }
+        if not has_choices:
+            return {
+                "status": "rejected",
+                "reason": "Clarification required: rephrase your request first.",
+                "gate": {"blocked": True, "reason": "needs_clarification"},
+            }
+        # If user provided page_context_choice, clarification is resolved — proceed
 
     # Validate contract exists
     contract = get_contract(req.contract_id, req.contract_version)
@@ -200,6 +221,34 @@ def _agent_confirm(req: ConfirmRequest):
         ],
     }
 
+    # ── PageCreator: if user chose create_new, generate page ops ──
+    page_creator_ops: list[dict] = []
+    forced_anchor_path: str | None = None
+    if req.page_context_choice == "create_new":
+        try:
+            from app.engine.page_context_resolver import extract_requested_context
+            from app.engine.page_creator import create_page_ops
+            from app.runtime.context import build_context
+            context = extract_requested_context(req.user_message)
+            if context:
+                ctx = build_context(run_id)
+                ops = create_page_ops(context, ctx.workspace)
+                page_creator_ops = [op.to_dict() for op in ops]
+                # Extract the page path from the CREATE op for forced anchoring
+                page_create_op = next((op for op in ops if op.action == "CREATE"), None)
+                if page_create_op:
+                    forced_anchor_path = page_create_op.path
+                plan_preview["page_creator"] = {
+                    "ops": [op.to_dict() for op in ops],
+                    "summary": "Crear nueva página + ruta en router",
+                }
+                plan_preview["estimated_files"] = sorted(set(
+                    list(plan_preview["estimated_files"]) + [op.path for op in ops]
+                ))
+        except Exception as e:
+            logger.warning("PageCreator failed: %s", e)
+            plan_preview["page_creator"] = {"ops": [], "summary": "Error al generar página"}
+
     result = {
         "status": "ok",
         "plan": plan.to_dict(),
@@ -208,12 +257,17 @@ def _agent_confirm(req: ConfirmRequest):
     }
 
     # Persist: store confirmed intent, compiled plan, preview; transition to confirmed
-    save_run_state(run_id, {
+    save_extra: dict = {
         "confirmed_intent": confirmed.to_dict(),
         "compiled_plan": plan.to_dict(),
         "plan_preview": plan_preview,
         "gate": gate,
-    })
+    }
+    if page_creator_ops:
+        save_extra["page_creator_ops"] = page_creator_ops
+    if forced_anchor_path:
+        save_extra["forced_anchor_path"] = forced_anchor_path
+    save_run_state(run_id, save_extra)
     transition_phase(run_id, RunPhase.CONFIRMED)
 
     return result

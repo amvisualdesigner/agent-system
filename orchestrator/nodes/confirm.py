@@ -32,6 +32,28 @@ async def confirm_node(state: AgentState) -> dict:
         SSEEvent(type="node_start", node="confirm", phase=phase, run_id=run_id),
     )
 
+    # ── Clarification guard: if interpretation needs clarification and user didn't choose, stop early ──
+    interp_status = interpretation.get("status") if isinstance(interpretation, dict) else None
+    if interp_status == "needs_clarification":
+        choices = interpretation.get("choices", [])
+        pcc = (state.get("confirmed_intent", {}) or {}).get("page_context_choice")
+        if choices and not pcc:
+            logger.warning("[run_id=%s] confirm blocked: needs_clarification with choices but no page_context_choice", run_id)
+            await emitter.emit(run_id,
+                SSEEvent(type="node_end", node="confirm", phase="error", run_id=run_id,
+                         data={"error": "Clarification required: choose a page context via page_context_choice."}))
+            return _error_state(state, run_id, "confirm",
+                "Clarification required: choose a page context via page_context_choice.",
+                {"interpretation_status": interp_status, "choices": choices, "page_context_choice": pcc}, 0)
+        if not choices:
+            logger.warning("[run_id=%s] confirm blocked: needs_clarification (generic)", run_id)
+            await emitter.emit(run_id,
+                SSEEvent(type="node_end", node="confirm", phase="error", run_id=run_id,
+                         data={"error": "Clarification required: rephrase your request first."}))
+            return _error_state(state, run_id, "confirm",
+                "Clarification required: rephrase your request first.",
+                {"interpretation_status": interp_status}, 0)
+
     contract_id = state.get("confirmed_intent", {}).get("contract_id") or interpretation.get("contract_id", "")
     if not contract_id:
         logger.warning("[run_id=%s] confirm: no contract_id (interpretation incomplete)", run_id)
@@ -68,6 +90,8 @@ async def confirm_node(state: AgentState) -> dict:
             if cap in proposed_map and "instance_hint" not in action:
                 action["instance_hint"] = proposed_map[cap]["instance_hint"]
 
+    page_context_choice = confirmed_intent.get("page_context_choice") or interpretation.get("page_context_choice")
+
     confirm_payload = {
         "run_id": run_id,
         "interpretation_id": run_id,
@@ -77,6 +101,8 @@ async def confirm_node(state: AgentState) -> dict:
         "params": confirmed_intent.get("params", interpretation.get("params_proposed", {})),
         "user_message": confirmed_intent.get("user_message", ""),
     }
+    if page_context_choice:
+        confirm_payload["page_context_choice"] = page_context_choice
 
     input_data = {"confirm_payload": confirm_payload}
     await emitter.emit(

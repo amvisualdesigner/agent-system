@@ -505,6 +505,7 @@ def resolve_anchors(
     all_fileops: list[FileOp],
     structural_index: StructuralIndex,
     workspace: str,
+    forced_anchor_path: str | None = None,
 ) -> tuple[list[FileOp], list[str], AnchorResolutionDecisions]:
     """Resolve anchors for all mountable CREATE FileOps and produce MODIFY
     FileOps.
@@ -513,6 +514,8 @@ def resolve_anchors(
         all_fileops: All FileOps from the pipeline (both CREATE and others).
         structural_index: StructuralIndex of the workspace.
         workspace: Workspace root path.
+        forced_anchor_path: If set, force all mountable components to anchor
+            on this page path. Used when the user explicitly chose a page.
 
     Returns:
         (modify_ops, unresolved, decisions): MODIFY FileOps for anchor injection,
@@ -565,6 +568,43 @@ def resolve_anchors(
     for sc in _find_section_files(workspace):
         sc.existing_components = _extract_existing_imports(sc.file_path, workspace)
         anchors.append(sc)
+
+    # ── Forced anchor: when the user explicitly chose a page, add it as a
+    #    score=1.0 candidate so it always wins regardless of scoring.
+    if forced_anchor_path:
+        full_path = os.path.join(workspace, forced_anchor_path)
+        if os.path.isfile(full_path):
+            existing = _extract_existing_imports(forced_anchor_path, workspace)
+            forced_name = os.path.splitext(os.path.basename(forced_anchor_path))[0]
+            # Avoid duplicate if the filesystem scan already found this path
+            already_present = any(a.file_path == forced_anchor_path for a in anchors)
+            if not already_present:
+                anchors.append(AnchorCandidate(
+                    type="feature_page",
+                    file_path=forced_anchor_path,
+                    page_name=forced_name,
+                    score=1.0,
+                    existing_components=existing,
+                ))
+                logger.info(
+                    "ANCHOR_RESOLVER: forced anchor path=%s name=%s",
+                    forced_anchor_path, forced_name,
+                )
+            else:
+                # Boost existing candidate's score to 1.0 so it always wins
+                for a in anchors:
+                    if a.file_path == forced_anchor_path:
+                        a.score = 1.0
+                        logger.info(
+                            "ANCHOR_RESOLVER: boosted existing anchor %s to score=1.0",
+                            forced_anchor_path,
+                        )
+                        break
+        else:
+            logger.warning(
+                "ANCHOR_RESOLVER: forced_anchor_path %s not found on disk, ignoring",
+                forced_anchor_path,
+            )
 
     if not anchors:
         logger.warning("ANCHOR_RESOLVER: no anchor candidates found in workspace")

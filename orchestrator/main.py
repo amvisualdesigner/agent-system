@@ -157,6 +157,7 @@ async def confirm_run(run_id: str, req: ConfirmRequest):
         "actions": actions,
         "params": req.params or interpretation.get("params_proposed", {}),
         "user_message": req.user_message,
+        "page_context_choice": req.page_context_choice,
     }
 
     state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm")
