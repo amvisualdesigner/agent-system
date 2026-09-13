@@ -4,6 +4,8 @@ Sistema que convierte tareas en lenguaje natural en operaciones Git aisladas med
 
 **Principio:** *LLM for intention; deterministic system for execution.*
 
+IMPORTANT: NOT PROD READY
+
 ---
 
 ## Flujo Canónico
