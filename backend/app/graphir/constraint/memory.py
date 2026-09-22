@@ -1,19 +1,21 @@
-"""RepositorySemanticMemory — persists identity→file mappings.
+"""RepositorySemanticMemory — historical identity→file evidence store.
 
 State Layer: isolated IO to .opencode/semantic_memory.json.
 
-Phase 2 scope:
-  Load resolved_mapping → feed to IdentityResolver
-  Persist new mappings after successful rendering
+F2 boundary (2026-09-22):
+  Memory is HISTORY/EVIDENCE. It is never a lifecycle authority.
+  load()/merge()/save() persist historical identity→file facts
+  (including CREATE history) and feed the audit trail, but nothing
+  downstream may turn a saved fact into a Decision/lifecycle change.
 
-Phase 6a upgrade:
-  Memory now stores MemoryRecord (fingerprint, file_path, component_name)
-  instead of bare file_path strings.
-  Backward compatible: old-format dicts are migrated on load.
+Phase 6a:
+  Memory stores MemoryRecord (fingerprint, file_path, component_name)
+  instead of bare file_path strings. Backward compatible: old-format
+  dicts are migrated on load.
 
 Rules:
-  - Load on start: feed resolved_mapping to resolver (Level 1 priority)
-  - Persist after each successful pipeline run
+  - Load on start → evidence for audit + existing base for merge
+  - Persist after each successful pipeline run (historical record)
   - Merge preserves existing mappings; new identity→file pairs are additive
   - DELETE fingerprints are removed from memory via deleted_fingerprints
 """
@@ -66,8 +68,9 @@ class RepositorySemanticMemory:
         memory_path: Full path to .opencode/semantic_memory.json.
             Provided by ExecutionContext.memory_path.
 
-    Phase 2+: The loaded resolved_mapping is passed to IdentityResolver.
-    After rendering, merge + save persists any new mappings.
+    F2: loaded facts are EVIDENCE. They are never passed to IdentityResolver
+    as a lifecycle input. After rendering, merge + save persists the
+    historical record.
 
     Phase 6a+: Memory stores dict[fingerprint, MemoryRecord].
     """
@@ -140,10 +143,10 @@ class RepositorySemanticMemory:
     ) -> dict[str, MemoryRecord]:
         """Merge new identity→file mappings into existing memory.
 
-        Only stores mappings where:
-        - The decision targets an existing file (UPDATE, EXTEND)
-        - CREATE decisions are NOT stored (new file, no anchor yet)
-        - DELETE fingerprints are removed from the result
+        Stores historical identity→file facts additively (including CREATE,
+        extend, modify). These facts are evidence only (F2): they are never
+        consumed as a lifecycle input downstream.
+        DELETE fingerprints are removed from the result.
 
         Args:
             decisions: dict[graphir_node_id, FileOpDecision] from resolver

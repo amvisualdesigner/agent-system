@@ -1236,11 +1236,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         indexer = RepositoryIndexer()
         file_nodes, component_nodes = indexer.index(exec_ctx.workspace_root)
 
-        # Phase 2: Load persistent semantic memory → feed resolver
+        # F2: Load persistent semantic memory as HISTORY/EVIDENCE only.
+        # It feeds merge()/save() persistence and the audit trail, but
+        # NEVER IdentityResolver (lifecycle comes from the confirmed plan).
         memory = RepositorySemanticMemory(exec_ctx.memory_path)
         raw_memory = memory.load()
 
-        # Phase 3: Reconcile memory against current file state
+        # CRL: reconcile memory against current file state → conflicts as
+        # evidence for audit. No lifecycle decision is taken from here.
         crl_input = {fp: rec.file_path for fp, rec in raw_memory.items()}
         crl = ConflictResolutionLayer()
         cleaned_paths, crl_conflicts = crl.resolve(crl_input, file_nodes)
@@ -1261,8 +1264,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             )
 
         matcher = IntentFileMatcher()
+        # F2: IdentityResolver no longer receives resolved_mapping.
+        # Memory is history/evidence (load → CRL → merge/save → audit),
+        # never a lifecycle input.
         resolver = IdentityResolver(
-            resolved_mapping=resolved_mapping,
             file_path_overrides=file_path_overrides,
             structural_index=structural_index,
         )

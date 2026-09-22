@@ -5,23 +5,24 @@ Pure Core: zero IO, 100% deterministic.
 Takes ranked candidates from IntentFileMatcher and applies the
 IDENTITY_SPEC rules to produce final FileOpDecisions.
 
-Decision hierarchy (per IDENTITY_SPEC.md §4):
-  1. CanonicalIdentity.fingerprint() → check resolved_mapping
-     → FOUND: UPDATE on mapped file (confidence 1.0)
-  2. CanonicalIdentity.fingerprint() → check file_nodes[].canonical_ids
+Decision hierarchy (per IDENTITY_SPEC.md §4) — RESIDUAL, pending F3/F8:
+  1. CanonicalIdentity.fingerprint() → check file_nodes[].canonical_ids
      → FOUND: UPDATE on pre-existing file (confidence 0.95)
-  2.5 Component name → check file_nodes[].component_names (Phase 6a)
+  2. Component name → check file_nodes[].component_names (Phase 6a)
      → FOUND: UPDATE on containing file (confidence 0.85)
   3. Best candidate score → threshold comparison
      → score >= UPDATE_THRESHOLD: UPDATE
      → score >= EXTEND_THRESHOLD: EXTEND
      → score <  EXTEND_THRESHOLD: CREATE
 
-Phase 2 hook: resolved_mapping is loaded from RepositorySemanticMemory
-and passed into the constructor. This is the only interface between
-semantic memory and the decision kernel.
+F2 boundary (2026-09-22): Memory is history/evidence ONLY. It is no
+longer a lifecycle input. RepositorySemanticMemory (load/merge/save)
+persists historical identity→file facts but NEVER feeds this resolver.
 
-Phase 6a: resolved_mapping is dict[fingerprint, MemoryRecord].
+These levels derive lifecycle from repository evidence (index, scores).
+That residual behavior is NOT architecturally approved and is scheduled
+for removal/neutralization in F3 (IdentityResolver) and F8 (StructuralResolver).
+F1 will make the Confirmed Plan the authoritative lifecycle source.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from __future__ import annotations
 import logging
 
 from app.engine.structural_index import StructuralIndex
-from app.graphir.constraint.models import Decision, FileOpDecision, MemoryRecord
+from app.graphir.constraint.models import Decision, FileOpDecision
 from app.graphir.constraint.identity import CanonicalIdentity
 
 logger = logging.getLogger(__name__)
@@ -38,13 +39,15 @@ logger = logging.getLogger(__name__)
 class IdentityResolver:
     """Pure Core: resolves candidates into decisions per IDENTITY_SPEC rules.
 
+    F2: this resolver consumes repository evidence only. It no longer
+    receives identity maps from semantic memory.
+
     Args:
-        resolved_mapping: dict[fingerprint, MemoryRecord] from semantic memory
-            (Phase 6a+). Empty in Phase 1 (all decisions via scoring).
         file_path_overrides: dict[component_type, real_repo_path] from
             _discover_repo_capability_files(). When set, overrides target_file
             so decisions land on real repo files (e.g., SalesOverviewPage.tsx
             instead of Page.tsx).
+        structural_index: StructuralIndex for path derivation on CREATE.
     """
 
     UPDATE_THRESHOLD = 0.55
@@ -52,11 +55,9 @@ class IdentityResolver:
 
     def __init__(
         self,
-        resolved_mapping: dict[str, MemoryRecord] | None = None,
         file_path_overrides: dict[str, str] | None = None,
         structural_index: StructuralIndex | None = None,
     ):
-        self.resolved_mapping = resolved_mapping or {}
         self.file_path_overrides = file_path_overrides or {}
         self.structural_index = structural_index
 
@@ -122,19 +123,10 @@ class IdentityResolver:
         fp = identity.fingerprint()
         node_candidates = candidates.get(node_id, [])
 
-        # ── Level 1: Check resolved mapping (from semantic memory) ──
-        if fp in self.resolved_mapping:
-            rec = self.resolved_mapping[fp]
-            target = rec.file_path
-            if target in file_nodes:
-                return FileOpDecision(
-                    intent_id=identity.capability_id,
-                    graphir_node_id=node_id,
-                    decision=Decision.UPDATE,
-                    target_file=target,
-                    confidence=1.0,
-                    rationale=f"Identity match via resolved mapping: {fp} → {target}",
-                )
+        # ── Level 1 (memory) was REMOVED (F2) ──
+        # RepositorySemanticMemory no longer feeds lifecycle decisions.
+        # Memory is history/evidence only. Pre-F2 this block returned
+        # Decision.UPDATE from the persisted identity map.
 
         # ── Level 2: Check file index for known identity ──
         for fn in file_nodes.values():

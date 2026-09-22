@@ -34,7 +34,6 @@ from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
 from app.graphir.constraint.models import (
     Decision, RefactoringPlan, ComponentBoundary,
 )
-from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.path_resolver import FilePathResolver
 from app.graphir.constraint.generator import ContentGenerator
 from app.graphir.constraint.diff import (

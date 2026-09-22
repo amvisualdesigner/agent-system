@@ -1,8 +1,15 @@
 """IdentityResolver — unit tests for decision logic.
 
 Pure Core: zero IO. Tests that resolve() correctly applies
-the IDENTITY_SPEC rules (levels 1-3 of decision hierarchy).
+the IDENTITY_SPEC rules of the current decision hierarchy.
+
+F2 correction: these tests prove MEMORY INDEPENDENCE — the resolver's
+output is a pure function of repository evidence and never of semantic
+memory. They do NOT validate IdentityResolver as an architecturally
+approved lifecycle authority (F1/F3 pending).
 """
+
+import pytest
 
 from app.graphir.constraint.resolver import IdentityResolver
 from app.graphir.constraint.models import Decision, FileNode, MemoryRecord
@@ -102,52 +109,50 @@ class TestResolverThresholds:
         assert decisions["n0"].target_file == "src/StrongMatch.tsx"
 
 
-class TestResolverLevel1:
-    """Resolved mapping takes priority over scoring."""
+class TestResolverMemoryIndependence:
+    """F2: memory content must never change the resolution result.
 
-    def test_resolved_mapping_overrides_scoring(self):
+    These tests only demonstrate that IdentityResolver no longer has a
+    memory channel. They do NOT endorse IdentityResolver as the final
+    lifecycle authority — that remains the Confirmed Plan (F1/F3).
+    """
+
+    def test_resolver_rejects_memory_argument(self):
         fp = _identity().fingerprint()
-        resolver = IdentityResolver(resolved_mapping={
+        with pytest.raises(TypeError):
+            IdentityResolver(resolved_mapping={
+                fp: MemoryRecord(fingerprint=fp, file_path="src/Mapped.tsx", component_name="Chart"),
+            })
+
+    def test_resolver_has_no_memory_slot(self):
+        resolver = IdentityResolver()
+        assert not hasattr(resolver, "resolved_mapping")
+
+    def test_memory_content_does_not_redirect_target(self):
+        # Pre-F2, a persisted memory fact fp->src/Mapped.tsx forced the
+        # decision onto src/Mapped.tsx (Level 1, confidence 1.0).
+        # Simulate exactly that historical content:
+        fp = _identity().fingerprint()
+        pre_f2_memory = {
             fp: MemoryRecord(fingerprint=fp, file_path="src/Mapped.tsx", component_name="Chart"),
-        })
+        }
+        # Same input + same repository evidence in both runs:
         ident = _identity()
         candidates = {
-            "n0": [(0.90, _file("src/Unmapped.tsx"))],
+            "n0": [(0.90, _file("src/Index.tsx"))],
         }
         file_nodes = {
             "src/Mapped.tsx": _file("src/Mapped.tsx"),
-            "src/Unmapped.tsx": _file("src/Unmapped.tsx"),
+            "src/Index.tsx": _file("src/Index.tsx", comp_names=["Chart"]),
         }
+        # F2 resolver (no memory channel): decision is a pure function of
+        # {identity, candidates, file_nodes}. Memory content cannot change it.
+        resolver = IdentityResolver()
         decisions = resolver.resolve({"n0": ident}, candidates, file_nodes)
-        assert decisions["n0"].target_file == "src/Mapped.tsx"
-        assert decisions["n0"].confidence == 1.0
+        assert decisions["n0"].target_file == "src/Index.tsx"
         assert decisions["n0"].decision == Decision.UPDATE
-
-    def test_resolved_mapping_ignored_if_file_missing(self):
-        fp = _identity().fingerprint()
-        resolver = IdentityResolver(resolved_mapping={
-            fp: MemoryRecord(fingerprint=fp, file_path="src/Gone.tsx", component_name="Chart"),
-        })
-        ident = _identity()
-        candidates = {
-            "n0": [(0.90, _file("src/Existing.tsx"))],
-        }
-        file_nodes = {
-            "src/Existing.tsx": _file("src/Existing.tsx"),
-        }
-        decisions = resolver.resolve({"n0": ident}, candidates, file_nodes)
-        # Falls through to scoring — mapped file doesn't exist
-        assert decisions["n0"].target_file == "src/Existing.tsx"
-
-    def test_resolved_mapping_empty_dict_no_effect(self):
-        resolver = IdentityResolver(resolved_mapping={})
-        ident = _identity()
-        candidates = {
-            "n0": [(0.80, _file("src/Chart.tsx"))],
-        }
-        decisions = resolver.resolve({"n0": ident}, candidates, {})
-        assert decisions["n0"].decision == Decision.UPDATE
-        assert decisions["n0"].target_file == "src/Chart.tsx"
+        # The historical memory fact is dead: nothing toggles the target.
+        assert decisions["n0"].target_file != pre_f2_memory[fp].file_path
 
 
 class TestResolverLevel2:

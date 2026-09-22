@@ -9,6 +9,7 @@ These tests enforce the semantic boundary established post-audit (2026-05-28):
 
 from pathlib import Path
 import inspect
+import re
 
 import pytest
 
@@ -143,3 +144,39 @@ class TestIOLayerBoundaries:
         assert 'open(path, "r")' in source or "open(path) as f" in source
         for marker in ["os.remove(", "os.replace(", "tempfile."]:
             assert marker not in source, "Indexer must not write files"
+
+
+class TestMemoryIsNotLifecycleAuthority:
+    """F2 lock: Memory is history/evidence, never a lifecycle input.
+
+    These are static (source-level) invariants enforcing the F2 cut:
+    Memory.load()/resolved_mapping must not feed IdentityResolver.
+    """
+
+    def test_resolver_has_no_memory_channel(self):
+        from app.graphir.constraint.resolver import IdentityResolver
+        source = inspect.getsource(IdentityResolver)
+        assert "resolved_mapping" not in source, (
+            "IdentityResolver must have no memory channel. "
+            "Memory is history/evidence only (F2)."
+        )
+        assert "IdentityResolver(" not in source, (
+            "Faith: __init__ keyword helpers must not re-add memory injection."
+        )
+
+    def test_apply_engine_does_not_feed_memory_to_resolver(self):
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        m = re.search(r"IdentityResolver\s*\([^)]*\)", source)
+        assert m, "IdentityResolver(...) construction must exist in pipeline"
+        assert "resolved_mapping" not in m.group(0), (
+            "resolved_mapping must not be wired into IdentityResolver. "
+            "Memory is never a lifecycle input (F2)."
+        )
+
+    def test_memory_persistence_preserved_as_history(self):
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        assert "memory.load(" in source, "load() survives as evidence read"
+        assert "memory.merge(" in source, "merge() survives for historical record"
+        assert "memory.save(" in source, "save() survives for historical record"

@@ -2,16 +2,16 @@
 
 Pure Core: zero IO, 100% deterministic.
 
-Runs between RepositorySemanticMemory.load() and IdentityResolver
-construction. Takes the raw resolved_mapping from disk and reconciles
-it against the current file_nodes from RepositoryIndexer.
+Runs on the historical memory read. F2: the reconciled output is
+EVIDENCE for the audit trail — it is no longer passed to IdentityResolver
+as a lifecycle input (memory is never a lifecycle authority).
 
 Design rule: CRL is an orchestrator, NOT a second matcher.
   - STALE_MAPPING → just check file existence (no scoring)
   - MISSING_TARGET → conservative: invalidate if file is empty
   - DUPLICATE_BINDING → benign, keep both (resolver is deterministic)
-  - No REBIND scoring: after INVALIDATE, resolver falls to Level 3
-    scoring fallback, which already works correctly.
+  - No REBIND scoring: after INVALIDATE the residual resolver scoring
+    fallback handles the lifecycle, and F1/F3 will remove that path.
 
 This keeps CRL lean and avoids duplicating matcher._compute_score().
 """
@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 class ConflictResolutionLayer:
-    """Reconciles memory mappings against current file_nodes.
+    """Reconciles historical memory mappings against current file_nodes.
 
     Usage:
         crl = ConflictResolutionLayer()
         cleaned, conflicts = crl.resolve(memory_mapping, file_nodes)
-        resolver = IdentityResolver(resolved_mapping=cleaned)
+        # F2: cleaned is evidence only; NOT passed to IdentityResolver.
     """
 
     @staticmethod
