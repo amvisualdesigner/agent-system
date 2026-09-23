@@ -32,7 +32,7 @@ from app.graphir.models import FileOp
 from app.graphir.compiler import UIIRCompiler
 from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
 from app.graphir.constraint.models import (
-    Decision, RefactoringPlan, ComponentBoundary,
+    RefactoringPlan, ComponentBoundary,
 )
 from app.graphir.path_resolver import FilePathResolver
 from app.graphir.constraint.generator import ContentGenerator
@@ -303,7 +303,7 @@ class RepositoryAwareRenderer:
             # StructuralPatch can't regenerate _pageData prop bindings.
             needs_data_flow = uinode.component == "Page" and ui_tree.page_data_source
             existing = existing_content_by_path.get(decision.target_file) if (
-                decision.decision in (Decision.UPDATE, Decision.EXTEND)
+                decision.render_mode == "modify"
                 and not needs_data_flow
             ) else None
             if existing:
@@ -377,7 +377,7 @@ class RepositoryAwareRenderer:
                 boundaries = fn.component_boundaries if fn else []
                 boundary = self._find_boundary(boundaries, ctx.type)
 
-                if decision.decision in (Decision.UPDATE, Decision.EXTEND):
+                if decision.render_mode == "modify":
                     extend_strategy = self.generator.get_extend_strategy(ctx.type)
                     raw = existing_content_by_path.get(decision.target_file, "")
                     existing_lines = raw.split("\n") if raw else []

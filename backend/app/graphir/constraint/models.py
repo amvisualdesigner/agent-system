@@ -29,15 +29,27 @@ class Decision(str, Enum):
 
 @dataclass
 class FileOpDecision:
-    """INTERNAL CONTRACT — matched intent-to-file binding.
+    """INTERNAL CONTRACT — resolver proposal bound to a single render projection.
 
-    Produced by IntentFileMatcher. Consumed by RepositoryAwareRenderer.
-    MUST_NOT_MODIFY_SEMANTICS is always True — ConstraintGraph only
-    decides physical mapping, never semantic content.
+    Produced by IdentityResolver (evidence/matching kernel). Consumed by
+    RepositoryAwareRenderer through apply_engine.
+
+    F3 (2026-09-22): `decision` carries the resolver's PROPOSAL
+    (CREATE/UPDATE/EXTEND/SPLIT). It is evidence of what the resolver would
+    choose by itself; it never observes or mutates the Confirmed Plan
+    (StructuralIR.operations).
+
+    RESIDUO F1 (KNOWN, NOT FIXED IN F3): the only runtime path from this
+    proposal to lifecycle is the render_mode projection in apply_engine.
+    That single projection remains fed by `decision` and is deliberately
+    deferred to F1, which moves its source to the Confirmed Plan. This
+    model alone does NOT eliminate the semantic authority — it isolates
+    it to that documented point.
 
     Fields:
-        decision: Semantic decision (CREATE/UPDATE/EXTEND/SPLIT).
-                  Intact for semantic consumers (SPLIT redirect, diff engine, audit).
+        decision: Resolver proposal (semantic). Intact for semantic consumers
+                  (SPLIT proposal, diff-engine strategy, audit). While the F1
+                  residue exists, the render_mode projection feeds on it.
         target_file: Resolved target file path (relative to workspace root).
         render_mode: Projection set by apply_engine before render.
                      "create" for CREATE/SPLIT, "modify" for UPDATE/EXTEND.
@@ -48,6 +60,7 @@ class FileOpDecision:
         - decision.decision is NEVER read by the renderer for action routing.
         - target_file is ALWAYS set (renderer may fall back to FilePathResolver).
         - confidence and rationale are diagnostic only; never drive logic.
+        - No resolver output may observe or mutate the Confirmed Plan (F3).
     """
     intent_id: str
     graphir_node_id: str

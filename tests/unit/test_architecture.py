@@ -180,3 +180,70 @@ class TestMemoryIsNotLifecycleAuthority:
         assert "memory.load(" in source, "load() survives as evidence read"
         assert "memory.merge(" in source, "merge() survives for historical record"
         assert "memory.save(" in source, "save() survives for historical record"
+
+
+class TestIdentityResolverIsolation:
+    """F3 lock: IdentityResolver is a proposal/evidence kernel, not runtime authority.
+
+    F3 does NOT eliminate the semantic authority: the decision → render_mode
+    projection in apply_engine remains a KNOWN F1 residue. These locks bound
+    the resolver's influence to that single, documented point and prove the
+    resolver cannot observe or mutate the Confirmed Plan (StructuralIR.operations).
+    """
+
+    RESOLVER_PATH = Path(__file__).resolve().parent.parent.parent / "backend" / "app" / "graphir" / "constraint" / "resolver.py"
+
+    def test_resolver_has_no_channel_to_confirmed_plan(self):
+        source = self.RESOLVER_PATH.read_text()
+        for token in ("structural_ir", "structural_completion", "complete_structure"):
+            assert token not in source, (
+                f"IdentityResolver must have no channel to the Confirmed Plan (found {token!r}). "
+                "F3: resolver is evidence/proposal; the plan is never observed."
+            )
+
+        from app.graphir.constraint.resolver import IdentityResolver
+        sig = inspect.signature(IdentityResolver.resolve)
+        assert list(sig.parameters) == ["self", "identities", "candidates", "file_nodes"], (
+            "resolve() must not accept the Confirmed Plan or StructuralIR (F3)."
+        )
+
+    def test_resolver_does_not_write_runtime_lifecycle_fields(self):
+        from app.graphir.constraint.resolver import IdentityResolver
+        source = inspect.getsource(IdentityResolver)
+        for token in (".render_mode", "render_mode=", ".operations"):
+            assert token not in source, (
+                f"IdentityResolver must not write runtime lifecycle fields (found {token!r}). "
+                "Any runtime effect goes through the documented render_mode residue (F1)."
+            )
+
+    def test_renderer_actions_keyed_on_render_mode_only(self):
+        from app.graphir.constraint.renderer import RepositoryAwareRenderer
+        source = inspect.getsource(RepositoryAwareRenderer)
+        assert "decision.decision in" not in source, (
+            "Renderer must not branch on decision.decision (F3). "
+            "The only lifecycle signal it reads is render_mode (residue of F1)."
+        )
+        assert source.count("decision.decision") <= 1, (
+            "decision.decision may appear in the renderer only as the diff-engine "
+            "strategy pass-through; all gates must read render_mode."
+        )
+        assert "decision.render_mode" in source, (
+            "FileOp.action must be sourced from decision.render_mode."
+        )
+
+    def test_render_mode_projection_is_sole_annotated_residue(self):
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        assert "RESIDUO F1" in source, (
+            "The render_mode projection must be annotated as the known F1 residue."
+        )
+        assert source.count("dec.decision in") == 2, (
+            "decision → render_mode is read ONLY in the residue projection loop "
+            "(create/modify). No other lifecycle gate may read the resolver decision."
+        )
+        assert len(re.findall(r'dec\.render_mode\s*=\s*"\w+"', source)) == 2, (
+            "render_mode is written only inside the residue projection (create/modify)."
+        )
+        assert 'dec.render_mode == "modify"' in source, (
+            "existing_content snapshot must key on render_mode (F3), not decision.decision."
+        )

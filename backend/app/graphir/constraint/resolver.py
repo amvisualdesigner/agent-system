@@ -19,10 +19,17 @@ F2 boundary (2026-09-22): Memory is history/evidence ONLY. It is no
 longer a lifecycle input. RepositorySemanticMemory (load/merge/save)
 persists historical identity→file facts but NEVER feeds this resolver.
 
-These levels derive lifecycle from repository evidence (index, scores).
-That residual behavior is NOT architecturally approved and is scheduled
-for removal/neutralization in F3 (IdentityResolver) and F8 (StructuralResolver).
-F1 will make the Confirmed Plan the authoritative lifecycle source.
+F3 boundary (2026-09-22): these levels are EVIDENCE/PROPOSAL only. They
+derive a candidate `decision` from repository evidence (index, scores,
+overrides) and never observe or mutate the Confirmed Plan
+(StructuralIR.operations).
+
+RESIDUO F1 (KNOWN, NOT FIXED IN F3): apply_engine still projects
+render_mode from this proposal, so it can still reach runtime lifecycle
+through that single, documented point (apply_engine render_mode loop).
+F3 isolates the resolver influence to that projection and proves it is
+the ONLY path. F1 moves the projection's source to the Confirmed Plan
+and removes this residual authority (G1 closes end-to-end).
 """
 
 from __future__ import annotations
@@ -94,6 +101,13 @@ class IdentityResolver:
         identity: CanonicalIdentity,
         file_nodes: dict[str, object],
     ) -> FileOpDecision:
+        """Re-target a decision from repo evidence (physical hint).
+
+        PROPOSAL-LEVEL (F3): this may change `decision` and `target_file`
+        of the resolver's proposal, but it cannot observe or mutate the
+        Confirmed Plan. Any runtime effect happens only through the
+        render_mode residue in apply_engine (RESIDUO F1).
+        """
         if not self.file_path_overrides:
             return decision
         override = self.file_path_overrides.get(identity.component_name)

@@ -1283,7 +1283,11 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             decisions, identities, file_nodes, crl_conflicts,
         )
 
-        # ── Fix 4: Project render_mode from semantic decision ──
+        # ── RESIDUO F1: Project render_mode from the resolver proposal ──
+        # F3 deliberately does NOT change this source. It is the ONLY path
+        # by which the resolver's decision reaches runtime lifecycle.
+        # F1 moves this source to the Confirmed Plan (StructuralIR.operations)
+        # and closes G1 end-to-end. Do not fix here.
         for dec in decisions.values():
             if dec.decision in (Decision.CREATE, Decision.SPLIT):
                 dec.render_mode = "create"
@@ -1309,7 +1313,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Build content snapshot for pure renderer (A2)
         existing_content: dict[str, str] = {}
         for dec in decisions.values():
-            if dec.decision in (Decision.UPDATE, Decision.EXTEND):
+            if dec.render_mode == "modify":
                 target = dec.target_file
                 if target and target not in existing_content:
                     abs_path = os.path.join(exec_ctx.workspace_root, target)
