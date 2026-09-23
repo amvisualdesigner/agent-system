@@ -323,8 +323,10 @@ class TestCreateThenModifyConsistency:
     def test_self_consistent_on_recreate(self, clean_workspace):
         """CREATE → MODIFY → CREATE preserves consistency.
 
-        A second CREATE on the same path must also produce a consistent
-        contract model (destructure matches interface).
+        Under F1 the second CREATE on an already-materialized target is an
+        explicit conflict (no new-instance nomination) — never a silent
+        overwrite or a reinterpretation into MODIFY. The conflicting run must
+        be a material no-op: the file (from the MODIFY step) stays consistent.
         """
         kpi_path = _component_path(clean_workspace, "components", "KpiRow.tsx")
         assert not os.path.exists(kpi_path)
@@ -353,10 +355,18 @@ class TestCreateThenModifyConsistency:
             user_message="create KPI row again",
             interpretation_id="e2e-create-re-2",
         ))
-        assert result3["execution"]["status"] in ("ok", "verify_failed"), (
-            f"Second CREATE should succeed, got {result3['execution']['status']}"
+        # F1: CREATE on an existing target → explicit conflict, no overwrite,
+        # no reinterpretation into MODIFY.
+        assert result3["execution"]["status"] == "clarification_needed", (
+            f"Second CREATE on existing target must conflict, got {result3['execution']['status']}"
+        )
+        detail3 = result3["execution"].get("detail", "")
+        assert "presentation.kpi_row" in detail3, (
+            f"Conflict must cite the existing target, got detail={detail3!r}"
         )
 
+        # The conflicting run is a material no-op: destructure must still match
+        # the interface from the MODIFY step.
         final_content = _read_file(kpi_path)
         iface_names = self._interface_prop_names(final_content)
         destructure_names = self._destructure_names(final_content)

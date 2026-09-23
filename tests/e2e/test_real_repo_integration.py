@@ -290,7 +290,7 @@ class TestPhase6DataFlowWithRealRepo:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                IntentAction(verb="create", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
+                IntentAction(verb="modify", target_capability="layout.page", params={"timeseries_metric": "revenue"}),
             ],
             params={"timeseries_metric": "revenue"},
             user_message="Add a timeseries chart",
@@ -332,7 +332,7 @@ class TestPhase6DataFlowWithRealRepo:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                IntentAction(verb="create", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
+                IntentAction(verb="modify", target_capability="layout.page", params={"timeseries_metric": "revenue"}),
             ],
             params={"timeseries_metric": "revenue"},
             user_message="Add a timeseries chart",
@@ -462,7 +462,7 @@ class TestPhase6DataFlowWithRealRepo:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                IntentAction(verb="create", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
+                IntentAction(verb="modify", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
             ],
             params={"timeseries_metric": "revenue"},
             user_message="Add a timeseries chart",
@@ -505,7 +505,7 @@ class TestPhase6DataFlowWithRealRepo:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                IntentAction(verb="create", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
+                IntentAction(verb="modify", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
             ],
             params={"timeseries_metric": "revenue"},
             user_message="Add a timeseries chart",
@@ -559,7 +559,7 @@ class TestPhase6DataFlowWithRealRepo:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                IntentAction(verb="create", target_capability="presentation.timeseries", params={"timeseries_metric": "revenue"}),
+                IntentAction(verb="modify", target_capability="layout.page", params={"timeseries_metric": "revenue"}),
             ],
             params={"timeseries_metric": "revenue"},
             user_message="Add a timeseries chart",

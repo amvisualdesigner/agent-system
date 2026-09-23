@@ -26,13 +26,28 @@ def _ops_for_path(result: dict, path_suffix: str) -> list[dict]:
     return [op for op in ops if path_suffix in op.get("path", "")]
 
 
-def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace, run_context):
-    """Run A: CREATE component -> persisted memory. Run B: user confirms CREATE again.
+def _context_for_workspace(workspace: str, artifacts: str):
+    """RunContext scoped to an arbitrary seeded workspace."""
+    from app.runtime.context import RunContext
+    return RunContext(
+        run_id=str(uuid.uuid4()),
+        base_dir=workspace,
+        workspace=workspace,
+        artifacts=artifacts,
+    )
 
-    Architectural invariant: historical memory must NOT reinterpret the confirmed
-    CREATE into an UPDATE. The test asserts the confirmed CREATE remains CREATE.
-    (If the current system reinterprets it as UPDATE, this test will FAIL.)
+
+def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace, run_context):
+    """Run A: CREATE component -> materialized target. Run B: user confirms CREATE again.
+
+    Architectural invariant (F1): historical memory must NOT reinterpret the
+    confirmed CREATE into an UPDATE, and the engine must not silently
+    overwrite an existing target. Run A must emit CREATE for KpiRow; Run B
+    (target now present, no new-instance nomination) must yield an explicit
+    conflict with zero modify operations.
     """
+    ctx = _context_for_workspace(create_workspace, run_context.artifacts)
+
     # Build a simple CREATE plan for a KPI row (common contract mapping)
     plan = build_plan_from_actions([
         {"verb": "create", "target_capability": "presentation.kpi_row"}
@@ -41,27 +56,42 @@ def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace,
     # Run A: apply the plan (dry_run=True to avoid persistent git commit,
     # but memory.save currently runs in the pipeline and will persist history).
     run_id_a = str(uuid.uuid4())
-    res_a = apply_engine(run_id_a, plan.to_dict(), run_context, dry_run=True)
+    res_a = apply_engine(run_id_a, plan.to_dict(), ctx, dry_run=True)
 
     # Expect a CREATE op in the emitted operations for KpiRow
     created = _ops_for_path(res_a, "KpiRow.tsx")
     assert any(op.get("action") == "create" for op in created), (
-        "Run A must emit a CREATE for KpiRow (seed run)."
+        f"Run A must emit a CREATE for KpiRow (seed run). Got: "
+        f"{res_a.get('execution', {}).get('status')} "
+        f"{res_a.get('execution', {}).get('detail')}"
     )
 
     # Ensure memory file was written (evidence persisted)
-    mem_path = os.path.join(run_context.workspace, ".opencode", "semantic_memory.json")
+    mem_path = os.path.join(create_workspace, ".opencode", "semantic_memory.json")
     assert os.path.exists(mem_path), "semantic_memory.json should exist after run A"
 
-    # Run B: new run confirming the same CREATE intent
+    # Run B: new run confirming the same CREATE intent.
+    # F1: CREATE on an already-materialized target must NOT be silently
+    # reinterpreted as UPDATE (memory is evidence, never lifecycle) and must
+    # NOT silently overwrite: it yields an explicit conflict (target exists,
+    # no new-instance nomination) with zero modify operations.
     run_id_b = str(uuid.uuid4())
-    res_b = apply_engine(run_id_b, plan.to_dict(), run_context, dry_run=True)
+    res_b = apply_engine(run_id_b, plan.to_dict(), ctx, dry_run=True)
 
-    # Architectural invariant: the confirmed CREATE must remain CREATE.
+    status_b = res_b.get("execution", {}).get("status")
+    detail_b = res_b.get("execution", {}).get("detail", "")
+    assert status_b == "clarification_needed", (
+        f"Confirmed CREATE on existing target must yield explicit conflict, "
+        f"got status={status_b!r} detail={detail_b!r} (FAIL)."
+    )
     ops_b = _ops_for_path(res_b, "KpiRow.tsx")
     actions = [op.get("action") for op in ops_b]
-    assert "create" in actions, (
-        "Confirmed CREATE was reinterpreted — memory has influenced lifecycle (FAIL)."
+    assert "modify" not in actions, (
+        "Confirmed CREATE was reinterpreted as UPDATE — memory has influenced "
+        "lifecycle (FAIL)."
+    )
+    assert "presentation.kpi_row" in detail_b, (
+        f"Conflict must cite the existing target capability, got detail={detail_b!r}."
     )
 
 

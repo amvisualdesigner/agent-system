@@ -183,12 +183,13 @@ class TestMemoryIsNotLifecycleAuthority:
 
 
 class TestIdentityResolverIsolation:
-    """F3 lock: IdentityResolver is a proposal/evidence kernel, not runtime authority.
+    """F1 lock: IdentityResolver is a proposal/evidence kernel, not runtime authority.
 
-    F3 does NOT eliminate the semantic authority: the decision → render_mode
-    projection in apply_engine remains a KNOWN F1 residue. These locks bound
-    the resolver's influence to that single, documented point and prove the
-    resolver cannot observe or mutate the Confirmed Plan (StructuralIR.operations).
+    F1 moves the render_mode source to the Confirmed Plan
+    (StructuralIR.capabilities). These locks bound the resolver's influence to
+    the audit trail: it cannot observe or mutate the Confirmed Plan, and its
+    proposal (decision) never reaches render_mode — the projection is fed only
+    by plan_actions keyed on dec.intent_id (the plan capability).
     """
 
     RESOLVER_PATH = Path(__file__).resolve().parent.parent.parent / "backend" / "app" / "graphir" / "constraint" / "resolver.py"
@@ -198,13 +199,13 @@ class TestIdentityResolverIsolation:
         for token in ("structural_ir", "structural_completion", "complete_structure"):
             assert token not in source, (
                 f"IdentityResolver must have no channel to the Confirmed Plan (found {token!r}). "
-                "F3: resolver is evidence/proposal; the plan is never observed."
+                "F3/F1: resolver is evidence/proposal; the plan is never observed."
             )
 
         from app.graphir.constraint.resolver import IdentityResolver
         sig = inspect.signature(IdentityResolver.resolve)
         assert list(sig.parameters) == ["self", "identities", "candidates", "file_nodes"], (
-            "resolve() must not accept the Confirmed Plan or StructuralIR (F3)."
+            "resolve() must not accept the Confirmed Plan or StructuralIR (F1/F3)."
         )
 
     def test_resolver_does_not_write_runtime_lifecycle_fields(self):
@@ -213,15 +214,15 @@ class TestIdentityResolverIsolation:
         for token in (".render_mode", "render_mode=", ".operations"):
             assert token not in source, (
                 f"IdentityResolver must not write runtime lifecycle fields (found {token!r}). "
-                "Any runtime effect goes through the documented render_mode residue (F1)."
+                "Runtime lifecycle fields are written only from the Confirmed Plan (F1)."
             )
 
     def test_renderer_actions_keyed_on_render_mode_only(self):
         from app.graphir.constraint.renderer import RepositoryAwareRenderer
         source = inspect.getsource(RepositoryAwareRenderer)
         assert "decision.decision in" not in source, (
-            "Renderer must not branch on decision.decision (F3). "
-            "The only lifecycle signal it reads is render_mode (residue of F1)."
+            "Renderer must not branch on decision.decision (F1/F3). "
+            "The only lifecycle signal it reads is render_mode (plan-derived)."
         )
         assert source.count("decision.decision") <= 1, (
             "decision.decision may appear in the renderer only as the diff-engine "
@@ -231,19 +232,41 @@ class TestIdentityResolverIsolation:
             "FileOp.action must be sourced from decision.render_mode."
         )
 
-    def test_render_mode_projection_is_sole_annotated_residue(self):
+    def test_render_mode_sourced_from_confirmed_plan_only(self):
         from app.engine import apply_engine
         source = inspect.getsource(apply_engine)
-        assert "RESIDUO F1" in source, (
-            "The render_mode projection must be annotated as the known F1 residue."
+        assert "plan_actions = {rc.name: rc.action for rc in structural_ir.capabilities}" in source, (
+            "render_mode must be derived from the Confirmed Plan capabilities."
         )
-        assert source.count("dec.decision in") == 2, (
-            "decision → render_mode is read ONLY in the residue projection loop "
-            "(create/modify). No other lifecycle gate may read the resolver decision."
+        assert "plan_actions.get(dec.intent_id)" in source, (
+            "render_mode must be keyed on dec.intent_id (the plan capability)."
         )
-        assert len(re.findall(r'dec\.render_mode\s*=\s*"\w+"', source)) == 2, (
-            "render_mode is written only inside the residue projection (create/modify)."
-        )
+        for stale_projection in (
+            "dec.decision in (Decision.CREATE",
+            "dec.decision in (Decision.SPLIT)",
+            "dec.decision in (Decision.UPDATE",
+            "dec.decision in (Decision.EXTEND",
+        ):
+            assert stale_projection not in source, (
+                f"decision → render_mode projection must not survive F1 (found {stale_projection!r}). "
+                "The resolver proposal may never feed runtime lifecycle."
+            )
         assert 'dec.render_mode == "modify"' in source, (
-            "existing_content snapshot must key on render_mode (F3), not decision.decision."
+            "existing_content snapshot must key on render_mode (F1), not decision.decision."
+        )
+
+    def test_render_mode_written_only_from_plan_projection(self):
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        assignments = re.findall(r'dec\.render_mode\s*=\s*"([^"]*)"', source)
+        assert assignments, "render_mode must be written by the plan projection"
+        # Every assignment must be a plan-derived literal (create/modify/reset)
+        allowed = {"create", "modify", ""}
+        assert set(assignments) <= allowed, (
+            f"render_mode may only be assigned plan-derived literals, got {set(assignments)}."
+        )
+        # The projection must be the ONLY site that writes it (create+modify+reset)
+        assert len(assignments) == 3, (
+            "render_mode must be written exactly once per plan branch "
+            f"(create/modify/reset), found {len(assignments)} assignments."
         )
