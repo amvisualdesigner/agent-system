@@ -70,8 +70,9 @@ def _agent_apply(req: ApplyRequest):
     context = build_context(run_id)
     ensure_worktree(context)
 
-    # Use persisted plan when none passed (state machine flow)
-    plan = req.plan or state.get("compiled_plan")
+    # F1/D2: the Confirmed Plan persisted at /agent/confirm is the only
+    # lifecycle authority. req.plan can never substitute or reinterpret it.
+    plan = state.get("compiled_plan")
 
     # ── PageCreator pre-apply: create the page file BEFORE apply_engine ──
     # so the anchor resolver discovers it and can be forced to use it.
