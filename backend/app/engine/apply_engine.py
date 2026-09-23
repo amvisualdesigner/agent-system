@@ -31,6 +31,9 @@ from app.engine.structural_completion import (
     complete_structure,
     StructuralIR,
     SubstitutionOp,
+    CREATE,
+    MODIFY,
+    DELETE,
 )
 from app.engine.structural_index import StructuralIndex
 from app.graphir.structure.models import StructuralResolution
@@ -386,6 +389,159 @@ def _validate_delete_authority(structural_ir: StructuralIR, plan: dict) -> None:
                 f"DELETE operation for '{target}' has no matching user-confirmed "
                 f"'remove' action. Confirmed remove targets: {remove_targets}"
             )
+
+
+def _has_materializable_graph(structural_ir: StructuralIR) -> bool:
+    """F1: True if the Confirmed Plan carries any CREATE/MODIFY operation.
+
+    Pure KEEP/DELETE plans (without composition parent promotion) have no
+    builder nodes; materialization is delete-only and skips GraphIR entirely.
+    """
+    return any(rc.action in (CREATE, MODIFY) for rc in structural_ir.capabilities)
+
+
+def _validate_repository_matrix(
+    structural_ir: StructuralIR,
+    structural_index: StructuralIndex | None,
+    resolution: StructuralResolution | None,
+) -> dict | None:
+    """F1 Gate 2.5b — repository validation matrix.
+
+    Authority: the Confirmed Plan (StructuralIR.operations). Physical existence
+    NEVER reinterprets lifecycle; it only gates materialization:
+
+      CREATE + target already in repo and no explicit new-instance hint → CONFLICT
+      CREATE + target already in repo but the projected path collides    → CONFLICT
+      MODIFY + capability not present in repo                           → CONFLICT
+      DELETE + capability not present in repo                           → CONFLICT
+
+    Returns None when the matrix passes, else a FallbackExecutionRequest result.
+    """
+    for rc in structural_ir.capabilities:
+        if rc.action == CREATE:
+            if structural_index is None or not structural_index.exists(rc.name):
+                continue
+            if not rc.instance_hint:
+                return FallbackExecutionRequest(
+                    reason=(
+                        f"repository_conflict: CREATE '{rc.name}' but the repository "
+                        f"already contains it and the plan does not nominate a new "
+                        f"instance (instance_hint). Creating a new instance requires "
+                        f"explicit nomination; otherwise this is a MODIFY request or a "
+                        f"duplicate CREATE (F1/R1)."
+                    ),
+                    conflict_type="repository_conflict",
+                    level=2,
+                ).to_result()
+            projected = (
+                resolution.capability_to_path.get(rc.name)
+                if resolution is not None and resolution.capability_to_path
+                else None
+            )
+            if projected and projected in structural_index.resolve_all_file_paths(rc.name):
+                return FallbackExecutionRequest(
+                    reason=(
+                        f"repository_conflict: CREATE '{rc.name}' nominates a new "
+                        f"instance but the projected target path '{projected}' collides "
+                        f"with an existing file (F1/R1)."
+                    ),
+                    conflict_type="repository_conflict",
+                    level=2,
+                ).to_result()
+        elif rc.action in (MODIFY, DELETE):
+            if structural_index is not None and not structural_index.exists(rc.name):
+                return FallbackExecutionRequest(
+                    reason=(
+                        f"repository_conflict: {rc.action} '{rc.name}' but the "
+                        f"capability is not present in the repository — nothing to "
+                        f"{rc.action.lower()}. No silent create or reinterpretation "
+                        f"(F1/R3)."
+                    ),
+                    conflict_type="repository_conflict",
+                    level=2,
+                ).to_result()
+    return None
+
+
+def validate_fileop_plan_provenance(
+    fileops: list[FileOp],
+    structural_ir: StructuralIR,
+) -> list[str]:
+    """F1 DoD — verify every materialized FileOp is attributable to the
+    Confirmed Plan and physically compatible.
+
+    Attributes each FileOp to a plan capability (reverse path mapping + pipeline
+    metadata) and verifies:
+      - CREATE only for plan CREATE capabilities
+      - MODIFY only for plan MODIFY capabilities or composition sync parents
+        (physical MODIFY of a structural parent is not a CREATE→MODIFY re-tag)
+      - DELETE only for plan DELETE capabilities
+      - no FileOp outside the confirmed plan footprint (no new semantic ops)
+
+    Returns a list of violations (empty = fully attributable). This is a
+    post-hoc CHECK — it introduces no provenance abstraction or authority.
+    """
+    from app.engine.structural_completion import _capability_from_path
+
+    plan = {rc.name: rc.action for rc in structural_ir.capabilities}
+    create_ops = {n for n, a in plan.items() if a == CREATE}
+    modify_ops = {n for n, a in plan.items() if a == MODIFY}
+    delete_ops = {n for n, a in plan.items() if a == DELETE}
+    sync_parents = {c.target for c in structural_ir.composition_sync_trace}
+
+    violations: list[str] = []
+    for fop in fileops:
+        if fop.pipeline_route in ("infrastructure", "substitution"):
+            continue
+        cap = _capability_from_path(fop.path)
+        if cap is None:
+            meta_cap = (fop.metadata or {}).get("capability")
+            if meta_cap:
+                cap = meta_cap
+            else:
+                continue
+
+        if fop.action not in ("create", "modify", "delete"):
+            violations.append(
+                f"{fop.path}: unknown lifecycle action '{fop.action}' — not "
+                f"derivable from the Confirmed Plan"
+            )
+            continue
+
+        if fop.action == "delete":
+            if cap not in delete_ops:
+                violations.append(
+                    f"orphan delete FileOp {fop.path} → '{cap}' has no plan DELETE"
+                )
+            continue
+
+        if cap in create_ops:
+            if fop.action != "create":
+                is_anchor_mount = (
+                    fop.pipeline_route == "anchor_resolution"
+                    and bool((fop.metadata or {}).get("component"))
+                )
+                if not is_anchor_mount:
+                    violations.append(
+                        f"plan CREATE '{cap}' materialized as '{fop.action}' ({fop.path})"
+                    )
+        elif cap in modify_ops or cap in sync_parents:
+            if fop.action != "modify":
+                violations.append(
+                    f"plan MODIFY '{cap}' materialized as '{fop.action}' ({fop.path})"
+                )
+        elif cap in delete_ops:
+            violations.append(
+                f"plan DELETE '{cap}' materialized as '{fop.action}' ({fop.path})"
+            )
+        elif fop.pipeline_route != "anchor_resolution":
+            # anchor_resolution MOUNTS a confirmed component into its parent,
+            # which never waits for a lifecycle signal of the parent itself.
+            violations.append(
+                f"FileOp {fop.path} → '{cap}' is outside the confirmed plan "
+                f"footprint (no CREATE/MODIFY/DELETE for '{cap}')"
+            )
+    return violations
 
 
 def _compute_semantic_loss(
@@ -1108,37 +1264,56 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 details={"canonicalization_trace": canon_trace.to_dict() if canon_trace else {}},
             ).to_result()
 
+    # ── F1 Gate 2.5b: RepositoryValidation matrix ──
+    # The Confirmed Plan is the sole lifecycle authority; repo state only gates
+    # materialization (never reinterprets CREATE→MODIFY nor invents targets).
+    repository_conflict = _validate_repository_matrix(
+        structural_ir, structural_index, resolution,
+    )
+    if repository_conflict is not None:
+        return repository_conflict
+
     # ── Step 2: GraphIR pipeline (build_from_structural + layout + validate) ──
-    try:
-        graph, graph_layout = GraphIRPipeline.run_from_structural(
-            structural_ir,
-            resolution=resolution,
+    # F1: pure KEEP/DELETE plans carry no CREATE/MODIFY operations, so there is
+    # nothing to render; DELETEs materialize via delete_inject below.
+    graph: object | None = None
+    graph_layout = None
+    if not _has_materializable_graph(structural_ir):
+        logger.info(
+            "F1 delete-only plan: no CREATE/MODIFY operations — GraphIR and "
+            "rendering skipped; DELETEs materialize via delete_inject",
         )
-    except AmbiguousStructuralTargetError as e:
-        return FallbackExecutionRequest(
-            reason=str(e), conflict_type="ambiguity", level=2,
-        ).to_result()
-    except ValueError as e:
-        return {
-            "execution": {"status": "rejected", "reason": f"graphir:{e}", "diff": None, "operations": []},
-            "context": {"repo_snapshot": []},
-        }
+    else:
+        try:
+            graph, graph_layout = GraphIRPipeline.run_from_structural(
+                structural_ir,
+                resolution=resolution,
+            )
+        except AmbiguousStructuralTargetError as e:
+            return FallbackExecutionRequest(
+                reason=str(e), conflict_type="ambiguity", level=2,
+            ).to_result()
+        except ValueError as e:
+            return {
+                "execution": {"status": "rejected", "reason": f"graphir:{e}", "diff": None, "operations": []},
+                "context": {"repo_snapshot": []},
+            }
 
-    # ── Step 2a: LayoutResolver — aplica layout_hints de MOVE/REPLACE ──
-    from app.graphir.structure.layout_resolver import resolve_layout
-    graph = resolve_layout(structural_ir, graph)
+        # ── Step 2a: LayoutResolver — aplica layout_hints de MOVE/REPLACE ──
+        from app.graphir.structure.layout_resolver import resolve_layout
+        graph = resolve_layout(structural_ir, graph)
 
-    # ── Step 2b: GraphIR Purity Check ──
-    try:
-        enforce_graph_purity(graph)
-    except Exception as e:
-        return {
-            "execution": {"status": "rejected", "reason": f"purity_violation:{e}", "diff": None, "operations": []},
-            "context": {"repo_snapshot": []},
-        }
+        # ── Step 2b: GraphIR Purity Check ──
+        try:
+            enforce_graph_purity(graph)
+        except Exception as e:
+            return {
+                "execution": {"status": "rejected", "reason": f"purity_violation:{e}", "diff": None, "operations": []},
+                "context": {"repo_snapshot": []},
+            }
 
     # ── Datasource bootstrap: ensure types/hook exist before component gen ──
-    if not dry_run:
+    if graph is not None and not dry_run:
         try:
             from app.datasource.contract import DatasourceContract
             from app.graphir.backends.react_backend import generate_datasource_artifacts
@@ -1177,6 +1352,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             logger.warning("DATASOURCE_BOOTSTRAP failed: %s", e)
 
     # ── Step 3: ConstraintGraph or BackendRenderer ──
+    # Delete-only plans (graph is None) skip rendering entirely (F1).
+    fileops: list[FileOp] = []
     files = contract.renderer.get("files", [])
     base_path = contract.renderer.get("base_path", "")
     path_map = {}
@@ -1221,7 +1398,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     _audit_file_nodes: dict | None = None
     _audit_render_ctx = None
 
-    if FEATURE_FLAGS.get("constraint_graph", False):
+    if graph is not None and FEATURE_FLAGS.get("constraint_graph", False):
         # ConstraintGraph pipeline
         from app.graphir.constraint.indexer import RepositoryIndexer
         from app.graphir.constraint.matcher import IntentFileMatcher
@@ -1283,16 +1460,25 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             decisions, identities, file_nodes, crl_conflicts,
         )
 
-        # ── RESIDUO F1: Project render_mode from the resolver proposal ──
-        # F3 deliberately does NOT change this source. It is the ONLY path
-        # by which the resolver's decision reaches runtime lifecycle.
-        # F1 moves this source to the Confirmed Plan (StructuralIR.operations)
-        # and closes G1 end-to-end. Do not fix here.
+        # ── F1: render_mode derives from the Confirmed Plan, not the proposal ──
+        # dec.intent_id is the plan capability (builder sets node metadata
+        # intent_capability = StructuralIR target). The resolver proposal
+        # (dec.decision) is audit/evidence only and NEVER reaches render_mode.
+        plan_actions = {rc.name: rc.action for rc in structural_ir.capabilities}
         for dec in decisions.values():
-            if dec.decision in (Decision.CREATE, Decision.SPLIT):
+            action = plan_actions.get(dec.intent_id)
+            if action is None:
+                logger.warning(
+                    "F1 render_mode: decision '%s' (%s) is not attributable to a "
+                    "confirmed plan capability — leaving render_mode unset",
+                    dec.intent_id, dec.decision.value,
+                )
+            if action == CREATE:
                 dec.render_mode = "create"
-            elif dec.decision in (Decision.UPDATE, Decision.EXTEND):
+            elif action == MODIFY:
                 dec.render_mode = "modify"
+            else:
+                dec.render_mode = ""
 
         pipeline_state = PipelineState(
             file_nodes=file_nodes,
@@ -1349,7 +1535,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             decisions, identities, resolved_mapping,
         )
         memory.save(updated)
-    else:
+    elif graph is not None:
         # Direct BackendRenderer
         ReactBackend.reset_emit_log(run_id)
         ReactBackend.reset_traces(run_id)
@@ -1387,8 +1573,15 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 hint = op.get("instance_hint")
                 all_files = structural_index.resolve_all_file_paths(target) if structural_index else []
                 if len(all_files) == 0:
-                    logger.warning("DELETE target '%s' has no files in workspace", target)
-                    continue
+                    return FallbackExecutionRequest(
+                        reason=(
+                            f"repository_conflict: DELETE '{target}' has no files "
+                            f"in workspace — nothing to delete, no silent skip "
+                            f"(F1/R3)."
+                        ),
+                        conflict_type="repository_conflict",
+                        level=2,
+                    ).to_result()
                 if len(all_files) == 1:
                     fileops.append(FileOp(action="delete", path=all_files[0], content="", pipeline_route="delete_inject"))
                     continue
@@ -1482,6 +1675,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "ANCHOR_RESOLVER: %d component(s) unresolved: %s",
             len(anchor_unresolved), anchor_unresolved,
         )
+
+    # ── F1 DoD: FileOp plan provenance (post-hoc CHECK, no new authority) ──
+    provenance_violations = validate_fileop_plan_provenance(fileops, structural_ir)
+    if provenance_violations:
+        return FallbackExecutionRequest(
+            reason="; ".join(provenance_violations),
+            conflict_type="fileop_provenance",
+            level=2,
+            details={"provenance_violations": provenance_violations},
+        ).to_result()
 
     ok, vreason = validate_fileops(fileops)
     if not ok:

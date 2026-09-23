@@ -293,6 +293,8 @@ class StructuralIR:
                         op["instance_hint"] = rc.instance_hint
                 elif rc.action in (CREATE, MODIFY):
                     op["payload"] = dict(rc.params)
+                    if rc.action == CREATE and rc.instance_hint:
+                        op["instance_hint"] = rc.instance_hint
                 ops.append(op)
         return ops
 
@@ -1227,6 +1229,7 @@ def complete_structure(
             action=action,
             provenance=cap_provenance,
             instance_only=instance_only,
+            instance_hint=instance_hints.get(cap) if action == CREATE else None,
         ))
 
     # Phase 3: Graph viability invariant — anchor preservation

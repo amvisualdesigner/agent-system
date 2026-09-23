@@ -206,6 +206,8 @@ class FallbackExecutionRequest:
         "missing_component",
         "missing_required_param",
         "delete_authority",
+        "repository_conflict",
+        "fileop_provenance",
     ]
     level: int  # 0=info, 1=warning, 2=blocking
     details: dict = field(default_factory=dict)
