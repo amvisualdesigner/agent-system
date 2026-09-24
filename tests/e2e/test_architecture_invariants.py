@@ -128,12 +128,15 @@ def test_apply_engine_detects_plan_mismatch_and_returns_conflict(run_context):
 
 
 def test_split_plan_is_suggestion_not_automatic_refactor():
-    """SPLITAnalyzer should be a suggestion; renderer must NOT automatically
-    materialize refactors for a confirmed plan without explicit confirmation.
+    """F5: SPLITAnalyzer is analysis/evidence ONLY — it must never produce a FileOp.
 
-    This test asserts that the renderer does NOT emit CREATE for split targets.
-    Under current implementation the renderer honors `split_plan` and will
-    generate CREATE ops (so this test is expected to FAIL until cleanup).
+    Invariants demonstrated:
+      1. SPLITAnalyzer CAN detect/propose a split (structural overload).
+      2. That proposal alone produces NO FileOp.
+      3. The renderer does NOT read or materialize split_plan (it is not even
+         part of pipeline state anymore).
+      4. The confirmed plan target is unchanged: the KpiRow MODIFY still
+         targets src/components/BigFile.tsx, never the split new_file.
     """
     graph, layout = make_sample_graph(kind="dashboard")
 
@@ -149,7 +152,7 @@ def test_split_plan_is_suggestion_not_automatic_refactor():
         )
     }
 
-    # Decisions: pretend the dashboard.kpi node maps to BigFile
+    # Decisions: pretend the dashboard.kpi node maps to BigFile (confirmed plan target)
     decisions = {
         "kpi": FileOpDecision(
             intent_id="presentation.kpi_row",
@@ -174,20 +177,25 @@ def test_split_plan_is_suggestion_not_automatic_refactor():
     assert new_files and all(isinstance(nf, str) and nf for nf in new_files), "Split directives must include concrete new_file paths"
 
     renderer = RepositoryAwareRenderer()
-    # Build a minimal RenderContext-like structure expected by renderer.render
+    # Build a minimal RenderContext-like structure expected by renderer.render.
+    # F5: pipeline state carries NO split_plan — the renderer never received it.
     from app.graphir.constraint.context import PipelineState, RenderContext
-    ps = PipelineState(file_nodes=file_nodes, component_nodes={}, decisions=decisions, split_plan=split_plan, resolved_mapping={})
+    ps = PipelineState(file_nodes=file_nodes, component_nodes={}, decisions=decisions, resolved_mapping={})
     ctx = RenderContext(execution=ps, feature_flags={})
 
     fileops = renderer.render(graph, layout, config=type("C", (), {"component_signatures": {}, "output_base_path": "src/components", "path_map": {}, "file_extension": ".tsx", "file_path_overrides": {}})(), context=ctx, existing_content_by_path={})
 
-    # Assert that renderer does NOT emit CREATE for the split new_file (desired invariant)
-    # The SPLITAnalyzer will propose a new file; detect whether renderer created it.
+    # 2+3. The SPLIT proposal produces NO FileOp on its own
     emitted_paths = [op.path for op in fileops]
     for nf in new_files:
         assert nf not in emitted_paths, (
             f"Split plan was materialized automatically (found {nf} in renderer output)."
         )
+
+    # 4. The confirmed plan target is unchanged — KpiRow MODIFY targets BigFile
+    assert any(
+        op.path == "src/components/BigFile.tsx" for op in fileops
+    ), f"Confirmed plan target must still be emitted: got {[(op.action, op.path) for op in fileops]}"
 
 
 def test_crl_detects_stale_missing_duplicate_and_never_rebinds():

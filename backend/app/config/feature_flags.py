@@ -3,7 +3,7 @@ FEATURE_FLAGS = {
     "skill_ir_output": True,
     "renderer_active": True,
     "executor_dumb": True,
-    "constraint_graph": True,             # ConstraintGraph pipeline (composition, CRL, split, delete)
+    "constraint_graph": True,             # ConstraintGraph pipeline (composition, CRL, delete) — F5: SPLIT is analysis/evidence only
 
     # ── Structural path runtime config ──
     "execution_mode": "graphir",          # Execution mode label

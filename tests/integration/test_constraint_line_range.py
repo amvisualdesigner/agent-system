@@ -58,7 +58,13 @@ class TestLineRangeEXTEND:
 
 
 class TestLineRangeWithSPLIT:
-    """Line-range merge + SPLIT redirect on the same file."""
+    """Line-range merge + SPLIT proposal on the same file (F5: proposal is NOT authority).
+
+    Invariants:
+      1. A SPLIT recommendation (overloaded file) produces NO new-file create.
+      2. Line-range merge still targets the CONFIRMED plan target (Chart.tsx).
+      3. The renderer never reads split_plan — pipeline state carries it nowhere.
+    """
 
     CHART_TSX = """import React from 'react';
 
@@ -71,10 +77,10 @@ export const Timeseries = ({ data }) => {
 };
 """
 
-    def test_split_redirect_plus_update_on_source(self):
-        """SPLIT extracts KpiRow to new file; UPDATE on Timeseries
-        only replaces the Timeseries boundary in the source file.
-        """
+    def test_split_proposal_does_not_redirect_nor_create(self):
+        """A SPLIT proposal for Chart.tsx must NOT redirect KpiRow to a new
+        file and must NOT emit a CREATE for the split target. The confirmed
+        target stays Chart.tsx for the Timeseries line-range merge."""
         _enable_line_range()
         try:
             graph, layout = make_sample_graph("dashboard")
@@ -108,11 +114,12 @@ export const Timeseries = ({ data }) => {
                         target_file="src/components/Chart.tsx",
                         confidence=1.0,
                         rationale="test",
+                        render_mode="modify",
                     )
                     for node in graph.nodes.values()
                 }
 
-                # SPLIT: extract KpiRow
+                # SPLIT proposal: extract KpiRow (analysis/evidence only)
                 split_plan = RefactoringPlan(splits=[
                     SplitDirective(
                         source_file="src/components/Chart.tsx",
@@ -124,31 +131,29 @@ export const Timeseries = ({ data }) => {
                 renderer = RepositoryAwareRenderer()
                 state = PipelineState(
                     file_nodes=fn, component_nodes=cn,
-                    decisions=decisions, split_plan=split_plan,
+                    decisions=decisions,
                     exec_ctx=ctx,
                 )
+                # F5: the SPLIT proposal is never handed to the renderer —
+                # it stays an independent analysis object, not pipeline state.
                 fileops = renderer.render(
                     graph, layout, config,
                     context=RenderContext(execution=state),
                 )
 
-                # Should have:
-                # 1. create for KpiRow.tsx (SPLIT redirect)
-                # 2. modify for Chart.tsx (UPDATE on Timeseries)
-                creates = [f for f in fileops if f.action == "create"]
-                modifies = [f for f in fileops if f.action == "modify"]
+                # 1. No CREATE for the split new_file
+                assert not any(
+                    f.action == "create" and f.path == "src/components/KpiRow.tsx"
+                    for f in fileops
+                ), f"SPLIT proposal produced an automatic CREATE: {[(f.action, f.path) for f in fileops]}"
 
-                assert any(
-                    f.path == "src/components/KpiRow.tsx" for f in creates
-                ), f"Expected create for KpiRow.tsx, got {[f.path for f in creates]}"
+                # 2. Any output targets the CONFIRMED plan target only
+                paths = {f.path for f in fileops}
+                assert all(
+                    p == "src/components/Chart.tsx" for p in paths
+                ), f"Renderer escaped the confirmed target: {paths}"
 
-                # Chart.tsx should have Timeseries but NOT KpiRow
-                chart_modifies = [
-                    f for f in modifies
-                    if f.path == "src/components/Chart.tsx"
-                ]
-                if chart_modifies:
-                    # The UPDATE should only replace Timeseries boundary
-                    pass  # content verification done in end-to-end tests
+                # 3. split_plan is not part of pipeline state
+                assert not hasattr(state, "split_plan")
         finally:
             _disable_line_range()

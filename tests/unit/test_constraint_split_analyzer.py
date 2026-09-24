@@ -1,8 +1,10 @@
-"""SPLITAnalyzer — unit tests for structural split detection.
+"""SPLITAnalyzer — unit tests for structural split detection (ANALYSIS ONLY).
 
 Pure Core: zero IO, 100% deterministic.
-Tests that SPLITAnalyzer correctly detects overloaded files and that
-the renderer redirects split decisions to new files.
+Tests that SPLITAnalyzer correctly detects overloaded files and produces a
+RefactoringPlan recommendation. F5: the recommendation never reaches the
+renderer — separation is locked in test_architecture_invariants and
+test_constraint_line_range.
 """
 
 from dataclasses import dataclass, field

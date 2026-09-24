@@ -13,7 +13,8 @@ line-range merge via ComponentBoundary.
 Phase 6b (Composition Materialization):
   Replaces __COMPOSITION__ placeholder with real React imports and
   mounted child components. Import paths are computed relative from
-  parent file to child file using decisions.target_file and split_plan.
+  parent file to child file using decisions.target_file (the confirmed
+  plan target — never redirected by a SPLIT recommendation).
   Child JSX is wrapped according to layout constraints.
 """
 
@@ -32,7 +33,7 @@ from app.graphir.models import FileOp
 from app.graphir.compiler import UIIRCompiler
 from app.graphir.ui_ir import UIComponentNode, UIGeneratorContext
 from app.graphir.constraint.models import (
-    RefactoringPlan, ComponentBoundary,
+    ComponentBoundary,
 )
 from app.graphir.path_resolver import FilePathResolver
 from app.graphir.constraint.generator import ContentGenerator
@@ -211,7 +212,7 @@ class RepositoryAwareRenderer:
     ) -> list[FileOp]:
         """Produce FileOps from GraphIR + RenderContext (PURE).
 
-        All pipeline-derived state (file_nodes, decisions, split_plan,
+        All pipeline-derived state (file_nodes, decisions,
         deletions) arrives through context.execution. The renderer
         never reads files, indexes, or loads memory.
 
@@ -242,7 +243,6 @@ class RepositoryAwareRenderer:
 
         execution = context.execution or PipelineState()
         decisions = execution.decisions or {}
-        split_plan = execution.split_plan or RefactoringPlan()
         file_nodes = execution.file_nodes or {}
         exec_ctx = execution.exec_ctx
 
@@ -336,7 +336,7 @@ class RepositoryAwareRenderer:
             if child_ids:
                 import_block, mount_block, child_data_imports = self._materialize_composition(
                     ctx.id, child_ids, layout, config,
-                    decisions, split_plan, ui_node_map,
+                    decisions, ui_node_map,
                 )
                 content = self._insert_imports(content, import_block)
                 content = content.replace("__COMPOSITION__", mount_block)
@@ -357,19 +357,9 @@ class RepositoryAwareRenderer:
             if uinode.component != file_basename and file_basename:
                 content = ReactBackend._normalize_export_name(content, uinode.component, file_basename)
 
-            # 2) Phase 4: Check for SPLIT redirect
-            if split_plan.is_splitting(decision.target_file):
-                new_path = split_plan.new_file_for(
-                    decision.target_file, ctx.type,
-                )
-                if new_path:
-                    ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
-                    fileops.append(FileOp(
-                        action="create",
-                        path=new_path,
-                        content=content,
-                    ))
-                    continue
+            # F5: no SPLIT redirect here. decision.target_file is the confirmed
+            # plan target — a SPLITAnalyzer recommendation must never rewrite it
+            # nor emit a CREATE for a non-confirmed path.
 
             if use_line_range:
                 # Phase 5a: Line-range merge via StructuralDiffEngine
@@ -446,7 +436,6 @@ class RepositoryAwareRenderer:
         layout,
         config,
         decisions: dict[str, object],
-        split_plan: RefactoringPlan | None = None,
         ui_node_map: dict[str, UIComponentNode] | None = None,
     ) -> tuple[str, str, list[str]]:
         """Generate real React imports and mount JSX for children.
@@ -487,11 +476,8 @@ class RepositoryAwareRenderer:
             if not child_file:
                 continue
 
-            if split_plan and split_plan.is_splitting(child_file):
-                redirected = split_plan.new_file_for(child_file, ui_node.component)
-                if redirected:
-                    child_file = redirected
-
+            # F5: child import path is the confirmed plan target. A SPLIT
+            # recommendation must never redirect the import to a new file.
             child_stem = os.path.splitext(child_file)[0]
             rel_path = os.path.relpath(child_stem, parent_dir) if parent_dir else f"./{child_stem}"
             if not rel_path.startswith("."):

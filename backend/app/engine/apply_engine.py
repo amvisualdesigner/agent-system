@@ -893,7 +893,7 @@ def _build_audit(
     render_ctx=None, emit_log=None,
     structural_ir=None, sreport=None,
     semantic_resolution=None, contract_resolution=None,
-    anchor_decisions=None,
+    anchor_decisions=None, split_recommendation=None,
 ) -> dict:
     """Build run artifact audit with layered trace (semantic, contract, structural, ui, execution)."""
     anomalies: list[dict] = []
@@ -1091,6 +1091,11 @@ def _build_audit(
         # It must never be read back as input to any decision.
         if anchor_decisions:
             output["anchor_resolution"] = anchor_decisions
+        # F5: split_recommendation is audit-output-only — analysis/evidence from
+        # SPLITAnalyzer. It must never reach the renderer or re-enter the
+        # execution route (no redirect, no FileOp).
+        if split_recommendation:
+            output["split_recommendation"] = split_recommendation
         return output
 
 
@@ -1400,6 +1405,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     _audit_resolved_mapping: dict | None = None
     _audit_file_nodes: dict | None = None
     _audit_render_ctx = None
+    _audit_split_recommendation: list = []
 
     if graph is not None and FEATURE_FLAGS.get("constraint_graph", False):
         # ConstraintGraph pipeline
@@ -1457,11 +1463,25 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         identities, candidates = matcher.match(graph, file_nodes)
         decisions = resolver.resolve(identities, candidates, file_nodes)
 
-        # Phase 4: Structural analysis — detect overloaded files
-        split_analyzer = SPLITAnalyzer()
-        split_plan = split_analyzer.analyze(
-            decisions, identities, file_nodes, crl_conflicts,
-        )
+        # ── Phase 4: Structural analysis — detect overloaded files ──
+        # F5: SPLITAnalyzer is ANALYSIS/EVIDENCE only. Its RefactoringPlan is
+        # captured for the audit trail and is NEVER handed to the renderer or
+        # pipeline state; it cannot redirect a confirmed target nor emit a FileOp.
+        split_recommendation: list[dict] = []
+        try:
+            split_plan = SPLITAnalyzer().analyze(
+                decisions, identities, file_nodes, crl_conflicts,
+            )
+            split_recommendation = [
+                {
+                    "source_file": s.source_file,
+                    "new_file": s.new_file,
+                    "components_to_extract": list(s.components_to_extract),
+                }
+                for s in split_plan.splits
+            ]
+        except Exception as e:  # analysis must never gate execution
+            logger.warning("SPLIT analysis skipped (evidence only): %s", e)
 
         # ── F1: render_mode derives from the Confirmed Plan, not the proposal ──
         # dec.intent_id is the plan capability (builder sets node metadata
@@ -1487,7 +1507,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             file_nodes=file_nodes,
             component_nodes=component_nodes,
             decisions=decisions,
-            split_plan=split_plan,
             resolved_mapping=resolved_mapping,
             exec_ctx=exec_ctx,
         )
@@ -1532,6 +1551,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         _audit_resolved_mapping = resolved_mapping
         _audit_file_nodes = file_nodes
         _audit_render_ctx = render_ctx
+        _audit_split_recommendation = split_recommendation
 
         # Phase 2: Persist new identity→file mappings
         updated = memory.merge(
@@ -1767,6 +1787,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         render_ctx=_audit_render_ctx,
         emit_log=_captured_emit_log,
         anchor_decisions=anchor_decisions,
+        split_recommendation=_audit_split_recommendation,
     )
 
     # ── Step 5: Build fidelity report ──

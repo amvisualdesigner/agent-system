@@ -87,7 +87,6 @@ class PipelineState:
     file_nodes: dict = field(default_factory=dict)
     component_nodes: dict = field(default_factory=dict)
     decisions: dict[str, Any] = field(default_factory=dict)
-    split_plan: Any = None
     deletions: list = field(default_factory=list)
     resolved_mapping: dict[str, Any] = field(default_factory=dict)
     exec_ctx: ExecutionContext | None = None
