@@ -1658,12 +1658,24 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
 
     # ── Phase: Anchor Resolution — inject CREATE components into Page ──
     from app.engine.anchor_resolver import resolve_anchors
+    from app.engine.structural_completion import _build_contract_composition_map
+    # F1/C4: the anchor decision is STRICTLY PHYSICAL — forced (plan-specified)
+    # → use; 0 or N candidates → CONFLICT; 1 candidate → use. No semantic
+    # scoring. Contract composition ({child→parent} from ast_template) plus
+    # physical parent instances are the only candidate sources.
     # anchor_decisions → meta.audit.anchor_resolution only (diagnostic).
     # Invariant: never read back as input to any decision.
-    anchor_modify_ops, anchor_unresolved, anchor_decisions = resolve_anchors(
+    anchor_modify_ops, anchor_unresolved, anchor_decisions, anchor_conflicts = resolve_anchors(
         fileops, structural_index, context.workspace,
         forced_anchor_path=forced_anchor_path,
+        composition_map=_build_contract_composition_map(contract),
     )
+    if anchor_conflicts:
+        return FallbackExecutionRequest(
+            reason="; ".join(anchor_conflicts),
+            conflict_type="anchor_ambiguity", level=2,
+            details={"anchor_conflicts": anchor_conflicts},
+        ).to_result()
     if anchor_modify_ops:
         fileops.extend(anchor_modify_ops)
         logger.info(
