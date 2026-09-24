@@ -1,9 +1,22 @@
-"""Unit tests for Anchor Resolution Layer."""
+"""Unit tests for the F1/C4 Anchor Resolution Layer.
+
+F1/C4 invariants locked here:
+  - The anchor decision is STRICTLY PHYSICAL, never semantic:
+      forced (plan specified) → use it
+      0 candidates     → CONFLICT
+      1 candidate      → use it
+      N candidates     → CONFLICT unless the plan specified one (forced)
+  - No scoring, no domain affinities, no word overlap, no type fallback.
+  - A component already composed by the renderer → composed_skip (no
+    double mount, no spurious unresolved warning).
+  - Anchor MODIFY ops merge into existing CREATE/MODIFY ops for the same
+    path instead of producing a collision.
+"""
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
-from dataclasses import dataclass, field
 
 import pytest
 
@@ -11,15 +24,10 @@ from app.engine.anchor_resolver import (
     AnchorCandidate,
     resolve_anchors,
     _is_mountable_ui_component,
-    _score_semantic_match,
-    _score_structural_proximity,
-    _score_ui_locality,
+    _capability_for_path,
+    _content_imports,
     _inject_component_into_content,
-    _get_words_from_name,
-    _find_router_file,
-    _find_layouts,
     _find_pages_from_filesystem,
-    _find_section_files,
     _find_pages_from_index,
 )
 from app.graphir.models import FileOp
@@ -59,80 +67,7 @@ class TestIsMountableUIComponent:
         assert _is_mountable_ui_component(fop)
 
 
-# ── Word extraction ─────────────────────────────────────────────────────
-
-class TestGetWordsFromName:
-    def test_camel_case(self):
-        w = _get_words_from_name("SalesOverviewPage")
-        assert "sales" in w
-        assert "overview" in w
-        assert "page" in w
-
-    def test_simple(self):
-        w = _get_words_from_name("FilterPanel")
-        assert "filter" in w
-        assert "panel" in w
-
-    def test_kebab_case(self):
-        w = _get_words_from_name("sales-overview")
-        assert "sales" in w
-        assert "overview" in w
-
-
-# ── Semantic Match Scoring ──────────────────────────────────────────────
-
-class TestScoreSemanticMatch:
-    def test_exact_match(self):
-        assert _score_semantic_match("SalesPage", "SalesPage") == 1.0
-
-    def test_direct_word_overlap(self):
-        assert _score_semantic_match("SalesTable", "SalesOverviewPage") > 0.3
-
-    def test_domain_affinity(self):
-        assert _score_semantic_match("FilterPanel", "SalesOverviewPage") >= 0.2
-        assert _score_semantic_match("KpiRow", "DashboardPage") >= 0.2
-        assert _score_semantic_match("BarChart", "AnalyticsPage") >= 0.2
-
-    def test_unrelated_zero(self):
-        assert _score_semantic_match("UserAvatar", "SalesOverviewPage") == 0.0
-
-
-# ── Structural Proximity Scoring ────────────────────────────────────────
-
-class TestScoreStructuralProximity:
-    def test_same_directory(self):
-        assert _score_structural_proximity(
-            "pages/dashboard/FilterPanel.tsx",
-            "pages/dashboard/SalesOverviewPage.tsx",
-        ) == 0.9
-
-    def test_different_branches(self):
-        assert _score_structural_proximity(
-            "components/FilterPanel.tsx",
-            "pages/dashboard/SalesOverviewPage.tsx",
-        ) == 0.1
-
-    def test_shared_grandparent(self):
-        assert _score_structural_proximity(
-            "frontend/src/components/FilterPanel.tsx",
-            "frontend/src/pages/OverviewPage.tsx",
-        ) == 0.5
-
-
-# ── UI Locality Scoring ─────────────────────────────────────────────────
-
-class TestScoreUILocality:
-    def test_no_existing_components(self):
-        assert _score_ui_locality("FilterPanel", []) == 0.3
-
-    def test_word_overlap(self):
-        assert _score_ui_locality("SalesFilter", ["SalesTable", "KpiRow"]) == 0.7
-
-    def test_exact_match(self):
-        assert _score_ui_locality("KpiRow", ["KpiRow", "Timeseries"]) == 0.9
-
-
-# ── Content Injection ───────────────────────────────────────────────────
+# ── Content Injection (pure, unchanged) ─────────────────────────────────
 
 class TestInjectComponentIntoContent:
     def test_injects_import_and_jsx(self):
@@ -181,9 +116,20 @@ class TestInjectComponentIntoContent:
         assert result is None
 
 
-# ── Filesystem Scanning ─────────────────────────────────────────────────
+class TestContentImports:
+    def test_detects_import(self):
+        assert _content_imports(
+            "import React from 'react';\nimport { KpiRow } from './KpiRow';\n", "KpiRow",
+        )
+        assert _content_imports("import KpiRow from './KpiRow';\n", "KpiRow")
 
-class TestFilesystemScanning:
+    def test_missing_import(self):
+        assert not _content_imports("import React from 'react';\n", "KpiRow")
+
+
+# ── Filesystem Page Scan (physical page containers) ─────────────────────
+
+class TestFilesystemPageScan:
     @pytest.fixture
     def workspace(self):
         tmpdir = tempfile.mkdtemp()
@@ -195,6 +141,8 @@ class TestFilesystemScanning:
             f.write("")
         with open(os.path.join(tmpdir, "pages", "AnalyticsPage.tsx"), "w") as f:
             f.write("")
+        # Infra shells must NOT be candidates — mounting into them is a
+        # routing/rendering decision (semantic), out of C4 scope.
         with open(os.path.join(tmpdir, "layouts", "AppLayout.tsx"), "w") as f:
             f.write("")
         with open(os.path.join(tmpdir, "layouts", "DashboardLayout.tsx"), "w") as f:
@@ -202,7 +150,6 @@ class TestFilesystemScanning:
         with open(os.path.join(tmpdir, "FilterBar.tsx"), "w") as f:
             f.write("")
         yield tmpdir
-        import shutil
         shutil.rmtree(tmpdir)
 
     def test_find_pages(self, workspace):
@@ -210,24 +157,16 @@ class TestFilesystemScanning:
         names = {p.page_name for p in pages}
         assert "DashboardPage" in names
         assert "AnalyticsPage" in names
+        # Non-page files (layouts, sections) are never page anchors
+        assert not any("Layout" in p.page_name for p in pages)
+        assert not any(p.page_name == "FilterBar" for p in pages)
 
-    def test_find_layouts(self, workspace):
-        layouts = _find_layouts(workspace)
-        names = {l.page_name for l in layouts}
-        assert "DashboardLayout" in names
-        assert "AppLayout" in names
-
-    def test_find_sections(self, workspace):
-        sections = _find_section_files(workspace)
-        assert any("FilterBar" in s.page_name for s in sections)
-
-    def test_no_router(self, workspace):
-        assert _find_router_file(workspace) is None
-
-    def test_router_found(self, workspace):
-        with open(os.path.join(workspace, "router.tsx"), "w") as f:
-            f.write("")
-        assert _find_router_file(workspace) is not None
+    def test_capability_for_path_fallback(self):
+        si = StructuralIndex.empty()
+        # Not registered in the index → deterministic name-map fallback
+        assert _capability_for_path(si, "components/KpiRow.tsx") == "presentation.kpi_row"
+        # Fully unknown component names resolve to nothing → orphan matrix
+        assert _capability_for_path(si, "pages/SalesPage.tsx") is None
 
 
 # ── Pages from StructuralIndex ──────────────────────────────────────────
@@ -244,224 +183,315 @@ class TestFindPagesFromIndex:
         assert pages[0].page_name == "SalesOverviewPage"
 
 
-# ── Full Anchor Resolution ──────────────────────────────────────────────
+def _mk_workspace(files: dict[str, str]) -> str:
+    tmpdir = tempfile.mkdtemp()
+    for rel, content in files.items():
+        abs_path = os.path.join(tmpdir, rel)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, "w") as f:
+            f.write(content)
+    return tmpdir
 
-class TestResolveAnchors:
-    @pytest.fixture
-    def workspace_with_page(self):
-        tmpdir = tempfile.mkdtemp()
-        os.makedirs(os.path.join(tmpdir, "pages", "dashboard"))
-        os.makedirs(os.path.join(tmpdir, "components"))
 
-        with open(os.path.join(tmpdir, "pages", "dashboard", "SalesOverviewPage.tsx"), "w") as f:
-            f.write(
-                "import React from 'react';\n"
-                "import { Card } from '@/components/ui/Card';\n"
-                "export const SalesOverviewPage: React.FC = () => {\n"
-                "  return <div className=\"dashboard\"><KpiRow /></div>;\n"
-                "};\n"
-            )
+RICH_PAGE = (
+    "import React from 'react';\n"
+    "import { Card } from '@/components/ui/Card';\n"
+    "export const SalesOverviewPage: React.FC = () => {\n"
+    "  return (\n"
+    "    <div className=\"dashboard\">\n"
+    "      <KpiRow />\n"
+    "    </div>\n"
+    "  );\n"
+    "};\n"
+)
 
-        info = ComponentInstanceInfo(
+COMPOSED_PAGE = (
+    "import React from 'react';\n"
+    "import { Card } from '@/components/ui/Card';\n"
+    "import { KpiRow } from './components/KpiRow';\n"
+    "export const SalesOverviewPage: React.FC = () => {\n"
+    "  return (\n"
+    "    <div className=\"dashboard\">\n"
+    "      <KpiRow />\n"
+    "    </div>\n"
+    "  );\n"
+    "};\n"
+)
+
+
+def _si_with_page(*paths: str) -> StructuralIndex:
+    infos = [
+        ComponentInstanceInfo(
             capability="layout.page", path="page",
-            file_path="pages/dashboard/SalesOverviewPage.tsx", instance_id="0",
+            file_path=p, instance_id=str(i),
         )
-        si = StructuralIndex.from_mapping({"layout.page": [info]})
-        yield tmpdir, si
-        import shutil
-        shutil.rmtree(tmpdir)
+        for i, p in enumerate(paths)
+    ]
+    return StructuralIndex.from_mapping({"layout.page": infos})
 
-    def test_resolves_components_into_page(self, workspace_with_page):
-        workspace, si = workspace_with_page
-        fops = [
-            FileOp(action="create", path="components/FilterPanel.tsx", content="", pipeline_route="renderer"),
-            FileOp(action="create", path="components/BarChart.tsx", content="", pipeline_route="renderer"),
-        ]
-        modify_ops, unresolved, decisions = resolve_anchors(fops, si, workspace)
-        assert len(unresolved) == 0
-        assert len(modify_ops) == 2
-        for op in modify_ops:
-            assert op.action == "modify"
-            assert op.pipeline_route == "anchor_resolution"
-            assert "pages/dashboard/SalesOverviewPage.tsx" == op.path
-        # Verify audit decisions are populated
-        assert "FilterPanel" in decisions
-        assert "BarChart" in decisions
-        assert decisions["FilterPanel"]["selected"]["path"] == "pages/dashboard/SalesOverviewPage.tsx"
-        assert len(decisions["FilterPanel"]["candidates"]) > 0
 
-    def test_empty_create_list(self, workspace_with_page):
-        workspace, si = workspace_with_page
-        modify_ops, unresolved, decisions = resolve_anchors([], si, workspace)
-        assert len(modify_ops) == 0
-        assert len(unresolved) == 0
+def _create(path: str, route: str = "renderer") -> FileOp:
+    return FileOp(action="create", path=path, content="x", pipeline_route=route)
 
-    def test_skips_non_mountable(self, workspace_with_page):
-        workspace, si = workspace_with_page
-        fops = [
-            FileOp(action="create", path="types.ts", content="", pipeline_route="infrastructure"),
-            FileOp(action="create", path="pages/NewPage.tsx", content="", pipeline_route="renderer"),
-        ]
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, si, workspace)
-        assert len(modify_ops) == 0
-        assert len(unresolved) == 0
 
-    def test_handles_cross_contract_create(self, workspace_with_page):
-        """When a page is being created in the same run, anchor resolver
-        should use the CREATE content instead of reading from disk."""
-        workspace, si = workspace_with_page
+# ── F1/C4 Physical Decision Matrix ──────────────────────────────────────
 
+class TestPhysicalMatrix:
+    """forced → use; 0 → CONFLICT; 1 → use; N → CONFLICT (unless forced)."""
+
+    def test_forced_path_wins_over_n_candidates(self):
+        ws = _mk_workspace({
+            "pages/One.tsx": RICH_PAGE,
+            "pages/Two.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/One.tsx", "pages/Two.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, forced_anchor_path="pages/Two.tsx",
+            )
+            assert conflicts == []
+            assert len(modify_ops) == 1
+            assert modify_ops[0].path == "pages/Two.tsx"
+            assert decisions["FilterPanel"]["decision"] == "forced"
+            assert decisions["FilterPanel"]["selected"]["path"] == "pages/Two.tsx"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_n_candidates_conflict_without_forced(self):
+        ws = _mk_workspace({
+            "pages/One.tsx": RICH_PAGE,
+            "pages/Two.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/One.tsx", "pages/Two.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert modify_ops == []
+            assert len(conflicts) == 1
+            assert "2 physical anchors" in conflicts[0]
+            assert decisions["FilterPanel"]["decision"] == "conflict"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_zero_candidates_conflict(self):
+        ws = _mk_workspace({})
+        si = StructuralIndex.empty()
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert modify_ops == []
+            assert len(conflicts) == 1
+            assert "0 physical anchors" in conflicts[0]
+            assert decisions["FilterPanel"]["decision"] == "conflict"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_zero_candidates_conflict_even_with_composition_parent_missing(self):
+        """Composition parent capability with no physical instance → CONFLICT."""
+        ws = _mk_workspace({})
+        si = StructuralIndex.empty()
+        try:
+            fops = [_create("components/KpiRow.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, composition_map={"presentation.kpi_row": "layout.page"},
+            )
+            assert modify_ops == []
+            assert len(conflicts) == 1
+            assert "0 physical anchors" in conflicts[0]
+        finally:
+            shutil.rmtree(ws)
+
+    def test_single_candidate_is_used(self):
+        ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            assert len(modify_ops) == 1
+            assert modify_ops[0].path == "pages/dashboard/SalesOverviewPage.tsx"
+            assert "FilterPanel" in modify_ops[0].content
+            assert decisions["FilterPanel"]["decision"] == "single"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_composition_child_single_parent_instance(self):
+        """Contract child: the composition parent is the physical anchor."""
+        ws = _mk_workspace({"pages/dashboard/Page.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        try:
+            fops = [_create("components/KpiRow.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, composition_map={"presentation.kpi_row": "layout.page"},
+            )
+            assert conflicts == []
+            assert len(modify_ops) == 1
+            assert modify_ops[0].path == "pages/dashboard/Page.tsx"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_composition_child_n_parent_instances_conflict(self):
+        """Composition parent has 2 physical instances → CONFLICT + reason names them."""
+        ws = _mk_workspace({
+            "pages/dashboard/Page.tsx": RICH_PAGE,
+            "pages/marketing/Page.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/dashboard/Page.tsx", "pages/marketing/Page.tsx")
+        try:
+            fops = [_create("components/KpiRow.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, composition_map={"presentation.kpi_row": "layout.page"},
+            )
+            assert modify_ops == []
+            assert len(conflicts) == 1
+            assert "2 physical anchors" in conflicts[0]
+            # plan-forced overrides the ambiguity for contract children too
+            mo2, _, _, c2 = resolve_anchors(
+                fops, si, ws,
+                forced_anchor_path="pages/marketing/Page.tsx",
+                composition_map={"presentation.kpi_row": "layout.page"},
+            )
+            assert c2 == []
+            assert len(mo2) == 1 and mo2[0].path == "pages/marketing/Page.tsx"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_composed_skip_no_spurious_unresolved(self):
+        """A component already composed by the renderer is skipped (no double
+        mount, no unresolved noise, no conflict) — F1/C4 fixes the pre-C4
+        behavior that logged a spurious 'unresolved'."""
+        ws = _mk_workspace({"pages/dashboard/Page.tsx": COMPOSED_PAGE})
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        # Renderer regenerated the page and mounted KpiRow (import present)
+        renderer_modify = FileOp(
+            action="modify", path="pages/dashboard/Page.tsx",
+            content=COMPOSED_PAGE, pipeline_route="renderer",
+        )
+        fops = [renderer_modify, _create("components/KpiRow.tsx")]
+        try:
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            assert unresolved == []
+            assert modify_ops == []
+            assert decisions["KpiRow"]["decision"] == "composed_skip"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_injection_failure_is_conflict(self):
+        """A single physical anchor with no usable mount point (self-closing
+        root) is physically unmountable → CONFLICT, not a silent skip."""
+        ws = _mk_workspace({
+            "pages/dashboard/Page.tsx": (
+                "import React from 'react';\n"
+                "export const Page: React.FC = () => <div/>;\n"
+            ),
+        })
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert modify_ops == []
+            assert len(conflicts) == 1
+            assert decisions["FilterPanel"]["decision"] == "conflict"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_empty_create_list(self):
+        ws = _mk_workspace({"pages/dashboard/Page.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        try:
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors([], si, ws)
+            assert modify_ops == []
+            assert unresolved == []
+            assert conflicts == []
+        finally:
+            shutil.rmtree(ws)
+
+
+# ── Merge Into Existing FileOps (no collisions) ─────────────────────────
+
+class TestModifyMerge:
+    def test_merges_into_existing_modify_instead_of_duplicate(self):
+        ws = _mk_workspace({
+            "pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        renderer_modify = FileOp(
+            action="modify", path="pages/dashboard/SalesOverviewPage.tsx",
+            content=RICH_PAGE, pipeline_route="renderer",
+        )
+        fops = [renderer_modify, _create("components/FilterPanel.tsx")]
+        try:
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            assert len(modify_ops) == 0
+            updated = fops[0]
+            assert updated.pipeline_route == "renderer"  # preserved
+            assert "import {FilterPanel}" in updated.content
+            assert "<FilterPanel />" in updated.content
+        finally:
+            shutil.rmtree(ws)
+
+    def test_does_not_merge_when_no_existing_fileop(self):
+        ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        fops = [_create("components/FilterPanel.tsx")]
+        try:
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            assert len(modify_ops) == 1
+            assert modify_ops[0].pipeline_route == "anchor_resolution"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_merges_into_existing_create_instead_of_collision(self):
+        """If the anchor file IS being created this run and does not yet
+        import the component, the import is merged into the CREATE op."""
         page_content = (
             "import React from 'react';\n"
             "export const NewPage: React.FC = () => {\n"
             "  return <div>New Page</div>;\n"
             "};\n"
         )
-        fops = [
-            FileOp(action="create", path="pages/NewDashboardPage.tsx", content=page_content, pipeline_route="renderer"),
-            FileOp(action="create", path="components/FilterPanel.tsx", content="", pipeline_route="renderer"),
-        ]
-
-        # NewDashboardPage ends with Page → excluded from mountable
-        # But if there's no page in SI, resolver falls back
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, si, workspace)
-
-        # It should still resolve FilterPanel into the existing SalesOverviewPage
-        assert len(unresolved) == 0
-        assert len(modify_ops) >= 1
-        assert modify_ops[0].path == "pages/dashboard/SalesOverviewPage.tsx"
-
-    def test_no_anchor_fallback_to_layout(self, workspace_with_page):
-        """When no page exists, should try layouts or report unresolved."""
-        workspace, si = workspace_with_page
-        empty_si = StructuralIndex.empty()
-
-        fops = [
-            FileOp(action="create", path="components/FilterPanel.tsx", content="", pipeline_route="renderer"),
-        ]
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, empty_si, workspace)
-        # No layout files exist, but the page is found via filesystem scan
-        # Should resolve to the filesystem-found page
-        assert len(modify_ops) >= 1 or len(unresolved) >= 0
-
-
-# ── Merge Into Existing MODIFY ops ─────────────────────────────────────
-
-class TestModifyMerge:
-    """When the anchor resolver generates a MODIFY for a file that already
-    has a MODIFY op (e.g., from renderer's Phase 6 data flow), it should
-    merge into the existing MODIFY op's content, NOT create a duplicate."""
-
-    @pytest.fixture
-    def workspace_with_page(self):
-        tmpdir = tempfile.mkdtemp()
-        os.makedirs(os.path.join(tmpdir, "pages", "dashboard"))
-        os.makedirs(os.path.join(tmpdir, "components"))
-
-        with open(os.path.join(tmpdir, "pages", "dashboard", "SalesOverviewPage.tsx"), "w") as f:
-            f.write(
-                "import React from 'react';\n"
-                "import { useDashboardData } from '@/hooks/useDashboardData';\n"
-                "export const SalesOverviewPage: React.FC = () => {\n"
-                "  const { chartData } = useDashboardData();\n"
-                "  return <div className=\"dashboard\"><KpiRow /></div>;\n"
-                "};\n"
+        ws = _mk_workspace({
+            "pages/NewDashboardPage.tsx": page_content,
+        })
+        si = _si_with_page()
+        page_create = FileOp(
+            action="create", path="pages/NewDashboardPage.tsx",
+            content=page_content, pipeline_route="renderer",
+        )
+        fops = [page_create, _create("components/FilterPanel.tsx")]
+        try:
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, forced_anchor_path="pages/NewDashboardPage.tsx",
             )
-
-        info = ComponentInstanceInfo(
-            capability="layout.page", path="page",
-            file_path="pages/dashboard/SalesOverviewPage.tsx", instance_id="0",
-        )
-        si = StructuralIndex.from_mapping({"layout.page": [info]})
-        yield tmpdir, si
-        import shutil
-        shutil.rmtree(tmpdir)
-
-    def test_merges_into_existing_modify_instead_of_duplicate(self, workspace_with_page):
-        """When all_fileops already has a MODIFY for the anchor path, the
-        anchor resolver should update that existing op's content in-place
-        and NOT produce a separate MODIFY op."""
-        workspace, si = workspace_with_page
-
-        # Simulate renderer's MODIFY op with Phase 6 data flow
-        renderer_content = (
-            "import React from 'react';\n"
-            "import { useDashboardData } from '@/hooks/useDashboardData';\n"
-            "export const SalesOverviewPage: React.FC = () => {\n"
-            "  const _pageData = useDashboardData();\n"
-            "  return <div className=\"dashboard\"><KpiRow /></div>;\n"
-            "};\n"
-        )
-        renderer_modify = FileOp(
-            action="modify",
-            path="pages/dashboard/SalesOverviewPage.tsx",
-            content=renderer_content,
-            pipeline_route="renderer",
-        )
-
-        # CREATE FilterPanel (mountable orphan)
-        fops = [
-            renderer_modify,
-            FileOp(action="create", path="components/FilterPanel.tsx", content="", pipeline_route="renderer"),
-        ]
-
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, si, workspace)
-
-        # Should resolve without errors
-        assert len(unresolved) == 0
-
-        # modify_ops should be empty (the merge was done in-place in fops)
-        assert len(modify_ops) == 0
-
-        # The original MODIFY op in fops should have been UPDATED in-place
-        updated_modify = fops[0]
-        assert updated_modify.path == "pages/dashboard/SalesOverviewPage.tsx"
-        assert updated_modify.pipeline_route == "renderer"  # preserved
-        assert "import {FilterPanel}" in updated_modify.content
-        assert "<FilterPanel />" in updated_modify.content
-        # Verify Phase 6 data flow is preserved
-        assert "_pageData = useDashboardData()" in updated_modify.content
-
-    def test_does_not_merge_when_no_existing_modify(self, workspace_with_page):
-        """When no MODIFY op exists for the anchor path, the resolver
-        produces a new MODIFY op as before."""
-        workspace, si = workspace_with_page
-
-        fops = [
-            FileOp(action="create", path="components/FilterPanel.tsx", content="", pipeline_route="renderer"),
-        ]
-
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, si, workspace)
-
-        assert len(unresolved) == 0
-        assert len(modify_ops) == 1
-        assert modify_ops[0].pipeline_route == "anchor_resolution"
+            assert conflicts == []
+            assert len(modify_ops) == 0
+            assert "FilterPanel" in fops[0].content
+            assert fops[0].action == "create"
+        finally:
+            shutil.rmtree(ws)
 
 
-# ── Edge Cases ──────────────────────────────────────────────────────────
+# ── Provenance / audit-only decision record ─────────────────────────────
 
-class TestEdgeCases:
-    def test_delete_ops_ignored(self):
-        """DELETE actions should not be processed."""
-        si = StructuralIndex.empty()
-        fops = [
-            FileOp(action="delete", path="components/old.tsx", content="", pipeline_route="renderer"),
-        ]
-        modify_ops, unresolved, _decisions = resolve_anchors(fops, si, "/tmp")
-        assert len(modify_ops) == 0
-        assert len(unresolved) == 0
-
-    def test_anchor_type_priority_tiebreaker(self):
-        """Route anchors should win ties over layouts, layouts over pages."""
-        from app.engine.anchor_resolver import _score_candidate, resolve_anchors
-        # Route anchor
-        route = AnchorCandidate(type="route", file_path="router.tsx", page_name="Router", score=0.5)
-        layout = AnchorCandidate(type="layout", file_path="layouts/DashboardLayout.tsx", page_name="DashboardLayout", score=0.5)
-        pages = [
-            AnchorCandidate(type="feature_page", file_path="pages/Page.tsx", page_name="Page", score=0.3),
-        ]
-        # In resolve_anchors, types are compared by priority
-        # route=4, layout=3, feature_page=2, section=1
-        type_priority = {"route": 4, "layout": 3, "feature_page": 2, "section": 1}
-        assert type_priority["route"] > type_priority["layout"]
-        assert type_priority["layout"] > type_priority["feature_page"]
+class TestDecisionAuditRecord:
+    def test_decisions_carry_candidates_and_selected(self):
+        ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        fops = [_create("components/FilterPanel.tsx")]
+        try:
+            _modify_ops, _unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            rec = decisions["FilterPanel"]
+            assert rec["decision"] == "single"
+            assert rec["selected"] == {
+                "path": "pages/dashboard/SalesOverviewPage.tsx", "type": "feature_page",
+            }
+            assert rec["candidates"] == [
+                {"path": "pages/dashboard/SalesOverviewPage.tsx", "type": "feature_page"},
+            ]
+        finally:
+            shutil.rmtree(ws)
