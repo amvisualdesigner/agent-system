@@ -904,6 +904,32 @@ class TestCompositionSync:
             f"layout.page should be MODIFY when child is DELETE, got {actions.get('layout.page')}"
         )
 
+    def test_delete_never_invents_modify_from_keep_or_delete(self, dashboard_contract):
+        """F1/C3: a KEEP/DELETE operation never invents a MODIFY.
+
+        Pre-C3, DELETE of a non-composition operation (e.g. "remove dashboard"
+        → DELETE layout.page) was flipped to MODIFY by the graph-viability
+        anchor-preservation pass purely to give the builder a node.
+        """
+        semantic = SemanticResolution(
+            semantic_params={},
+            semantic_provenance={},
+            confidence=0.9,
+            actions=[{"verb": "remove", "object": "dashboard", "confidence": 0.9}],
+        )
+        contract_res = ContractResolution.from_skillir(
+            MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
+        )
+        ir = complete_structure(semantic, contract_res, dashboard_contract)
+        actions = {c.name: c.action for c in ir.capabilities}
+        # layout.page was requested as DELETE — it must stay DELETE.
+        assert actions.get("layout.page") == "DELETE", str(actions)
+        # No MODIFY can be invented out of a KEEP/DELETE-only plan.
+        assert not any(c.action == "MODIFY" for c in ir.capabilities), (
+            "KEEP/DELETE operations must never invent a MODIFY (F1/C3)"
+        )
+        assert ir.composition_sync_trace == ()
+
     def test_modify_child_does_not_promote_parent(self, dashboard_contract):
         """Update KPI metrics → MODIFY kpi_row → layout.page stays KEEP."""
         semantic = SemanticResolution(
