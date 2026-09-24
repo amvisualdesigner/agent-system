@@ -795,68 +795,6 @@ def _resolve_field(
     return None, None
 
 
-def _ensure_graph_viability(
-    resolved: list[ResolvedCapability],
-    warnings: list[str],
-) -> None:
-    """Phase 3: Anchor preservation — no repo state, purely semantic.
-
-    SAFE_SKIP nunca puede eliminar TODOS los nodos del grafo.
-    Si todas las capabilities resultarían en 0 nodos builder
-    (solo KEEP/DELETE, sin CREATE/MODIFY), preservar el anchor.
-
-    Condiciones para preservar:
-      1. No hay CREATE/MODIFY → builder produciría 0 nodos
-      2. Hay al menos un KEEP (hay intención estructural de preservar)
-      3. NO todas son KEEP (si todas son KEEP → noop válido por has_resolved_keep_state)
-
-    Prioridad semántica (sin repo): layout.page > domain.* > primera capability válida.
-    """
-    has_builder_node = any(rc.action in (CREATE, MODIFY) for rc in resolved)
-    if has_builder_node:
-        return
-
-    has_keep = any(rc.action == KEEP for rc in resolved)
-    all_keep = all(rc.action == KEEP for rc in resolved)
-
-    # No keep → all DELETE → válido, builder rechaza pero upstream maneja
-    # All keep → noop válido, has_resolved_keep_state lo captura antes del builder
-    if not has_keep or all_keep:
-        return
-
-    # Prioridad semántica: layout.page > domain.* > primera válida
-    for rc in resolved:
-        if rc.name == "layout.page":
-            _preserve_anchor(resolved, rc, warnings)
-            return
-    for rc in resolved:
-        if rc.name.startswith("domain."):
-            _preserve_anchor(resolved, rc, warnings)
-            return
-    for rc in resolved:
-        if rc.name and rc.action != DELETE:
-            _preserve_anchor(resolved, rc, warnings)
-            return
-
-
-def _preserve_anchor(
-    resolved: list[ResolvedCapability],
-    anchor: ResolvedCapability,
-    warnings: list[str],
-) -> None:
-    """Replace anchor in resolved list with MODIFY/SAFE_COMPLETE."""
-    idx = resolved.index(anchor)
-    preserved = ResolvedCapability(
-        name=anchor.name,
-        params={},
-        mode=CompletionMode.SAFE_COMPLETE,
-        action=MODIFY,
-        provenance=anchor.provenance,
-    )
-    resolved[idx] = preserved
-    warnings.append(f"{anchor.name}: anchor preservation (structural viability)")
-
-
 def _build_contract_composition_map(contract: SkillContract) -> dict[str, str]:
     """Build {child_capability: parent_capability} from contract ast_template.
 
@@ -1232,13 +1170,12 @@ def complete_structure(
             instance_hint=instance_hints.get(cap) if action == CREATE else None,
         ))
 
-    # Phase 3: Graph viability invariant — anchor preservation
-    # Ensure at least one capability produces a builder node
-    _ensure_graph_viability(resolved, warnings)
-
+    # F1/C3: no anchor-preservation pass. A KEEP/DELETE operation never invents
+    # a MODIFY just to give the builder a node: pure KEEP/DELETE plans are
+    # delete-only materializations (apply_engine skips GraphIR for them).
     # 3E: Composition sync — parent page regeneration on child CREATE/DELETE.
-    # After anchor preservation, promote parent to MODIFY when a child is
-    # created or deleted, so the renderer regenerates the page with correct
+    # Promotes a parent to MODIFY only when a composition child (contract slot)
+    # is created or deleted, so the renderer regenerates the page with correct
     # imports/JSX references.
     composition_sync_trace = _sync_composition_parents(resolved, contract, warnings)
 

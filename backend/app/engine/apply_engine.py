@@ -912,13 +912,14 @@ def _build_audit(
                 })
 
     bound_nodes: dict[str, dict] = {}
-    for node_id, node in graph.nodes.items():
-        if hasattr(node, 'data') and node.data:
-            bound_nodes[node_id] = {
-                "type": getattr(node, 'type', 'unknown'),
-                "data": dict(node.data),
-                "component_instance_path": node.component_instance_path,
-            }
+    if graph is not None:
+        for node_id, node in graph.nodes.items():
+            if hasattr(node, 'data') and node.data:
+                bound_nodes[node_id] = {
+                    "type": getattr(node, 'type', 'unknown'),
+                    "data": dict(node.data),
+                    "component_instance_path": node.component_instance_path,
+                }
 
     semantic_loss = _compute_semantic_loss(
         bound_nodes,
@@ -928,13 +929,14 @@ def _build_audit(
     traces = getattr(ReactBackend, '_render_traces', [])
     entered_set = {t.node_id for t in traces if t.phase == "entered"}
     emitted_set = {t.node_id for t in traces if t.phase == "emitted"}
+    graph_nodes = graph.nodes if graph is not None else {}
     render_coverage = {
-        "expected_nodes": len(graph.nodes),
+        "expected_nodes": len(graph_nodes),
         "nodes_entered": sum(1 for t in traces if t.phase == "entered"),
         "unique_nodes_entered": len(entered_set),
         "nodes_emitted": sum(1 for t in traces if t.phase == "emitted"),
         "unique_nodes_emitted": len(emitted_set),
-        "missing_nodes": sorted(set(graph.nodes.keys()) - entered_set),
+        "missing_nodes": sorted(set(graph_nodes.keys()) - entered_set),
         "entered_no_emit": sorted(entered_set - emitted_set),
     }
 
@@ -1053,6 +1055,7 @@ def _build_audit(
         }
 
         # UI layer: rendering representation + semantic binding fidelity
+        ui_meta: dict = {}
         _last_tree = ReactBackend.last_ui_tree
         if _last_tree is not None:
             ui_meta = {
@@ -1062,8 +1065,8 @@ def _build_audit(
             }
         trace["ui"] = {
             "graph": {
-                "nodes": list(graph.nodes.keys()),
-                "edges": len(graph.edges),
+                "nodes": list(graph_nodes.keys()),
+                "edges": len(graph.edges) if graph is not None else 0,
             },
             "render_coverage": render_coverage,
             "semantic": ui_meta,
