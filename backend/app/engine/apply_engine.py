@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import json
 import hashlib
-import re
 import subprocess
 import logging
 from dataclasses import asdict
@@ -54,86 +53,6 @@ from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 
 logger = logging.getLogger(__name__)
-
-
-def _inject_component_into_page(
-    page_path: str,
-    component_path: str,
-    workspace: str,
-) -> str | None:
-    """Inject import and JSX mount for a component into an existing Page file.
-
-    Returns modified content or None if the Page can't be read/modified.
-    """
-    abs_page = os.path.join(workspace, page_path)
-    if not os.path.isfile(abs_page):
-        return None
-
-    with open(abs_page) as f:
-        content = f.read()
-
-    comp_name = extract_component_name(component_path)
-    if not comp_name:
-        return None
-
-    # Check if already imported
-    import_pattern = re.compile(
-        r"import\s*\{\s*" + re.escape(comp_name) + r"\s*\}\s*from\s*['\"]",
-    )
-    if import_pattern.search(content):
-        return None
-
-    # Detect frontend/ prefix from page_path and normalize component_path
-    prefix = ""
-    page_dir = os.path.dirname(page_path)
-    if page_path.startswith("frontend/") and not component_path.startswith("frontend/"):
-        prefix = "frontend/"
-    norm_component = prefix + component_path if prefix else component_path
-
-    # Compute relative import path from page dir to component
-    rel_import = os.path.relpath(
-        os.path.splitext(norm_component)[0],
-        page_dir,
-    )
-    if not rel_import.startswith("."):
-        rel_import = "./" + rel_import
-
-    import_line = f"import {{{comp_name}}} from '{rel_import}';"
-
-    # Insert import after last import statement
-    lines = content.split("\n")
-    last_import_idx = -1
-    for i, line in enumerate(lines):
-        if line.strip().startswith("import ") and line.strip().endswith(";"):
-            last_import_idx = i
-    if last_import_idx < 0:
-        return None
-
-    lines.insert(last_import_idx + 1, import_line)
-
-    # Find mount point: inside return's JSX (before closing </div> or </>)
-    mount_tag = f"<{comp_name} />"
-    joined = "\n".join(lines)
-    div_close = joined.rfind("</div>")
-    if div_close < 0:
-        frag_close = joined.rfind("</>")
-        if frag_close < 0:
-            return None
-        close_pos = frag_close
-    else:
-        close_pos = div_close
-
-    pre_lines = [l for l in joined[:close_pos].rstrip("\n").split("\n") if l.strip()]
-    last_line = pre_lines[-1] if pre_lines else ""
-    indent = last_line[:len(last_line) - len(last_line.lstrip())]
-
-    new_joined = (
-        joined[:close_pos]
-        + "\n" + indent + mount_tag
-        + "\n" + joined[close_pos:]
-    )
-
-    return new_joined
 
 
 def _check_orphan_components_3layer(
@@ -213,67 +132,6 @@ def _check_orphan_components_3layer(
             )
 
     return orphans
-
-
-def _compose_orphan_creates_into_page(
-    fileops: list[FileOp],
-    workspace: str,
-    structural_index: StructuralIndex,
-) -> list[FileOp]:
-    """After rendering, compose orphan CREATE components into an existing Page.
-
-    When a CREATE fileop targets a non-Page component and no other fileop
-    modifies a Page, check if an existing Page.tsx exists in the workspace.
-    If so, inject import + JSX mount into that Page to compose the new component.
-
-    This handles cross-contract scenarios where a component is created
-    under a contract that doesn't define a Page parent (e.g. analytics.filter).
-    """
-    created_components = [
-        fop for fop in fileops
-        if fop.action == "create"
-        and "Page" not in extract_component_name(fop.path)
-    ]
-    if not created_components:
-        return []
-
-    # Check if any existing fileop already modifies a Page
-    has_page_modify = any(
-        fop.action == "modify" and "Page" in extract_component_name(fop.path)
-        for fop in fileops
-    )
-    if has_page_modify:
-        return []
-
-    # Find an existing Page file in the workspace
-    page_path = None
-    for cap_id in structural_index:
-        for inst in structural_index.get_instances(cap_id):
-            if inst.file_path and "Page" in os.path.basename(inst.file_path):
-                page_path = inst.file_path
-                break
-        if page_path:
-            break
-
-    if not page_path:
-        return []
-
-    page_ops: list[FileOp] = []
-    for fop in created_components:
-        new_content = _inject_component_into_page(page_path, fop.path, workspace)
-        if new_content is not None:
-            page_ops.append(FileOp(
-                action="modify",
-                path=page_path,
-                content=new_content,
-                pipeline_route="cross_contract_composition",
-            ))
-            logger.info(
-                "Cross-contract composition: injected %s into %s",
-                fop.path, page_path,
-            )
-
-    return page_ops
 
 
 def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | None, str | None]:

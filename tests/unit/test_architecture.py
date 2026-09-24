@@ -270,3 +270,44 @@ class TestIdentityResolverIsolation:
             "render_mode must be written exactly once per plan branch "
             f"(create/modify/reset), found {len(assignments)} assignments."
         )
+
+
+class TestSingleMaterializationRoute:
+    """F6 lock: only ONE physical materialization assembly exists.
+
+    F6 removed the dead orphan-composition route
+    (_compose_orphan_creates_into_page / _inject_component_into_page).
+    It had no callers and duplicated AnchorResolver's live physical injection.
+    These asserts prevent it from being re-introduced.
+    """
+
+    DEAD_ROUTE = "_compose_orphan_creates_into_page"
+    DEAD_HELPER = "_inject_component_into_page"
+    DEAD_ROUTE_TAG = "cross_contract_composition"
+
+    def test_dead_second_materialization_route_is_absent(self):
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        for forbidden in (self.DEAD_ROUTE, self.DEAD_HELPER, self.DEAD_ROUTE_TAG):
+            assert forbidden not in source, (
+                f"Dead orphan-composition route must not exist after F6 (found {forbidden!r}). "
+                "AnchorResolver is the only physical injection provider."
+            )
+
+    def test_dead_route_not_in_module_symbols(self):
+        from app.engine import apply_engine
+        for forbidden in (self.DEAD_ROUTE, self.DEAD_HELPER):
+            assert not hasattr(apply_engine, forbidden), (
+                f"Module must not export dead route {forbidden!r}."
+            )
+
+    def test_single_assembly_guards_present(self):
+        """The one materialization assembly retains its final validation gates."""
+        from app.engine import apply_engine
+        source = inspect.getsource(apply_engine)
+        assert "validate_fileop_collisions(fileops)" in source, (
+            "The single assembly must still gate on FileOp collisions."
+        )
+        assert "validate_fileop_plan_provenance(fileops, structural_ir)" in source, (
+            "The single assembly must still gate on FileOp plan provenance."
+        )
