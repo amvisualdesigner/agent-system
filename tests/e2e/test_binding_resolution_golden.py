@@ -15,10 +15,15 @@ import os
 
 from app.binding.models import ResolvedBindings, BindingProvenance
 from app.binding.resolver import resolve as resolve_bindings
-from app.graphir.backends import ReactBackend, BackendConfig
+from app.graphir.backends import BackendConfig
 from app.graphir.models import GraphIRNode, GraphIREdge, GraphIRDraft, EdgeRole
 from app.graphir.layout import LayoutDerivationEngine
-from app.graphir.backends.react_backend import JSVariable
+from app.graphir.constraint.context import PipelineState, RenderContext
+from app.graphir.constraint.models import Decision, FileOpDecision
+from app.graphir.constraint.renderer import RepositoryAwareRenderer
+from app.graphir.path_resolver import FilePathResolver
+from app.graphir.ui_ir import UIGeneratorContext
+from app.graphir.backends.react_backend import JSVariable, ReactBackend
 from app.signature.prop_mapper import DataSourceIR, DataSlice
 
 
@@ -29,17 +34,20 @@ def _render_with_bindings(
     provenance: dict[str, dict[str, str]] | None = None,
     page_data: dict | None = None,
 ) -> tuple[list, str]:
-    """Build Page graph + render con ResolvedBindings → (fileops, page_content).
+    """Build Page graph + render via the CONSTRAINT renderer (single live route).
 
-    _distribute_page_slices puede estar activa (PR2) o eliminada (PR3).
-    El test debe pasar en ambos casos.
+    F10/F11 (option 3): legacy ReactBackend.render() was removed. This harness
+    drives RepositoryAwareRenderer directly with a create projection per node —
+    the same decisions apply_engine feeds the constraint renderer.
     """
     ReactBackend.reset_emit_log("golden_test")
     ReactBackend.reset_traces("golden_test")
 
     draft = GraphIRDraft()
     draft.add_node(GraphIRNode(id="page", type="Page", data=page_data or {}))
+    typed: dict[str, str] = {"page": "Page"}
     for cid, ctype, cdata in children:
+        typed[cid] = ctype
         draft.add_node(GraphIRNode(id=cid, type=ctype, data=cdata))
         draft.add_edge(GraphIREdge(source="page", target=cid, role=EdgeRole.CONTAINS))
     graph = draft.freeze()
@@ -55,8 +63,25 @@ def _render_with_bindings(
         page_data_source=page_data_source,
     )
 
-    backend = ReactBackend()
-    fileops = backend.render(graph, layout, config, resolved_bindings=resolved)
+    decisions: dict[str, FileOpDecision] = {}
+    for nid, ntype in typed.items():
+        target = FilePathResolver.resolve(
+            UIGeneratorContext(id=nid, type=ntype, data={}), config,
+        )
+        decisions[nid] = FileOpDecision(
+            intent_id="",
+            graphir_node_id=nid,
+            decision=Decision.CREATE,
+            target_file=target,
+            render_mode="create",
+        )
+
+    renderer = RepositoryAwareRenderer()
+    fileops = renderer.render(
+        graph, layout, config,
+        context=RenderContext(execution=PipelineState(decisions=decisions)),
+        resolved_bindings=resolved,
+    )
 
     page_ops = [f for f in fileops if "Page" in f.path]
     page_content = page_ops[0].content if page_ops else ""
@@ -198,9 +223,29 @@ class TestBindingResolverGolden:
             unconsumed_params={"region"},
         )
 
-        backend = ReactBackend()
-        fileops = backend.render(graph, layout, BackendConfig(),
-                                 resolved_bindings=resolved)
+        config = BackendConfig()
+        target = FilePathResolver.resolve(
+            UIGeneratorContext(id="page", type="Page", data={}), config,
+        )
+        decisions = {
+            "page": FileOpDecision(
+                intent_id="", graphir_node_id="page", decision=Decision.CREATE,
+                target_file=target, render_mode="create",
+            ),
+            "kpi": FileOpDecision(
+                intent_id="", graphir_node_id="kpi", decision=Decision.CREATE,
+                target_file=FilePathResolver.resolve(
+                    UIGeneratorContext(id="kpi", type="KpiRow", data={}), config,
+                ),
+                render_mode="create",
+            ),
+        }
+        renderer = RepositoryAwareRenderer()
+        fileops = renderer.render(
+            graph, layout, config,
+            context=RenderContext(execution=PipelineState(decisions=decisions)),
+            resolved_bindings=resolved,
+        )
         page_ops = [f for f in fileops if "Page" in f.path]
         assert len(page_ops) >= 1
         assert "data={_pageData.kpiData}" in page_ops[0].content

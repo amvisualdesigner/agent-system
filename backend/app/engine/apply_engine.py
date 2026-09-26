@@ -888,7 +888,6 @@ def _build_audit(
     route = exec_ctx.active_route if exec_ctx else "unknown"
     pipeline_route: dict = {
         "route": route,
-        "constraint_graph": bool(FEATURE_FLAGS.get("constraint_graph", False)),
     }
 
     # Detect route anomalies
@@ -1041,7 +1040,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
       2. ContractResolution from SkillIR
       3. StructuralIR (merge + slot mapping)
       4. GraphIR pipeline (build_from_structural + layout + validate)
-      5. ConstraintGraph (if enabled) or BackendRenderer → FileOps
+      5. ConstraintGraph renderer → FileOps
       6. Apply → git commit
     """
     guard_within(context.workspace, settings.RUNS_DIR)
@@ -1073,7 +1072,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         workspace_root=context.workspace,
         worktree_id=f"agent-{run_id[:8]}",
         artifacts_dir=context.artifacts,
-        active_route="constraint" if FEATURE_FLAGS.get("constraint_graph", False) else "renderer",
+        active_route="constraint",
     )
 
     skill_ir = plan.get("skill_ir")
@@ -1293,7 +1292,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         except Exception as e:
             logger.warning("DATASOURCE_BOOTSTRAP failed: %s", e)
 
-    # ── Step 3: ConstraintGraph or BackendRenderer ──
+    # ── Step 3: ConstraintGraph renderer (single materialization route) ──
     # Delete-only plans (graph is None) skip rendering entirely (F1).
     fileops: list[FileOp] = []
     files = contract.renderer.get("files", [])
@@ -1312,7 +1311,10 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     file_path_overrides: dict[str, str] = {}
     for comp_type, cap_id in capabilities_map.items():
         file_paths = structural_index.resolve_all_file_paths(cap_id) if structural_index else []
-        if file_paths:
+        if len(file_paths) == 1:
+            # F10.4 (option 1): physical normalization is allowed only for a
+            # single instance. 0 → no override; N → no silent selection. Never
+            # substitute a heuristic or sort; no implicit N→1.
             file_path_overrides[comp_type] = file_paths[0]
 
     # Phase 4.5: extract component signatures from worktree
@@ -1341,7 +1343,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     _audit_render_ctx = None
     _audit_split_recommendation: list = []
 
-    if graph is not None and FEATURE_FLAGS.get("constraint_graph", False):
+    if graph is not None:
         # ConstraintGraph pipeline
         from app.graphir.constraint.indexer import RepositoryIndexer
         from app.graphir.constraint.matcher import IntentFileMatcher
@@ -1500,21 +1502,6 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             decisions, identities, resolved_mapping,
         )
         memory.save(updated)
-    elif graph is not None:
-        # Direct BackendRenderer
-        ReactBackend.reset_emit_log(run_id)
-        ReactBackend.reset_traces(run_id)
-        backend = ReactBackend()
-        contract_params = contract_resolution.contract_params if contract_resolution else None
-        resolved_bindings = resolve_bindings(
-            contract_params or {},
-        ) if contract_params else None
-        try:
-            fileops = backend.render(graph, graph_layout, backend_config, resolved_bindings=resolved_bindings)
-        except MISSING_REQUIRED_PROPS as e:
-            return FallbackExecutionRequest(
-                reason=str(e), conflict_type="missing_required_param", level=2,
-            ).to_result()
 
     # ── Capture emitted props ──
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))

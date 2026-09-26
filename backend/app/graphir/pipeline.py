@@ -12,7 +12,7 @@ Pipeline order (immutable):
 
 The pipeline does NOT interact with renderers. It produces
 (GraphIR, GraphIRLayout) and returns them. The caller (typically
-apply_engine.py) passes both to a BackendRenderer.
+apply_engine.py) passes both to the ConstraintGraph renderer.
 """
 from __future__ import annotations
 

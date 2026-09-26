@@ -23,6 +23,13 @@ def _select_instance(instances: list[ComponentInstanceInfo]) -> str | None:
     1 instance → return its instance_id
     N instances → return min lexicographic instance_id
     0 instances → return None (caller creates new)
+
+    F11 contract: PROPOSAL/PROPERTE-level only. This selection feeds
+    `capability_to_path` (used for RepositoryValidation R1c projection and
+    GraphIR builder metadata) and never reaches materialization on its own:
+    RepositoryValidation R-b (MODIFY with N>1 and no explicit selection) raises
+    CONFLICT before any file is written. A silent N→1 pick must never become a
+    rendered target.
     """
     if not instances:
         return None

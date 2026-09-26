@@ -1,8 +1,8 @@
 """INTERNAL CONTRACT — single source of truth for file path resolution.
 
-Unifies Path A (ReactBackend._resolve_file_path) and Path B
-(decision.target_file) into one function. Path A calls resolve()
-directly. Path B uses decision.target_file with resolve() as fallback.
+Unifies Path B (decision.target_file) and the renderer fallback
+(FilePathResolver.resolve) into one function. RepositoryAwareRenderer
+uses decision.target_file with resolve() as fallback.
 
 Contract:
     - resolve() is the ONLY file path resolution function.

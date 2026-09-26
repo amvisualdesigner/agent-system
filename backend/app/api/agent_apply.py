@@ -1,4 +1,5 @@
 import logging
+import os
 import traceback
 
 from fastapi import APIRouter, HTTPException
@@ -87,6 +88,24 @@ def _agent_apply(req: ApplyRequest):
         ops = [FileOp(**op) if isinstance(op, dict) else op for op in page_creator_ops_raw]
         for fop in ops:
             if fop.action == "CREATE":
+                # F11 physical validation: a page CREATE must never overwrite an
+                # existing target. CONFLICT (no write, no alternate path).
+                abs_target = os.path.join(context.workspace, fop.path)
+                if os.path.isfile(abs_target):
+                    return {
+                        "execution": {
+                            "status": "clarification_needed",
+                            "reason": "page_target_exists",
+                            "detail": (
+                                f"page_creator CONFLICT: target '{fop.path}' already "
+                                f"exists; a new page requires a target that does not "
+                                f"exist. No overwrite, no alternate path."
+                            ),
+                            "diff": None,
+                            "operations": [],
+                        },
+                        "context": {"repo_snapshot": []},
+                    }
                 applier.apply([fop])
                 logger.info("Applied page_creator CREATE: %s", fop.path)
             elif fop.action == "MODIFY":
@@ -119,23 +138,6 @@ def _agent_apply(req: ApplyRequest):
             result["fileops"] = existing + [op.to_dict() if hasattr(op, 'to_dict') else op for op in page_modify_ops_raw]
         except Exception as e:
             logger.warning("Failed to apply page_creator MODIFY ops: %s", e)
-            result["page_creator_warning"] = str(e)
-
-    # ── Backward compat: apply page_creator_ops after apply_engine
-    #    when forced_anchor_path is not set (old confirm state) ──
-    if page_creator_ops_raw and not forced_anchor_path and not req.dry_run:
-        try:
-            from app.graphir.constraint.executor import FileOpApplier
-            from app.graphir.utils import FileOp
-            applier = FileOpApplier(context.workspace)
-            ops = [FileOp(**op) if isinstance(op, dict) else op for op in page_creator_ops_raw]
-            for fop in ops:
-                applier.apply([fop])
-            logger.info("Applied %d page_creator_ops (backward compat) for run_id=%s", len(ops), run_id)
-            existing = result.get("fileops", [])
-            result["fileops"] = existing + [op.to_dict() if hasattr(op, 'to_dict') else op for op in ops]
-        except Exception as e:
-            logger.warning("Failed to apply page_creator_ops (backward compat): %s", e)
             result["page_creator_warning"] = str(e)
 
     if page_creator_ops_raw and req.dry_run:

@@ -25,9 +25,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.graphir.models import GraphIR, GraphIRLayout
-from app.graphir.models import FileOp
-
 
 @dataclass(frozen=True)
 class BackendConfig:
@@ -53,20 +50,16 @@ class BackendConfig:
 
 
 class BackendRenderer(ABC):
-    """Stateless, dumb translator: GraphIR → list[FileOp].
+    """Stateless renderer base — framework identity + shared config.
 
-    Subclasses implement framework-specific rendering logic.
-    All subclasses MUST be stateless (no caching between calls).
+    F10/F11: the terminal materialization route is the ConstraintGraph
+    renderer (RepositoryAwareRenderer in app.graphir.constraint.renderer),
+    which implements rendering responsibilities (composition, page hooks,
+    data imports, export normalization, traces). The legacy GraphIR-level
+    `render()` entry point was removed; BackendRenderer now only provides
+    framework identification and the shared BackendConfig dataclass.
+    Subclasses MUST be stateless (no caching between calls).
     """
-
-    @abstractmethod
-    def render(
-        self,
-        graph: GraphIR,
-        layout: GraphIRLayout,
-        config: BackendConfig,
-    ) -> list[FileOp]:
-        ...
 
     @abstractmethod
     def framework_name(self) -> str:

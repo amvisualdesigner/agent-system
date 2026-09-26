@@ -1,8 +1,13 @@
 """Phase 6 — End-to-end graph execution: Page data source + slice distribution.
 
-Tests verify the full rendering pipeline:
-  GraphIR → UIIRCompiler (with page_data_source) → ReactBackend.render_tree()
+Tests verify the full rendering pipeline via the CONSTRAINT renderer (single
+live materialization route):
+  GraphIR → UIIRCompiler (with page_data_source) → RepositoryAwareRenderer
     → FileOp content with _pageData hook declaration + slice JSVariable refs
+
+F10/F11 (option 3): legacy ReactBackend.render() was removed; this suite drives
+RepositoryAwareRenderer with a create projection per node — the same decisions
+apply_engine feeds the constraint renderer.
 
 Scope guard enforced: Page only emits selectors (pageData.kpiData),
 never transformations (no filter/map/reduce).
@@ -18,14 +23,16 @@ Cases:
 
 from __future__ import annotations
 
-import shutil
-import tempfile
-
-from app.binding.models import ResolvedBindings
 from app.binding.resolver import resolve as resolve_bindings
-from app.graphir.backends import ReactBackend, BackendConfig
+from app.graphir.backends import BackendConfig
 from app.graphir.models import GraphIRNode, GraphIREdge, GraphIRDraft, EdgeRole
 from app.graphir.layout import LayoutDerivationEngine
+from app.graphir.constraint.context import PipelineState, RenderContext
+from app.graphir.constraint.models import Decision, FileOpDecision
+from app.graphir.constraint.renderer import RepositoryAwareRenderer
+from app.graphir.path_resolver import FilePathResolver
+from app.graphir.ui_ir import UIGeneratorContext
+from app.graphir.backends.react_backend import ReactBackend
 from app.signature.prop_mapper import DataSourceIR, DataSlice
 
 
@@ -55,11 +62,38 @@ def _make_datasource_ir(slices: list[dict] | None = None) -> DataSourceIR | None
     )
 
 
+def _render_graph(
+    graph,
+    layout,
+    config: BackendConfig,
+    resolved_bindings=None,
+) -> list:
+    """Render via the constraint renderer with a create projection per node."""
+    decisions: dict[str, FileOpDecision] = {}
+    for nid, node in graph.nodes.items():
+        target = FilePathResolver.resolve(
+            UIGeneratorContext(id=nid, type=node.type, data={}), config,
+        )
+        decisions[nid] = FileOpDecision(
+            intent_id="",
+            graphir_node_id=nid,
+            decision=Decision.CREATE,
+            target_file=target,
+            render_mode="create",
+        )
+    renderer = RepositoryAwareRenderer()
+    return renderer.render(
+        graph, layout, config,
+        context=RenderContext(execution=PipelineState(decisions=decisions)),
+        resolved_bindings=resolved_bindings,
+    )
+
+
 def _render_page(
     children: list[tuple[str, str, dict]],
     page_data: dict | None = None,
     slices: list[dict] | None = None,
-    resolved_bindings: ResolvedBindings | None = None,
+    resolved_bindings=None,
 ) -> tuple[list, str]:
     """Build Page graph + render → (fileops, page_content).
 
@@ -81,23 +115,18 @@ def _render_page(
     graph = draft.freeze()
     layout = LayoutDerivationEngine.derive(graph)
 
-    ws = tempfile.mkdtemp(prefix="phase6_e2e_")
-    config = BackendConfig(workspace=ws)
+    config = BackendConfig()
 
     # PR1: When resolved_bindings not provided, resolve from global SSOT + slices override
     if resolved_bindings is None:
         page_ds = _make_datasource_ir(slices)
         resolved_bindings = resolve_bindings({}, page_ds_override=page_ds)
 
-    backend = ReactBackend()
-    fileops = backend.render(graph, layout, config, resolved_bindings=resolved_bindings)
+    fileops = _render_graph(graph, layout, config, resolved_bindings)
 
     page_ops = [f for f in fileops if "Page" in f.path and "SalesOverview" not in f.path]
     page_file = page_ops[0] if page_ops else None
     page_content = page_file.content if page_file else ""
-
-    # Cleanup
-    shutil.rmtree(ws)
 
     return fileops, page_content
 
@@ -188,7 +217,6 @@ class TestPhase6SimplePage:
         ds = _make_datasource_ir([
             {"component": "KpiRow", "targetProp": "data", "selector": "kpiData"},
         ])
-        backend = ReactBackend()
         draft = GraphIRDraft()
         draft.add_node(GraphIRNode(id="page", type="Page", data={}))
         draft.add_node(GraphIRNode(id="kpi", type="KpiRow", data={}))
@@ -197,7 +225,7 @@ class TestPhase6SimplePage:
         layout = LayoutDerivationEngine.derive(graph)
         config = BackendConfig()
         rb = resolve_bindings({}, page_ds_override=ds)
-        backend.render(graph, layout, config, resolved_bindings=rb)
+        _render_graph(graph, layout, config, rb)
         traces = ReactBackend._render_traces
         emitted = [t for t in traces if t.phase == "emitted"]
         assert len(emitted) >= 1, "Should have at least one emitted trace"
@@ -291,8 +319,7 @@ class TestPhase6NoSlices:
         graph = draft.freeze()
         layout = LayoutDerivationEngine.derive(graph)
         config = BackendConfig()  # no workspace
-        backend = ReactBackend()
-        fileops = backend.render(graph, layout, config)
+        fileops = _render_graph(graph, layout, config, None)
         page_ops = [f for f in fileops if "Page" in f.path]
         assert len(page_ops) >= 1
         assert "useDashboardData" not in page_ops[0].content
@@ -327,9 +354,8 @@ class TestPhase6NestedComponents:
             {"component": "Timeseries", "targetProp": "data", "selector": "chartData.ts"},
         ])
         config = BackendConfig()
-        backend = ReactBackend()
         rb = resolve_bindings({}, page_ds_override=ds)
-        fileops = backend.render(graph, layout, config, resolved_bindings=rb)
+        fileops = _render_graph(graph, layout, config, rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
 
         assert "const _pageData = useDashboardData();" in page_content
@@ -345,9 +371,8 @@ class TestPhase6NestedComponents:
             {"component": "Timeseries", "targetProp": "data", "selector": "chartData.ts"},
         ])
         config = BackendConfig()
-        backend = ReactBackend()
         rb = resolve_bindings({}, page_ds_override=ds)
-        fileops = backend.render(graph, layout, config, resolved_bindings=rb)
+        fileops = _render_graph(graph, layout, config, rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
 
         # KpiRow is under Section, not direct child of Page
@@ -361,9 +386,8 @@ class TestPhase6NestedComponents:
         layout = LayoutDerivationEngine.derive(graph)
         ds = _make_datasource_ir([])
         config = BackendConfig()
-        backend = ReactBackend()
         rb = resolve_bindings({}, page_ds_override=ds)
-        fileops = backend.render(graph, layout, config, resolved_bindings=rb)
+        fileops = _render_graph(graph, layout, config, rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
 
         assert "Section" in page_content, "Section should appear in composition"
@@ -392,12 +416,8 @@ class TestPhase6WithContractParams:
         graph = draft.freeze()
         layout = LayoutDerivationEngine.derive(graph)
 
-        backend = ReactBackend()
         rb = resolve_bindings({})
-        fileops = backend.render(
-            graph, layout, config,
-            resolved_bindings=rb,
-        )
+        fileops = _render_graph(graph, layout, config, rb)
         page_content = [f for f in fileops if "Page" in f.path][0].content
 
         assert "const _pageData = useDashboardData();" in page_content

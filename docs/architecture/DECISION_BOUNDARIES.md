@@ -62,9 +62,10 @@ After confirmation, validation answers only:
 > Can the confirmed plan still be executed against the current repository?
 
 Valid outcomes:
-- `VALID`
-- `CONFLICT`
-- `INVALID`
+- `VALID` — the confirmed plan executes as confirmed.
+- `CONFLICT` — the confirmed plan is no longer (or cannot be) executed as confirmed. Reported to the user; nothing is written.
+
+There is no third outcome: any state that is not VALID is surfaced as a CONFLICT for the user. Validation never invents a replacement plan.
 
 If a conflict requires a semantic alternative, return to the user.
 
@@ -77,6 +78,14 @@ Required:
 ```text
 confirmed plan → repository changed → ask user
 ```
+
+CREATE against an existing target (and no explicit new-instance hint) is a CONFLICT — the repository is never overwritten silently.
+
+## PageCreator (physical operation)
+User-chosen `create_new` generates page CREATE ops. Physical validation at generation and at apply:
+- target absent → CREATE FileOp;
+- target exists → CONFLICT (no overwrite, no alternate path, no memory, no heuristics);
+- deterministic per snapshot.
 
 ## Renderer
 Materialize an already-decided structure. Technical rendering choices are allowed; semantic intent changes are not.

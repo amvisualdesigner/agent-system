@@ -1,11 +1,5 @@
 FEATURE_FLAGS = {
-    "freeze_scaffold": True,
-    "skill_ir_output": True,
-    "renderer_active": True,
-    "executor_dumb": True,
-    "constraint_graph": True,             # ConstraintGraph pipeline (composition, CRL, delete) — F5: SPLIT is analysis/evidence only
-
-    # ── Structural path runtime config ──
+    # ── Runtime config ──
     "execution_mode": "graphir",          # Execution mode label
     "trace_level": "full",                # Trace verbosity (minimal | normal | full)
     "structural_resolver": True,          # Enable Resolver + Ambiguity Gate (Fase 2)

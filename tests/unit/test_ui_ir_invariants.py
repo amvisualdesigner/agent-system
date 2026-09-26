@@ -6,8 +6,8 @@ Guarantees:
   - Multi-node: graph edges match tree children structure
   - Empty data: node.data = {} → props = {}
   - Deterministic: same input → identical tree
-  - Null emission: None → {{null}} in JSX output
-  - Render correctness: final React output contains expected props
+  - Null emission: None → {{null}} in JSX output (shared _emit)
+  - Generator content: covered in test_react_legacy_harness.py
 """
 
 import os
@@ -21,9 +21,7 @@ from app.graphir.models import (
     EdgeRole, GraphIR, GraphIRLayout, GraphIRNode, GraphIREdge,
     LayoutConstraint,
 )
-from app.graphir.backends.base import BackendConfig
 from app.graphir.backends.react_backend import ReactBackend
-from app.graphir.ui_ir import UIComponentNode, UIComponentTree
 from app.graphir.compiler import UIIRCompiler
 
 
@@ -201,81 +199,6 @@ class TestReactBackendEmit(unittest.TestCase):
         # Each key produces exactly one attribute
         for key in props:
             self.assertIn(key, result)
-
-
-class TestReactBackendRenderTree(unittest.TestCase):
-    """ReactBackend.render_tree — UIComponentTree → FileOps.
-    
-    Uses built-in generators (registered at import time).
-    """
-
-    def test_render_tree_single_node(self):
-        """Single root node produces one FileOp with correct path."""
-        tree = UIComponentTree(root=UIComponentNode(
-            id="page1", component="Page", props={},
-        ))
-        config = BackendConfig(output_base_path="src/")
-        fileops = ReactBackend().render_tree(tree, config)
-
-        self.assertEqual(len(fileops), 1)
-        self.assertEqual(fileops[0].path, "src/Page.tsx")
-
-    def test_render_tree_props_in_composition(self):
-        """Child props appear in parent's composed output."""
-        tree = UIComponentTree(root=UIComponentNode(
-            id="page1", component="Page", props={},
-            children=[
-                UIComponentNode(
-                    id="table1", component="AnalyticsTable",
-                    props={"columns": ["A", "B"]},
-                ),
-            ],
-        ))
-        config = BackendConfig(output_base_path="src/")
-        fileops = ReactBackend().render_tree(tree, config)
-
-        # Page.tsx content should contain child mount with props
-        page_content = next(op.content for op in fileops if "Page.tsx" in op.path)
-        self.assertIn('columns={["A", "B"]}', page_content)
-
-    def test_render_tree_emits_null_explicitly(self):
-        """None props emit as {null} in parent's composed output."""
-        tree = UIComponentTree(root=UIComponentNode(
-            id="page1", component="Page", props={},
-            children=[
-                UIComponentNode(
-                    id="t1", component="KpiRow",
-                    props={"metrics": ["revenue"], "loading": None},
-                ),
-            ],
-        ))
-        config = BackendConfig(output_base_path="src/")
-        fileops = ReactBackend().render_tree(tree, config)
-
-        page_content = next(op.content for op in fileops if "Page.tsx" in op.path)
-        self.assertIn("loading={null}", page_content)
-
-    def test_render_tree_multi_child(self):
-        """Multiple children all appear in parent's composed output."""
-        tree = UIComponentTree(root=UIComponentNode(
-            id="page1", component="Page", props={},
-            children=[
-                UIComponentNode(
-                    id="kpi1", component="KpiRow",
-                    props={"metrics": ["m1"]},
-                ),
-                UIComponentNode(
-                    id="table1", component="AnalyticsTable",
-                    props={"columns": ["c1", "c2"]},
-                ),
-            ],
-        ))
-        config = BackendConfig(output_base_path="src/")
-        fileops = ReactBackend().render_tree(tree, config)
-
-        page_content = next(op.content for op in fileops if "Page.tsx" in op.path)
-        self.assertIn('metrics={["m1"]}', page_content)
-        self.assertIn('columns={["c1", "c2"]}', page_content)
 
 
 if __name__ == "__main__":

@@ -10,13 +10,13 @@ Architecture:
        ↓
   LayoutDerivationEngine → GraphIRLayout
        ↓
-  BackendRenderer → list[FileOp]
+  ConstraintGraph Renderer → list[FileOp]
 
 Hard constraints (violation = regression):
   1. EdgeRole is purely semantic (CONTAINS/PRIMARY/SUPPORTING only)
   2. LayoutDerivationEngine is the ONLY layout authority
   3. GraphIRDraft is the ONLY mutable state (builder-internal)
-  4. BackendRenderer is stateless and dumb
+  4. The renderer materializes only; it does not interpret semantic intent
   5. No template defines structure
 """
 

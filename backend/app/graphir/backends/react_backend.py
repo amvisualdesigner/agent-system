@@ -21,24 +21,17 @@ from typing import Any, Callable, ClassVar
 
 logger = logging.getLogger(__name__)
 
-from app.binding.models import ResolvedBindings
-from app.graphir.compiler import UIIRCompiler
-from app.graphir.models import FileOp, GraphIR, GraphIRNode, LayoutConstraint
-from app.graphir.layout import GraphIRLayout
+from app.graphir.models import FileOp, GraphIRNode, LayoutConstraint
 from app.graphir.backends.base import BackendRenderer, BackendConfig
-from app.graphir.path_resolver import FilePathResolver
 from app.graphir.ui_ir import (
     UIComponentNode,
     UIComponentTree,
-    UIGeneratorContext,
 )
 from app.signature.prop_mapper import (
-    MISSING_REQUIRED_PROPS,
     DataSourceIR,
     JSExpression,
     _HOOK_IMPORT_MAP,
     _REACT_HOOK_MAP,
-    load_page_data_source,
 )
 
 ComponentGenerator = Callable[
@@ -150,134 +143,12 @@ class ReactBackend(BackendRenderer):
     def framework_name(self) -> str:
         return "react"
 
-    def render(
-        self,
-        graph: GraphIR,
-        layout: GraphIRLayout,
-        config: BackendConfig,
-        resolved_bindings: ResolvedBindings | None = None,
-    ) -> list[FileOp]:
-        """GraphIR → FileOps via UIIRCompiler + render_tree.
-
-        This is the entry point. Delegates compilation to UIIRCompiler
-        and rendering to render_tree. No direct access to graph.nodes.
-
-        Props are pre-resolved by BindingResolver — contract_params never
-        reach the compiler or renderer (PR1 Binding Resolution Architecture).
-        """
-        tree = UIIRCompiler.compile(
-            graph, layout,
-            resolved_bindings=resolved_bindings,
-            component_signatures=config.component_signatures,
-        )
-        ReactBackend.last_ui_tree = tree
-        return self.render_tree(tree, config)
-
-    def render_tree(
-        self,
-        tree: UIComponentTree,
-        config: BackendConfig,
-    ) -> list[FileOp]:
-        """UIComponentTree → FileOps. NO access to GraphIR.
-
-        Consumes only the compiled UI tree. Each node is wrapped in
-        UIGeneratorContext to interface with existing generators.
-        """
-        fileops: list[FileOp] = []
-        for uinode in _flatten_tree(tree.root):
-            ReactBackend.add_trace(uinode.id, "entered", component=uinode.component)
-
-            # instance_only: capability exists in repo, requested as CREATE.
-            # Skip file generation — the implementation file stays untouched.
-            # The node still participates in parent composition (via _render_children).
-            if uinode.instance_only:
-                ReactBackend.add_trace(uinode.id, "skipped_instance_only",
-                    component=uinode.component)
-                continue
-
-            # BINDING_MISSING: prop has no binding at render time.
-            # If the missing prop is REQUIRED → HARD error (MISSING_REQUIRED_PROPS).
-            # If the missing prop is optional → skip node with warning.
-            if uinode.binding_missing_props:
-                required = ReactBackend._known_required_props(uinode.component, config)
-                missing_required = [p for p in uinode.binding_missing_props
-                                    if required and p in required]
-                if missing_required:
-                    raise RuntimeError(
-                        f"MISSING_REQUIRED_PROPS:{uinode.component}"
-                        f":{','.join(missing_required)}"
-                        f":binding_missing at render time — no fallback available"
-                    )
-                ReactBackend.add_trace(uinode.id, "binding_missing",
-                    component=uinode.component,
-                    props={"missing_props": list(uinode.binding_missing_props)})
-                logger.warning(
-                    "OPTIONAL_BINDING_MISSING: %s missing optional props: %s — skipping render.",
-                    uinode.component, uinode.binding_missing_props,
-                )
-                continue
-
-            generator = self._generators.get(uinode.component)
-            if generator is None:
-                continue
-
-            ctx = UIGeneratorContext(
-                id=uinode.id,
-                type=uinode.component,
-                data=dict(uinode.props),
-            )
-            content = generator(ctx, uinode.layout_hints, self, config)
-
-            # PR3: props come from ResolvedBindings.component_props (set in compiler).
-            # _distribute_page_slices deleted — all resolution is pre-compilation.
-            page_hook_decl: str | None = None
-            if uinode.component == "Page" and tree.page_data_source:
-                page_hook_decl = ReactBackend._page_hook_declaration(tree.page_data_source)
-                hook_import = ReactBackend._page_hook_import(tree.page_data_source)
-                if hook_import and hook_import not in uinode.data_imports:
-                    uinode.data_imports = tuple(list(uinode.data_imports) + [hook_import])
-
-            # Phase 5: inject data_access.json imports (Page only in Phase 6)
-            if uinode.data_imports:
-                content = ReactBackend._inject_data_imports(content, uinode.data_imports)
-
-            composition = ReactBackend._render_children(uinode.children, config) if uinode.children else ""
-            content = self._inject_composition(content, composition)
-
-            # Phase 6: inject Page hook declaration after composition injected
-            if page_hook_decl:
-                content = ReactBackend._inject_hook_declarations(content, [page_hook_decl])
-
-            file_path = FilePathResolver.resolve(ctx, config)
-
-            # Fix 1 — Export normalization: when the target filename differs from
-            # the component type (e.g. Page type written to SalesOverviewPage.tsx),
-            # rename the export and interface to match the file basename.
-            file_basename = os.path.splitext(os.path.basename(file_path))[0]
-            if uinode.component != file_basename and file_basename:
-                content = self._normalize_export_name(content, uinode.component, file_basename)
-
-            fileops.append(FileOp(action="create", path=file_path, content=content, pipeline_route="renderer"))
-            ReactBackend.add_trace(uinode.id, "emitted", component=uinode.component, props=dict(uinode.props))
-
-        return fileops
-
-    def _resolve_file_path(self, node, config: BackendConfig) -> str:
-        return FilePathResolver.resolve(node, config)
-
     @staticmethod
     def _known_prop_names(component_type: str, config: BackendConfig) -> set[str] | None:
         """Return set of known prop names from a component's signature, or None if unknown."""
         sig = (config.component_signatures or {}).get(component_type, {})
         pn = sig.get("prop_names")
         return set(pn) if pn else None
-
-    @staticmethod
-    def _known_required_props(component_type: str, config: BackendConfig) -> list[str] | None:
-        """Return list of required prop names from a component's signature, or None if unknown."""
-        sig = (config.component_signatures or {}).get(component_type, {})
-        rp = sig.get("required_props")
-        return rp if rp else None
 
     @staticmethod
     def _inject_data_imports(content: str, data_imports: tuple[str, ...]) -> str:
@@ -352,70 +223,6 @@ class ReactBackend(BackendRenderer):
         return content
 
     @staticmethod
-    def _render_children(children: list[UIComponentNode], config: BackendConfig) -> str:
-        """UIComponentNode list → mounted JSX string.
-
-        Uses _emit() for props. Filters unknown props when child has a known signature.
-        Applies layout wrappers from layout_hints.
-
-        RENDER IS DUMB: no prop resolution, no fallback inference.
-        required_props MUST be present — if missing, HARD error.
-        optional_props MAY use fallback_props ONLY when contract defaults +
-        bindings are absent (strict boundary).
-        """
-        parts: list[str] = []
-        for child in children:
-            emit_props = child.props or {}
-
-            # Required props guard: if compilation gate somehow missed a
-            # required prop, we catch it here as a hard error.
-            required = ReactBackend._known_required_props(child.component, config)
-            if required is not None:
-                missing_required = [r for r in required if r not in emit_props]
-                if missing_required:
-                    raise RuntimeError(
-                        f"MISSING_REQUIRED_PROPS_AT_RENDER:{child.component}"
-                        f":{','.join(missing_required)}"
-                        f":available={list(emit_props.keys())}"
-                    )
-
-            # fallback_props for OPTIONAL props only — when contract defaults
-            # absent AND no binding exists AND prop is optional.
-            if required is not None and child.fallback_props:
-                optional_props = child.fallback_props  # for optional-only resolution
-            else:
-                optional_props = {}
-
-            ReactBackend._emit_log.setdefault(ReactBackend._current_run, []).append(
-                {"component": child.component, "props": {
-                    k: v.code if isinstance(v, JSExpression)
-                    else v.name if isinstance(v, JSVariable)
-                    else v
-                    for k, v in emit_props.items()
-                }, "node_id": child.id}
-            )
-            # Filter props against known signature to avoid type mismatches
-            known = ReactBackend._known_prop_names(child.component, config)
-            filtered_props = {k: v for k, v in emit_props.items() if known is None or k in known} if emit_props else emit_props
-            props_str = ReactBackend._emit(filtered_props)
-            child_tag = (
-                f"<{child.component} {props_str} />" if props_str
-                else f"<{child.component} />"
-            )
-            if not props_str and known and known is not None:
-                logger.warning(
-                    "EMIT-EMPTY: %s (id=%s) emitted bare tag (no props). "
-                    "Known prop_names=%s but props=%s. Check data_access.json slices.",
-                    child.component, child.id, known, emit_props,
-                )
-            if child.layout_hints:
-                open_tag, close_tag = ReactBackend._layout_to_wrapper(child.layout_hints)
-                parts.append(f"{open_tag}\n        {child_tag}\n      {close_tag}")
-            else:
-                parts.append(child_tag)
-        return "\n".join(parts)
-
-    @staticmethod
     def _emit(props: dict[str, Any]) -> str:
         """Framework-specific: dict → JSX attribute string.
 
@@ -459,10 +266,6 @@ class ReactBackend(BackendRenderer):
             else:
                 parts.append(f"{k}={{{json.dumps(v)}}}")
         return " ".join(parts)
-
-    @staticmethod
-    def _inject_composition(content: str, composition: str) -> str:
-        return content.replace("__COMPOSITION__", composition)
 
     @staticmethod
     def _layout_to_wrapper(constraints: list[LayoutConstraint]) -> tuple[str, str]:

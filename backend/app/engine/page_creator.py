@@ -8,11 +8,18 @@ from app.graphir.models import FileOp
 logger = logging.getLogger(__name__)
 
 
+class PageCreateTargetExistsError(Exception):
+    """F11 physical validation — a page CREATE target already exists.
+
+    Raised instead of overwriting or inventing an alternate path. The user
+    must choose another context or MODIFY the existing page.
+    """
+
+
 _PAGE_TEMPLATE = '''export default function {name}() {{
   return <div />
 }}
 '''
-
 
 _ROUTER_IMPORT_TPL = "import {{ {name} }} from './pages/{context}/{name}';"
 _ROUTER_ROUTE_TPL = "  {{ path: '/{context}', element: <{name} /> }},"
@@ -20,6 +27,14 @@ _ROUTER_ROUTE_TPL = "  {{ path: '/{context}', element: <{name} /> }},"
 
 def _suggest_page_name(context: str) -> str:
     return f"{context.title()}DashboardPage"
+
+
+def _page_target_exists(workspace: str, page_path: str) -> bool:
+    """F11 physical existence check (deterministic per snapshot).
+
+    Pure filesystem fact. No Memory, no heuristics, no alternate target.
+    """
+    return os.path.isfile(os.path.join(workspace, page_path))
 
 
 def _find_router_path(workspace: str) -> str | None:
@@ -113,6 +128,15 @@ def create_page_ops(
     page_dir = os.path.join(pages_dir, context)
     page_path = os.path.join(page_dir, f"{page_name}.tsx")
 
+    # F11 physical validation: CREATE against an existing target is a CONFLICT.
+    # No overwrite, no auto-rename, no fallback path, no memory/heuristic.
+    if _page_target_exists(workspace, page_path):
+        raise PageCreateTargetExistsError(
+            f"page_creator CONFLICT: target '{page_path}' already exists; "
+            f"a new page requires a target that does not exist. Choose another "
+            f"page context (create_new) or MODIFY the existing page instead.",
+        )
+
     content = _PAGE_TEMPLATE.format(name=page_name)
     ops.append(FileOp(
         action="CREATE",
@@ -143,6 +167,14 @@ def create_page_ops_dry(context: str, workspace: str) -> list[dict]:
     pages_dir = "frontend/src/pages"
     page_dir = os.path.join(pages_dir, context)
     page_path = os.path.join(page_dir, f"{page_name}.tsx")
+
+    # F11 physical validation: same result for the same snapshot (idempotent).
+    if _page_target_exists(workspace, page_path):
+        raise PageCreateTargetExistsError(
+            f"page_creator CONFLICT: target '{page_path}' already exists; "
+            f"a new page requires a target that does not exist. Choose another "
+            f"page context (create_new) or MODIFY the existing page instead.",
+        )
 
     ops = [
         FileOp(

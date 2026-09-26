@@ -404,29 +404,15 @@ class TestCompilerRequiredPropsGate:
         assert exc.value.component == "Timeseries"
         assert "data" in exc.value.missing
 
-class TestRendererRequiredPropsGuard:
-    """Tests for render-time required-prop guards."""
+# ── 5. Renderer-guard / 6. BINDING_MISSING (F10/F11 note) ──
+# The legacy ReactBackend render-time hard error (MISSING_REQUIRED_PROPS_AT_RENDER)
+# and the legacy render_tree binding_missing error were removed with render()/
+# render_tree(). Required-prop enforcement now lives in the shared UIIRCompiler
+# gate (TestStage2CompilerGate above); the constraint renderer skips
+# binding-missing nodes. Empty `pass` stubs referencing the deleted route were
+# removed.
 
-    def test_render_with_required_props_passes(self):
-        """Component with all required props → renders successfully."""
-        pass  # Integration test: uses full react_backend rendering
-
-    def test_render_with_missing_required_raises(self):
-        """Component missing required prop at render time → RuntimeError."""
-        pass  # Integration test: uses full react_backend rendering
-
-
-# ── 6. BINDING_MISSING tests ──
-
-class TestBindingMissingRequiredProps:
-    """Tests for BINDING_MISSING with required vs optional props."""
-
-    def test_binding_missing_required_hard_error(self):
-        """Required prop with BINDING_MISSING → hard error (not skip)."""
-        pass  # Integration test via render_tree
-
-
-# ── 7. Full pipeline integration ──
+# ── 8. Full pipeline integration ──
 
 class TestFullPipelineRequiredProps:
     """Full pipeline: interpret → confirm → apply with required prop enforcement."""
@@ -440,7 +426,7 @@ class TestFullPipelineRequiredProps:
         pass  # Integration test via apply_engine
 
 
-# ── 8. Fase 1.2: Real component fixtures ──
+# ── 9. Fase 1.2: Real component fixtures ──
 
 AGENT_TEST_REPO = "/opt/agent-repos/agent-test-repo"
 

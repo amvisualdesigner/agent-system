@@ -184,12 +184,20 @@ class StructuralDiffEngine:
     ) -> EditOperation:
         """Compute minimal edit to apply intent to file.
 
+        F11 contract — `decision` selects the WRITE STRATEGY only:
+          CREATE/SPLIT → full create; EXTEND → append region;
+          UPDATE/EXTEND → surgical replace when a boundary is available.
+        It NEVER decides lifecycle, target or instance. Those come from the
+        Confirmed Plan (`decision.render_mode`, set by apply_engine F1) and
+        the plan target. This parameter is a mechanical edit-strategy hint,
+        never semantic authority.
+
         Args:
             generated_content: Content from ContentGenerator.
             target_file_path: Decision target file.
             existing_lines: Lines of existing file (empty for CREATE).
             component_boundary: Boundary of target component (None for CREATE).
-            decision: Decision type.
+            decision: Write-strategy hint (mechanical only, see above).
             all_boundaries: All boundaries in the file (used for EXTEND
                 to find the last boundary to append after).
             extend_strategy: Controls EXTEND behavior.

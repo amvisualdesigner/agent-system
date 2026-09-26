@@ -5,7 +5,6 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.config.feature_flags import FEATURE_FLAGS
 from app.intent.models import ConfirmedIntent, IntentAction, RunPhase, PendingDeletion
 from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import SkillContract, get_contract
@@ -194,13 +193,10 @@ def _agent_confirm(req: ConfirmRequest):
     gate_blocked = False
     gate = {"blocked": gate_blocked, "reason": None}
 
-    # 3F: Estimate pipeline routes per operation
-    constraint_enabled = FEATURE_FLAGS.get("constraint_graph", False)
+    # 3F: Estimate pipeline routes per operation (single materialization route).
     route_counts: dict[str, int] = {}
     for op in structural_ops:
-        route = "delete_inject" if op["action"] == "DELETE" else (
-            "constraint" if constraint_enabled else "renderer"
-        )
+        route = "delete_inject" if op["action"] == "DELETE" else "constraint"
         route_counts[route] = route_counts.get(route, 0) + 1
 
     # Phase 5B: Derive pending_deletions from confirmed actions
@@ -226,8 +222,11 @@ def _agent_confirm(req: ConfirmRequest):
     forced_anchor_path: str | None = None
     if req.page_context_choice == "create_new":
         try:
+            from app.engine.page_creator import (
+                PageCreateTargetExistsError,
+                create_page_ops,
+            )
             from app.engine.page_context_resolver import extract_requested_context
-            from app.engine.page_creator import create_page_ops
             from app.runtime.context import build_context
             context = extract_requested_context(req.user_message)
             if context:
@@ -245,6 +244,12 @@ def _agent_confirm(req: ConfirmRequest):
                 plan_preview["estimated_files"] = sorted(set(
                     list(plan_preview["estimated_files"]) + [op.path for op in ops]
                 ))
+        except PageCreateTargetExistsError as e:
+            return {
+                "status": "rejected",
+                "reason": str(e),
+                "gate": {"blocked": True, "reason": "page_target_exists"},
+            }
         except Exception as e:
             logger.warning("PageCreator failed: %s", e)
             plan_preview["page_creator"] = {"ops": [], "summary": "Error al generar página"}
