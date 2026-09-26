@@ -198,6 +198,73 @@ def test_split_plan_is_suggestion_not_automatic_refactor():
     ), f"Confirmed plan target must still be emitted: got {[(op.action, op.path) for op in fileops]}"
 
 
+def test_create_over_existing_component_in_custom_named_file_yields_conflict(create_workspace, run_context):
+    """F4/R-a: a confirmed CREATE must never overwrite an existing physical
+    target, even when the target file uses a name the structural index cannot
+    see (custom-named file). The content-based index DOES see the component, so
+    the resolved target_file exists -> explicit conflict, file untouched.
+    """
+    ctx = _context_for_workspace(create_workspace, run_context.artifacts)
+
+    # KpiRow exists ONLY inside a custom-named file (invisible to the
+    # filename-exact structural index, visible to the content index).
+    overview = "src/components/Overview.tsx"
+    full = os.path.join(create_workspace, overview)
+    with open(full, "w") as f:
+        f.write("export const KpiRow = () => null;")
+    with open(full) as f:
+        original = f.read()
+
+    plan = build_plan_from_actions([
+        {"verb": "create", "target_capability": "presentation.kpi_row"}
+    ])
+
+    res = apply_engine(str(uuid.uuid4()), plan.to_dict(), ctx, dry_run=True)
+
+    status = res.get("execution", {}).get("status")
+    detail = res.get("execution", {}).get("detail", "")
+    assert status == "clarification_needed", (
+        f"CREATE over existing physical target must conflict, got status={status!r} detail={detail!r}"
+    )
+    assert res.get("execution", {}).get("conflict") == "repository_conflict", detail
+
+    # The existing file is untouched and no phantom KpiRow.tsx was spawned
+    with open(full) as f:
+        assert f.read() == original, "CREATE must not overwrite the existing physical target"
+    assert not os.path.exists(os.path.join(create_workspace, "src/components/KpiRow.tsx")), (
+        "No implicit alternative target must be materialized"
+    )
+
+
+def test_modify_over_multiple_instances_without_selection_yields_conflict(run_context):
+    """F4/R-b: a MODIFY whose capability maps to N>1 physical instances and the
+    plan does not nominate a unique target must yield an explicit conflict — the
+    engine must never silently pick the first file.
+    """
+    ws = run_context.workspace
+    os.makedirs(os.path.join(ws, "src/components/a"), exist_ok=True)
+    os.makedirs(os.path.join(ws, "src/components/b"), exist_ok=True)
+    with open(os.path.join(ws, "src/components/a/KpiRow.tsx"), "w") as f:
+        f.write("export const KpiRow = () => null;")
+    with open(os.path.join(ws, "src/components/b/KpiRow.tsx"), "w") as f:
+        f.write("export const KpiRow = () => null;")
+
+    plan = build_plan_from_actions([
+        {"verb": "modify", "target_capability": "presentation.kpi_row"}
+    ])
+
+    res = apply_engine(str(uuid.uuid4()), plan.to_dict(), run_context, dry_run=True)
+
+    status = res.get("execution", {}).get("status")
+    assert status == "clarification_needed", (
+        f"Ambiguous MODIFY (N instances, no selection) must yield a conflict, got: {status}"
+    )
+    res_ops = res.get("execution", {}).get("operations", [])
+    assert not any(op.get("action") == "modify" for op in res_ops), (
+        f"No silent MODIFY may be emitted: got {res_ops}"
+    )
+
+
 def test_crl_detects_stale_missing_duplicate_and_never_rebinds():
     # Prepare memory mapping with stale, missing-target and duplicate bindings
     memory_mapping = {

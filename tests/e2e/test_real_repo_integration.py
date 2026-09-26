@@ -28,6 +28,34 @@ from app.config.settings import settings
 AGENT_TEST_REPO = "/opt/agent-repos/agent-test-repo"
 
 
+def _dedupe_presentation_timeseries(workspace: str) -> None:
+    """F4/R-b: leave ``presentation.timeseries`` with a single physical candidate.
+
+    ``charts/LineChart.tsx`` also maps to ``presentation.timeseries``
+    (FILENAME_ALIASES), so a confirmed MODIFY without an explicit physical
+    selection must CONFLICT (R-b). The Phase 6 fixtures intentionally work on an
+    unambiguous repository: the duplicate-mapped file is RENAMED (not deleted)
+    and its single importer is updated, so tsc and module resolution stay intact
+    and the original invariants are preserved.
+    """
+    src = os.path.join(workspace, "frontend/src/components/charts/LineChart.tsx")
+    dst = os.path.join(workspace, "frontend/src/components/charts/SalesChart.tsx")
+    if os.path.exists(src) and not os.path.exists(dst):
+        os.replace(src, dst)
+
+    page = os.path.join(workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx")
+    if os.path.exists(page):
+        with open(page) as f:
+            content = f.read()
+        fixed = content.replace(
+            "from '@/components/charts/LineChart'",
+            "from '@/components/charts/SalesChart'",
+        )
+        if fixed != content:
+            with open(page, "w") as f:
+                f.write(fixed)
+
+
 @pytest.fixture(scope="module")
 def agent_test_repo_copy():
     """Crear un temp copy del agent-test-repo con git init."""
@@ -478,6 +506,10 @@ class TestPhase6DataFlowWithRealRepo:
             artifacts=artifacts_tmp,
         )
 
+        # F4/R-b (no silent selection): repository must present a single
+        # physical candidate for presentation.timeseries.
+        _dedupe_presentation_timeseries(phase6_repo_copy)
+
         try:
             result = apply_engine(ctx.run_id, plan.to_dict(), ctx, dry_run=False)
             # verify_worktree is called as post-step in apply_engine
@@ -520,6 +552,10 @@ class TestPhase6DataFlowWithRealRepo:
             workspace=phase6_repo_copy,
             artifacts=artifacts_tmp,
         )
+
+        # F4/R-b (no silent selection): repository must present a single
+        # physical candidate for presentation.timeseries.
+        _dedupe_presentation_timeseries(phase6_repo_copy)
 
         try:
             result = apply_engine(ctx.run_id, plan.to_dict(), ctx, dry_run=False)

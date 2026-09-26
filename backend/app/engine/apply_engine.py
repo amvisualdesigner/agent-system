@@ -51,6 +51,7 @@ from app.graphir.utils import check_repo_integrity
 from app.intent.models import FallbackExecutionRequest, RefactorChange
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
+from app.graphir.constraint.models import FileNode, FileOpDecision
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +272,17 @@ def _validate_repository_matrix(
       CREATE + target already in repo and no explicit new-instance hint → CONFLICT
       CREATE + target already in repo but the projected path collides    → CONFLICT
       MODIFY + capability not present in repo                           → CONFLICT
+      MODIFY + multiple instances and no explicit physical selection     → CONFLICT
       DELETE + capability not present in repo                           → CONFLICT
+
+    R-b (F4): a MODIFY whose capability maps to N>1 physical instances without
+    an explicit unique target is ambiguous. The engine never picks silently
+    (there is no longer a reachable ``file_paths[0]``-style default).
+
+    R8 (F4, document only): there is NO pre-apply re-check/drift detection.
+    Evidence is snapshotted once at pipeline start; a concurrent mutation of a
+    target between snapshot and FileOps is out of scope and deliberately not
+    detected here.
 
     Returns None when the matrix passes, else a FallbackExecutionRequest result.
     """
@@ -306,18 +317,83 @@ def _validate_repository_matrix(
                     conflict_type="repository_conflict",
                     level=2,
                 ).to_result()
-        elif rc.action in (MODIFY, DELETE):
-            if structural_index is not None and not structural_index.exists(rc.name):
+        elif rc.action == MODIFY:
+            if structural_index is None:
+                continue
+            instances = structural_index.get_instances(rc.name)
+            if not instances:
                 return FallbackExecutionRequest(
                     reason=(
-                        f"repository_conflict: {rc.action} '{rc.name}' but the "
+                        f"repository_conflict: MODIFY '{rc.name}' but the "
                         f"capability is not present in the repository — nothing to "
-                        f"{rc.action.lower()}. No silent create or reinterpretation "
-                        f"(F1/R3)."
+                        f"modify. No silent create or reinterpretation (F1/R2)."
                     ),
                     conflict_type="repository_conflict",
                     level=2,
                 ).to_result()
+            if len(instances) > 1:
+                paths = structural_index.resolve_all_file_paths(rc.name)
+                return FallbackExecutionRequest(
+                    reason=(
+                        f"repository_conflict: MODIFY '{rc.name}' but the repository "
+                        f"contains {len(instances)} instances ({', '.join(paths)}) and "
+                        f"the plan does not nominate a unique physical target. Multiple "
+                        f"targets require an explicit selection; a silent choice is "
+                        f"prohibited (F4/R-b)."
+                    ),
+                    conflict_type="ambiguity",
+                    level=2,
+                ).to_result()
+        elif rc.action == DELETE:
+            if structural_index is not None and not structural_index.exists(rc.name):
+                return FallbackExecutionRequest(
+                    reason=(
+                        f"repository_conflict: DELETE '{rc.name}' but the "
+                        f"capability is not present in the repository — nothing to "
+                        f"delete. No silent create or reinterpretation (F1/R3)."
+                    ),
+                    conflict_type="repository_conflict",
+                    level=2,
+                ).to_result()
+    return None
+
+
+def _validate_create_physical_targets(
+    decisions: dict[str, FileOpDecision],
+    plan_actions: dict[str, str],
+    file_nodes: dict[str, FileNode],
+) -> dict | None:
+    """F4/R-a — gate CREATE materialization against existing physical targets.
+
+    The repository matrix (``_validate_repository_matrix``) reasons with the
+    structural index, which matches by FILE NAME. A component living in a
+    custom-named file is invisible to that index but IS visible to the
+    content-based RepositoryIndexer/IdentityResolver. Without this gate, a
+    confirmed CREATE could resolve a target_file that already exists and the
+    FileOps layer would overwrite it.
+
+    Fire in the materialization kernel, AFTER decisions and render_mode and
+    BEFORE the renderer/FileOps. Observational only: never mutates the plan,
+    never rewrites a target, never reinterprets lifecycle.
+
+    Returns None when safe, else a FallbackExecutionRequest result.
+    """
+    paths = {fn.path for fn in file_nodes.values()}
+    for dec in decisions.values():
+        if plan_actions.get(dec.intent_id) != CREATE:
+            continue
+        if dec.target_file and dec.target_file in paths:
+            return FallbackExecutionRequest(
+                reason=(
+                    f"repository_conflict: CREATE '{dec.intent_id}' resolved to "
+                    f"'{dec.target_file}', which already exists in the repository "
+                    f"(evidence: content index + matcher). Materializing CREATE here "
+                    f"would overwrite that file; the plan must be a MODIFY target or "
+                    f"nominate an explicit new-instance path (F4/R-a)."
+                ),
+                conflict_type="repository_conflict",
+                level=2,
+            ).to_result()
     return None
 
 
@@ -1360,6 +1436,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 dec.render_mode = "modify"
             else:
                 dec.render_mode = ""
+
+        # ── F4/R-a: a confirmed CREATE must never materialize over an existing
+        # physical target. Post-decisions, pre-render: observational only.
+        create_conflict = _validate_create_physical_targets(
+            decisions, plan_actions, file_nodes,
+        )
+        if create_conflict is not None:
+            return create_conflict
 
         pipeline_state = PipelineState(
             file_nodes=file_nodes,
