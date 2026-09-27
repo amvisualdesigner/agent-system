@@ -48,7 +48,13 @@ RepositoryValidation
     ↓
 Renderer
     ↓
-FileOps
+Single FileOps set (structural + datasource bootstrap + PageCreator)
+    ↓
+Effective preview (dry_run, zero writes)
+    ↓
+Workspace snapshot
+    ↓
+Terminal apply (single write point) after concurrency re-validation
     ↓
 Verify / Commit
 ```
@@ -101,6 +107,10 @@ For every deletion:
 - Ambiguity returns to the user.
 - Renderer materializes the confirmed decision.
 - Helpers can provide evidence without changing the confirmed plan.
+- Single write point: structural, datasource-bootstrap and PageCreator ops converge into one FileOps set applied by the terminal `FileOpApplier`.
+- `dry_run` performs zero writes (preview-only); semantic-memory persistence is gated to real applies.
+- Preview scope == applied scope (deterministic generation, locked by tests).
+- Concurrency (option C): changed worktree at apply → `NO WRITE`, phase back to `confirmed`.
 
 ## Stop and ask for review when
 - two components still have authority over the same semantic decision;

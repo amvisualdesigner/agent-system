@@ -31,6 +31,11 @@ For every removed mechanism answer:
 | Anchor-based post-render modification | AnchorResolver | Audit/simplify/possibly remove | Not decided | Call-site + behavior audit |
 | Data binding | Existing binding system | Existing binding system | No unless proven redundant | Binding tests |
 | File application | FileOps | FileOps | No | Apply tests |
+| Datasource bootstrap materialization | Separate applier call (pre-F2) | Single FileOps set (converged at apply time) | No | `test_dry_run_no_write`, suite green |
+| PageCreator materialization | Separate pre-write in agent_apply (pre-F3) | Single FileOps set (seeded at apply time) | No | `test_page_creator`, `test_composition_audit` |
+| Preview fidelity | Plan-level estimates (pre-F5) | Effective FileOps from deterministic dry_run generation | No | `test_dry_run_no_write::test_preview_fileops_equals_applied_fileops` |
+| `dry_run` semantics | Dry run still wrote files (pre-F5) | Preview-only, ZERO writes | No | `test_dry_run_no_write::test_dry_run_generates_ops_but_writes_nothing` |
+| Workspace concurrency | None (pre-F4) | Snapshot at confirm; changed worktree at apply → NO WRITE | No | `test_concurrency_no_write` |
 
 ## Removal protocol
 1. Find consumers.
@@ -61,3 +66,6 @@ Eventually prove:
 5. Ambiguity reaches the user.
 6. Renderer receives the confirmed decision.
 7. Matching, memory and split analysis can provide information without changing the confirmed plan.
+8. `dry_run` generates the effective FileOps but writes nothing.
+9. The operations shown as the confirmation preview equal the operations a real apply writes.
+10. A worktree changed between confirm and apply blocks with `NO WRITE` (conflict, reason=concurrency) and reverts the phase to `confirmed`.

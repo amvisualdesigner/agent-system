@@ -26,7 +26,17 @@ Repository Validation
     ↓
 Renderer
     ↓
-FileOps
+Single FileOps set
+   (structural ops + datasource bootstrap + PageCreator converge here)
+    ↓
+Effective preview — dry_run generation, ZERO writes
+   (the exact set a real apply will write)
+    ↓
+Workspace snapshot recorded (concurrency base)
+    ↓
+/agent/apply — snapshot re-validation
+    ↓
+Terminal apply (the ONLY write point)
     ↓
 Verify / Commit
 ```
@@ -57,16 +67,19 @@ Check whether the confirmed plan is still executable. Validation is not replanni
 ### Renderer
 Materialize the confirmed structure into concrete file operations.
 
-### FileOps
-Apply concrete operations.
+### FileOps (single materialization point)
+One terminal write point: the `FileOpApplier` executes the complete set of converged operations — structural ops plus datasource-bootstrap ops plus PageCreator ops. Nothing earlier in the pipeline writes. A `dry_run` run generates the same effective FileOps but performs ZERO writes; the effective preview presented at confirmation is exactly this set, so the preview scope equals the applied scope by construction.
 
 ### Verify / Commit
-Verify the worktree and commit when required.
+Verify the worktree and commit when required (real applies only).
+
+### Pre-apply concurrency (option C)
+Confirmation records a worktree snapshot. `/agent/apply` re-fingerprints the worktree BEFORE applying: if anything changed in between, NOTHING is written (`status=conflict`, `reason=concurrency`, `operations=[]`, phase back to `confirmed`). No merge, no reinterpretation — the user decides.
 
 ## Responsibilities
 
 ### PageCreator (physical operation)
-Not a semantic authority. `create_page_ops` materializes a page CREATE chosen by the user (`create_new`). It verifies the target does not physically exist; a CREATE against an existing target is a CONFLICT (no overwrite, no alternate path, no memory, no heuristics). Deterministic per snapshot.
+Not a semantic authority. `create_page_ops` materializes a page CREATE chosen by the user (`create_new`). It verifies the target does not physically exist; a CREATE against an existing target is a CONFLICT (no overwrite, no alternate path, no memory, no heuristics). Deterministic per snapshot. Its ops join the single FileOps set and are re-validated when the set is seeded at apply.
 
 ### Orchestrator
 Coordinate stages and state transitions. It does not make domain decisions.
@@ -77,16 +90,20 @@ The system is not in production; no legacy compatibility is preserved. The final
 1. Confirmed Plan is the authoritative semantic decision; nothing after confirmation changes it silently.
 2. RepositoryValidation returns VALID or CONFLICT. A CONFLICT is reported to the user; validation never replans.
 3. The Renderer materializes the confirmed structure; it never interprets intent.
-4. FileOps are physical and mechanical; a CREATE writes only a target that does not exist (PageCreator enforces this at apply time too).
+4. FileOps are physical and mechanical; a CREATE writes only a target that does not exist (re-validated when the single FileOps set is seeded at apply).
 5. Memory / ConflictResolutionLayer (CRL) provide evidence, never authorization.
 6. IdentityResolver contributes proposal/metadata only; it cannot change lifecycle or target.
 7. SPLITAnalyzer is analysis/evidence; it never splits automatically.
-8. AnchorResolver is physical (anchor-path) resolution; composition behavior belongs to the Renderer.
+8. AnchorResolver is physical (anchor-path) resolution, including forced anchors that resolve to a CREATE inside the effective FileOps set; composition behavior belongs to the Renderer.
 9. Composition is a renderer contract, not a semantic decision.
-10. PageCreator is a physical operation of explicit user choice, with physical validation at generation and at apply (agent_apply pre-apply guard).
+10. PageCreator is a physical operation of explicit user choice; its ops join the single FileOps set and are re-validated when the set is seeded at apply.
 11. There are no executable legacy routes (BackendRenderer legacy branch removed; no `constraint_graph` flag).
-12. There is no backward compatibility for old confirm states (page_creator_ops re-apply removed).
+12. There is no backward compatibility for legacy confirm states; `page_creator_ops` originate inside the unified FileOps set at confirm.
 13. R8 snapshot-only from `run_id` source, if that invariant still holds, is preserved via tests.
+14. Single materialization point: structural ops, datasource bootstrap and PageCreator converge into one FileOps set executed by the terminal `FileOpApplier`. No component writes before that point.
+15. `dry_run` is preview-only: it generates the complete effective FileOps with ZERO writes (terminal apply AND semantic-memory persistence are gated).
+16. Preview == effective applied scope: confirmation derives the preview from a deterministic dry_run generation; a real apply writes exactly those operations (locked by tests).
+17. Pre-apply concurrency (option C): a recorded worktree snapshot is re-checked at apply; any change → `NO WRITE` (`conflict`/`concurrency`), phase back to `confirmed`. No merge, no reinterpretation.
 
 ## Canonical-route rule
 There is one semantic route from confirmed intent to applied changes. Helpers may exist outside it, but must not intercept and silently rewrite the plan.

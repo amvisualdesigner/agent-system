@@ -44,6 +44,8 @@ Persists useful historical identity information.
 
 Keep as knowledge/history. It must not decide a new action after confirmation.
 
+Persistence is gated to real applies: `dry_run` (preview) and confirmation generation never write memory, preserving the zero-write invariant.
+
 ### ConflictResolutionLayer
 Compares remembered state with current repository state and invalidates stale mappings.
 

@@ -81,17 +81,21 @@ confirmed plan → repository changed → ask user
 
 CREATE against an existing target (and no explicit new-instance hint) is a CONFLICT — the repository is never overwritten silently.
 
+### Concurrency (option C)
+Confirmation records a worktree snapshot. If the worktree changed between confirmation and `/agent/apply`, the apply is a CONFLICT: NOTHING is written (`operations=[]`), the phase returns to `confirmed`, and the user decides. No merge, no reinterpretation. A stale workspace is never silently replanned.
+
 ## PageCreator (physical operation)
-User-chosen `create_new` generates page CREATE ops. Physical validation at generation and at apply:
+User-chosen `create_new` generates page CREATE ops. Physical validation at generation and when the unified FileOps set is seeded at apply:
 - target absent → CREATE FileOp;
 - target exists → CONFLICT (no overwrite, no alternate path, no memory, no heuristics);
 - deterministic per snapshot.
+PageCreator ops converge into the single FileOps set; there is no separate write path for them.
 
 ## Renderer
 Materialize an already-decided structure. Technical rendering choices are allowed; semantic intent changes are not.
 
-## FileOps
-Execute concrete operations. No intent reinterpretation.
+## FileOps (single write point)
+The terminal `FileOpApplier` executes the complete converged set (structural + datasource bootstrap + PageCreator). No earlier stage writes. `dry_run` generates the same effective set with zero writes, and the preview shown at confirmation is exactly that set: preview scope == applied scope.
 
 ## Orchestrator
 Coordinate state and stages. No domain decisions.
