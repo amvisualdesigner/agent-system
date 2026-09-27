@@ -284,10 +284,15 @@ def _get_content_for_anchor_path(
 def _normalize_forced_path(
     workspace: str,
     forced_anchor_path: str | None,
+    all_fileops: list[FileOp] | None = None,
 ) -> str | None:
-    """Resolve the plan/user-specified anchor to a relative existing path, or
-    None if it does not exist (the plan did not actually specify a mountable
-    anchor)."""
+    """Resolve the plan/user-specified anchor to a relative path.
+
+    The anchor may be an existing file ON DISK or a CREATE op being
+    materialized this run (e.g. a page_creator page in the FileOps set).
+    Returns None if it is neither (the plan did not actually specify a
+    mountable anchor).
+    """
     if not forced_anchor_path:
         return None
     if os.path.isabs(forced_anchor_path):
@@ -296,13 +301,19 @@ def _normalize_forced_path(
     else:
         rel = forced_anchor_path
         full = os.path.join(workspace, forced_anchor_path)
-    if not os.path.isfile(full):
-        logger.warning(
-            "ANCHOR_RESOLVER: forced_anchor_path %s not found on disk, ignoring",
-            forced_anchor_path,
-        )
-        return None
-    return rel
+    if os.path.isfile(full):
+        return rel
+    if any(
+        fop.action == "create" and fop.path == rel
+        for fop in (all_fileops or [])
+    ):
+        return rel
+    logger.warning(
+        "ANCHOR_RESOLVER: forced_anchor_path %s not found on disk or in "
+        "the FileOps set, ignoring",
+        forced_anchor_path,
+    )
+    return None
 
 
 # ── Invariant: audit only, never input ─────────────────────────────────
@@ -361,7 +372,7 @@ def resolve_anchors(
         if a.file_path not in created_paths
     ]
 
-    forced_path = _normalize_forced_path(workspace, forced_anchor_path)
+    forced_path = _normalize_forced_path(workspace, forced_anchor_path, all_fileops)
 
     modify_ops: list[FileOp] = []
     unresolved: list[str] = []

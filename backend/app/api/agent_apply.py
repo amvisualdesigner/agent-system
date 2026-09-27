@@ -1,5 +1,4 @@
 import logging
-import os
 import traceback
 
 from fastapi import APIRouter, HTTPException
@@ -38,7 +37,7 @@ def _agent_apply(req: ApplyRequest):
     run_id = validate_run_id(req.run_id)
 
     # ---- State validation -----------------------------------------
-    from app.state.run_state import load_run_state, transition_phase
+    from app.state.run_state import load_run_state, save_run_state, transition_phase
     state = load_run_state(run_id)
 
     if state is None:
@@ -75,44 +74,53 @@ def _agent_apply(req: ApplyRequest):
     # lifecycle authority. req.plan can never substitute or reinterpret it.
     plan = state.get("compiled_plan")
 
-    # ── PageCreator pre-apply: create the page file BEFORE apply_engine ──
-    # so the anchor resolver discovers it and can be forced to use it.
+    # ── PageCreator: FileOps flow through the single materialization set ──
+    # No early/late writes: page CREATE + router MODIFY are seeded into
+    # apply_engine and written only by the single terminal apply.
     page_creator_ops_raw = state.get("page_creator_ops", [])
     forced_anchor_path: str | None = state.get("forced_anchor_path")
-    page_modify_ops_raw: list[dict] = []
 
-    if page_creator_ops_raw and forced_anchor_path and not req.dry_run:
-        from app.graphir.constraint.executor import FileOpApplier
+    page_creator_ops = None
+    if page_creator_ops_raw:
         from app.graphir.utils import FileOp
-        applier = FileOpApplier(context.workspace)
-        ops = [FileOp(**op) if isinstance(op, dict) else op for op in page_creator_ops_raw]
-        for fop in ops:
-            if fop.action == "CREATE":
-                # F11 physical validation: a page CREATE must never overwrite an
-                # existing target. CONFLICT (no write, no alternate path).
-                abs_target = os.path.join(context.workspace, fop.path)
-                if os.path.isfile(abs_target):
-                    return {
-                        "execution": {
-                            "status": "clarification_needed",
-                            "reason": "page_target_exists",
-                            "detail": (
-                                f"page_creator CONFLICT: target '{fop.path}' already "
-                                f"exists; a new page requires a target that does not "
-                                f"exist. No overwrite, no alternate path."
-                            ),
-                            "diff": None,
-                            "operations": [],
-                        },
-                        "context": {"repo_snapshot": []},
-                    }
-                applier.apply([fop])
-                logger.info("Applied page_creator CREATE: %s", fop.path)
-            elif fop.action == "MODIFY":
-                page_modify_ops_raw.append(fop)
-        # Rebuild context to pick up the new page file
-        context = build_context(run_id)
-        ensure_worktree(context)
+        page_creator_ops = [
+            FileOp(**op) if isinstance(op, dict) else op
+            for op in page_creator_ops_raw
+        ]
+
+    # ── Concurrency validation pre-apply (option C) ──
+    # If the workspace changed between /agent/confirm (snapshot) and now →
+    # the confirmed plan/preview is stale: NO WRITE, zero FileOps. No merge,
+    # no reinterpretation, no target re-selection.
+    concurrency_conflicts: list[str] = []
+    confirm_snapshot = state.get("apply_snapshot")
+    if isinstance(confirm_snapshot, dict) and confirm_snapshot:
+        from app.engine.worktree_snapshot import snapshot_worktree, diff_snapshots
+        current_snapshot = snapshot_worktree(context.workspace)
+        concurrency_conflicts = diff_snapshots(confirm_snapshot, current_snapshot)
+
+    if concurrency_conflicts and not req.dry_run:
+        save_run_state(run_id, {"phase": RunPhase.CONFIRMED.value})
+        return {
+            "execution": {
+                "status": "conflict",
+                "reason": "concurrency",
+                "detail": (
+                    "NO WRITE: the workspace changed after the plan was "
+                    "confirmed. Changed paths: "
+                    + ", ".join(concurrency_conflicts[:20])
+                    + (
+                        (" (+%d more)" % (len(concurrency_conflicts) - 20))
+                        if len(concurrency_conflicts) > 20 else ""
+                    )
+                    + ". Re-confirm with the current state to generate a "
+                    "fresh preview."
+                ),
+                "diff": None,
+                "operations": [],
+            },
+            "context": {"repo_snapshot": []},
+        }
 
     try:
         result = apply_engine(
@@ -120,28 +128,16 @@ def _agent_apply(req: ApplyRequest):
             dry_run=req.dry_run,
             confirmed_deletions=req.confirmed_deletions,
             forced_anchor_path=forced_anchor_path,
+            page_creator_ops=page_creator_ops,
         )
     except Exception as e:
         transition_phase(run_id, RunPhase.FAILED)
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ── Apply page_creator MODIFY (router) ops AFTER apply_engine ──
-    if page_modify_ops_raw and not req.dry_run:
-        try:
-            from app.graphir.constraint.executor import FileOpApplier
-            from app.graphir.utils import FileOp
-            applier = FileOpApplier(context.workspace)
-            for fop in page_modify_ops_raw:
-                applier.apply([fop])
-            logger.info("Applied %d page_creator MODIFY ops for run_id=%s", len(page_modify_ops_raw), run_id)
-            existing = result.get("fileops", [])
-            result["fileops"] = existing + [op.to_dict() if hasattr(op, 'to_dict') else op for op in page_modify_ops_raw]
-        except Exception as e:
-            logger.warning("Failed to apply page_creator MODIFY ops: %s", e)
-            result["page_creator_warning"] = str(e)
-
-    if page_creator_ops_raw and req.dry_run:
-        result["page_creator_ops"] = page_creator_ops_raw
+    result.setdefault("meta", {})["concurrency"] = {
+        "status": "ok" if not concurrency_conflicts else "stale",
+        "changed_paths": concurrency_conflicts[:20],
+    }
 
     transition_phase(run_id, RunPhase.COMPLETED)
     return result

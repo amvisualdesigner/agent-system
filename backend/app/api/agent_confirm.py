@@ -254,6 +254,87 @@ def _agent_confirm(req: ConfirmRequest):
             logger.warning("PageCreator failed: %s", e)
             plan_preview["page_creator"] = {"ops": [], "summary": "Error al generar página"}
 
+    # ── 3G: Effective preview derived from the real FileOps ──
+    # preview == effective applied scope: regenerate the exact FileOps a real
+    # apply would materialize (same deterministic pipeline, dry_run → ZERO
+    # writes) and derive the preview from them. Nothing outside this set is
+    # ever written by /agent/apply.
+    effective_preview: dict = {}
+    preview_fileops: list[dict] = []
+    try:
+        from app.engine.apply_engine import apply_engine
+        from app.executor.worktree_manager import ensure_worktree
+        from app.graphir.utils import FileOp
+        from app.runtime.context import build_context
+
+        eff_ctx = build_context(run_id)
+        ensure_worktree(eff_ctx)
+        eff_ops = [op if isinstance(op, FileOp) else FileOp(**op) for op in page_creator_ops]
+        eff_result = apply_engine(
+            run_id,
+            plan.to_dict(),
+            eff_ctx,
+            dry_run=True,
+            confirmed_deletions=[pd.capability for pd in pending_deletions],
+            forced_anchor_path=forced_anchor_path,
+            page_creator_ops=eff_ops or None,
+        )
+        eff_exec = eff_result.get("execution", {})
+        eff_status = eff_exec.get("status")
+        if eff_status in ("ok", "verify_failed"):
+            eff_operations = eff_exec.get("operations", []) or []
+            eff_routes: dict[str, int] = {}
+            for op in eff_operations:
+                route = op.get("pipeline_route") or "unknown"
+                eff_routes[route] = eff_routes.get(route, 0) + 1
+            effective_preview = {
+                "status": eff_status,
+                "fileops_count": len(eff_operations),
+                "changed_paths": sorted({op.get("path") for op in eff_operations}),
+                "actions": {
+                    "create": sorted(op["path"] for op in eff_operations if op.get("action") == "create"),
+                    "modify": sorted(op["path"] for op in eff_operations if op.get("action") == "modify"),
+                    "delete": sorted(op["path"] for op in eff_operations if op.get("action") == "delete"),
+                },
+                "routes": dict(sorted(eff_routes.items())),
+                "refactor_changes": eff_exec.get("refactor_changes", []) or [],
+                "fidelity": eff_result.get("meta", {}).get("fidelity"),
+            }
+            preview_fileops = eff_operations
+        else:
+            effective_preview = {
+                "error": str(eff_exec.get("reason") or eff_exec.get("detail") or eff_status),
+                "deferred_to_apply": True,
+            }
+            logger.warning(
+                "Effective preview [run_id=%s] deferred (status=%s): %s",
+                run_id, eff_status, eff_exec.get("reason"),
+            )
+    except Exception as e:
+        effective_preview = {"error": str(e), "deferred_to_apply": True}
+        logger.exception("Effective preview generation failed [run_id=%s]: %s", run_id, e)
+
+    plan_preview["effective"] = effective_preview
+    if effective_preview.get("changed_paths"):
+        plan_preview["estimated_files"] = sorted(set(
+            list(plan_preview["estimated_files"]) + effective_preview["changed_paths"]
+        ))
+
+    # ── Pre-apply concurrency base (option C) ──
+    # Capture the physical workspace state the confirmed plan/preview is
+    # based on. /agent/apply re-fingerprints and refuses stale materialization
+    # (NO WRITE) if anything changed in between.
+    apply_snapshot = None
+    try:
+        from app.engine.worktree_snapshot import snapshot_worktree
+        from app.runtime.context import build_context
+        from app.executor.worktree_manager import ensure_worktree
+        _snap_ctx = build_context(run_id)
+        ensure_worktree(_snap_ctx)
+        apply_snapshot = snapshot_worktree(_snap_ctx.workspace)
+    except Exception as e:
+        logger.warning("Concurrency snapshot capture failed: %s", e)
+
     result = {
         "status": "ok",
         "plan": plan.to_dict(),
@@ -272,6 +353,10 @@ def _agent_confirm(req: ConfirmRequest):
         save_extra["page_creator_ops"] = page_creator_ops
     if forced_anchor_path:
         save_extra["forced_anchor_path"] = forced_anchor_path
+    if apply_snapshot:
+        save_extra["apply_snapshot"] = apply_snapshot
+    if preview_fileops:
+        save_extra["preview_fileops"] = preview_fileops
     save_run_state(run_id, save_extra)
     transition_phase(run_id, RunPhase.CONFIRMED)
 

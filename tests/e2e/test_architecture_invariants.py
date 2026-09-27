@@ -53,10 +53,11 @@ def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace,
         {"verb": "create", "target_capability": "presentation.kpi_row"}
     ])
 
-    # Run A: apply the plan (dry_run=True to avoid persistent git commit,
-    # but memory.save currently runs in the pipeline and will persist history).
+    # Run A: apply the plan for real (dry_run=False) so the CREATE is
+    # materialized on disk and historical evidence is persisted. dry_run is
+    # preview-only (zero writes) since Phase 5.
     run_id_a = str(uuid.uuid4())
-    res_a = apply_engine(run_id_a, plan.to_dict(), ctx, dry_run=True)
+    res_a = apply_engine(run_id_a, plan.to_dict(), ctx, dry_run=False)
 
     # Expect a CREATE op in the emitted operations for KpiRow
     created = _ops_for_path(res_a, "KpiRow.tsx")
@@ -66,7 +67,9 @@ def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace,
         f"{res_a.get('execution', {}).get('detail')}"
     )
 
-    # Ensure memory file was written (evidence persisted)
+    # The target must exist on disk and historical evidence persisted
+    kpi_path = os.path.join(create_workspace, "src", "components", "KpiRow.tsx")
+    assert os.path.exists(kpi_path), "Run A must materialize KpiRow target on disk"
     mem_path = os.path.join(create_workspace, ".opencode", "semantic_memory.json")
     assert os.path.exists(mem_path), "semantic_memory.json should exist after run A"
 

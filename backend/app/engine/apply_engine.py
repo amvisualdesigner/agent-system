@@ -1032,7 +1032,7 @@ def _build_audit(
         return output
 
 
-def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict", confirmed_deletions: list[str] | None = None, forced_anchor_path: str | None = None):
+def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mode: str = "strict", confirmed_deletions: list[str] | None = None, forced_anchor_path: str | None = None, page_creator_ops: list[FileOp] | None = None):
     """Execute a plan against a workspace using the StructuralIR pipeline.
 
     Pipeline:
@@ -1041,7 +1041,11 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
       3. StructuralIR (merge + slot mapping)
       4. GraphIR pipeline (build_from_structural + layout + validate)
       5. ConstraintGraph renderer → FileOps
-      6. Apply → git commit
+      6. Single terminal apply → git commit
+
+    page_creator_ops: FileOps produced by PageCreator (page CREATE + router
+        MODIFY) are seeded into the SAME materialization set and written only
+        by the single terminal apply — no early/late writes outside the flow.
     """
     guard_within(context.workspace, settings.RUNS_DIR)
     guard_within(context.artifacts, settings.ARTIFACTS_DIR)
@@ -1253,8 +1257,11 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 "context": {"repo_snapshot": []},
             }
 
-    # ── Datasource bootstrap: ensure types/hook exist before component gen ──
-    if graph is not None and not dry_run:
+    # ── Datasource bootstrap → effective FileOps (no immediate write) ──
+    # Single materialization flow: infrastructure artifacts join the final
+    # FileOps set and are written only by the single terminal apply.
+    infra_ops: list[FileOp] = []
+    if graph is not None:
         try:
             from app.datasource.contract import DatasourceContract
             from app.graphir.backends.react_backend import generate_datasource_artifacts
@@ -1267,10 +1274,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 hook_path_bs = os.path.join(context.workspace, "frontend", "src", "hooks", "useDashboardData.ts")
                 if not os.path.exists(hook_path_bs):
                     infra_ops = generate_datasource_artifacts(ds_contract, context.workspace)
-                    infra_applier = FileOpApplier(context.workspace)
-                    infra_applier.apply(infra_ops)
                     logger.info(
-                        "DATASOURCE_BOOTSTRAP: wrote %d infrastructure files",
+                        "DATASOURCE_BOOTSTRAP: %d infrastructure FileOp(s) added to the set",
                         len(infra_ops),
                     )
 
@@ -1295,6 +1300,45 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # ── Step 3: ConstraintGraph renderer (single materialization route) ──
     # Delete-only plans (graph is None) skip rendering entirely (F1).
     fileops: list[FileOp] = []
+    if infra_ops:
+        fileops.extend(infra_ops)
+
+    # ── PageCreator → seeded FileOps (no early/late writes) ──
+    # PageCreator ops (page CREATE + router MODIFY) join the single
+    # materialization set. Actions are normalized to the pipeline's lowercase
+    # form; the F11 physical check now lives here (deterministic re-check).
+    if page_creator_ops:
+        for p_op in page_creator_ops:
+            if p_op.action.lower() == "create":
+                abs_target = os.path.join(context.workspace, p_op.path)
+                if os.path.isfile(abs_target):
+                    return {
+                        "execution": {
+                            "status": "clarification_needed",
+                            "reason": "page_target_exists",
+                            "detail": (
+                                f"page_creator CONFLICT: target '{p_op.path}' "
+                                f"already exists; a new page requires a target "
+                                f"that does not exist. No overwrite, no "
+                                f"alternate path."
+                            ),
+                            "diff": None,
+                            "operations": [],
+                        },
+                        "context": {"repo_snapshot": []},
+                    }
+            fileops.append(FileOp(
+                action=p_op.action.lower(),
+                path=p_op.path,
+                content=p_op.content,
+                pipeline_route=p_op.pipeline_route,
+                metadata=p_op.metadata,
+            ))
+        logger.info(
+            "page_creator: seeded %d FileOp(s) into the materialization set",
+            len(page_creator_ops),
+        )
+
     files = contract.renderer.get("files", [])
     base_path = contract.renderer.get("base_path", "")
     path_map = {}
@@ -1497,11 +1541,15 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         _audit_render_ctx = render_ctx
         _audit_split_recommendation = split_recommendation
 
-        # Phase 2: Persist new identity→file mappings
+        # Phase 2: Persist new identity→file mappings (State Layer evidence).
+        # dry_run is preview-only: memory persistence is a write side effect,
+        # so it is skipped in dry_run to keep the zero-write invariant. Real
+        # applies persist the merged history.
         updated = memory.merge(
             decisions, identities, resolved_mapping,
         )
-        memory.save(updated)
+        if not dry_run:
+            memory.save(updated)
 
     # ── Capture emitted props ──
     _captured_emit_log = list(ReactBackend._emit_log.get(run_id, []))
@@ -1658,7 +1706,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         }
 
     applier = FileOpApplier(context.workspace)
-    results = applier.apply(fileops)
+    results: list[dict] = []
+    if not dry_run:
+        results = applier.apply(fileops)
+    else:
+        logger.info(
+            "dry_run: %d FileOp(s) generated, zero writes (single terminal apply skipped)",
+            len(fileops),
+        )
 
     logger.info(
         "apply: contract_id=%s version=%d params=%s fileops_count=%d",
@@ -1666,7 +1721,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     )
 
     # ── Orphan detection (3-layer, post-hoc — never blocks) ──
-    _check_orphan_components_3layer(fileops, context.workspace, graph)
+    if not dry_run:
+        _check_orphan_components_3layer(fileops, context.workspace, graph)
 
     # ── Fase 4: Verify BEFORE git commit ────────────────────────────
     verify_result = None
