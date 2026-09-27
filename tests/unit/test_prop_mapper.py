@@ -337,27 +337,6 @@ class TestParseBindings:
         assert _parse_bindings({}) == {}
 
 
-def test_backward_compat_parse_v2_dict():
-    """_parse_bindings translates old hook format to DataSourceIR."""
-    v2_data = {
-        "components": {
-            "KpiRow": {
-                "bindings": [{
-                    "targetProp": "data",
-                    "source": {"type": "hook", "name": "useDashboardData"},
-                    "transform": "kpiData",
-                    "consumes": ["metrics"],
-                }],
-            },
-        },
-    }
-    bindings = _parse_bindings(v2_data)
-    b = bindings["KpiRow"][0]
-    assert isinstance(b.source, DataSourceIR)
-    assert b.source.type == "dashboard_data"
-    assert b.transform == "kpiData"
-
-
 # ── Phase 6 lock invariants ─────────────────────────────────
 
 

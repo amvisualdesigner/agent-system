@@ -388,7 +388,7 @@ class RepositoryAwareRenderer:
                         fileops.extend(new_ops)
                     continue
 
-                # CREATE and SPLIT fall through to legacy handling
+                # CREATE and SPLIT emit the file directly via render_mode
                 if decision.render_mode:
                     ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                     fileops.append(FileOp(
@@ -398,7 +398,7 @@ class RepositoryAwareRenderer:
                     ))
                     continue
 
-            # Legacy path — render_mode ya resuelto por apply_engine
+            # Non-line-range emit path — render_mode ya resuelto por apply_engine
             if decision.render_mode:
                 ReactBackend.add_trace(ctx.id, "emitted", component=ctx.type)
                 fileops.append(FileOp(

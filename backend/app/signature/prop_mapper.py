@@ -277,7 +277,6 @@ def load_page_data_source() -> DataSourceIR | None:
     No workspace override, no .opencode lookup.
 
     In v4, Page's dataSource lives under 'composition.Page.dataSource'.
-    Falls back to v3 location 'components.Page.dataSource' for backward compat.
 
     Returns DataSourceIR with slices populated, or None if missing.
     """
@@ -290,13 +289,6 @@ def load_page_data_source() -> DataSourceIR | None:
     ds_raw = page_cfg.get("dataSource") if page_cfg else None
     if ds_raw:
         return _infer_datasource_ir(ds_raw)
-    # v3 fallback: components.Page.dataSource
-    comps = data.get("components", {})
-    page_cfg_v3 = comps.get("Page")
-    if page_cfg_v3:
-        ds_raw_v3 = page_cfg_v3.get("dataSource")
-        if ds_raw_v3:
-            return _infer_datasource_ir(ds_raw_v3)
     return None
 
 
@@ -336,19 +328,12 @@ def _load_data_access_config() -> dict | None:
 
 # ── Binding lookup ────────────────────────────────────────────────────────
 
-# Backward compat map: old JSON source.type → DataSourceIR type
-_OLD_SOURCE_TYPE_MAP: dict[str, str] = {
-    "hook": "dashboard_data",
-}
-
 
 def _infer_datasource_ir(source_raw: dict) -> DataSourceIR:
     """Translate JSON source entry to framework-agnostic DataSourceIR.
 
-    Supports three formats:
-      1. v3 semantic: {"type": "dashboard_data", "slices": [...]}
-      2. v2 semantic: {"type": "dashboard_data", "selector": "kpiData"}
-      3. Old React-specific: {"type": "hook", "name": "useDashboardData"}
+    Semantic format (v4): {"type": "dashboard_data", "slices": [...]},
+    or any type in _REACT_HOOK_MAP / "raw_selector".
     """
     stype = source_raw.get("type", "")
     slices_raw = source_raw.get("slices", [])
@@ -361,22 +346,11 @@ def _infer_datasource_ir(source_raw: dict) -> DataSourceIR:
         )
         for sr in slices_raw
     )
-    # New format: semantic type directly
-    if stype in _REACT_HOOK_MAP or stype == "raw_selector":
-        return DataSourceIR(
-            type=stype,
-            selector=source_raw.get("selector"),
-            slices=slices,
-        )
-    # Backward compat: old "hook" → "dashboard_data"
-    mapped = _OLD_SOURCE_TYPE_MAP.get(stype)
-    if mapped:
-        return DataSourceIR(
-            type=mapped,
-            selector=source_raw.get("transform") or source_raw.get("selector"),
-            slices=slices,
-        )
-    return DataSourceIR(type=stype, selector=source_raw.get("selector"), slices=slices)
+    return DataSourceIR(
+        type=stype,
+        selector=source_raw.get("selector"),
+        slices=slices,
+    )
 
 
 def _parse_bindings(data: dict | None) -> dict[str, list[Binding]]:

@@ -16,7 +16,7 @@ class StructuralIndex:
     NO se pasa al GraphIRBuilder. Solo se usa en:
       - StructuralCompletion (lifecycle decisions)
       - StructuralResolver (target resolution, si activo)
-      - apply_engine (replace_pairs, validaciones)
+      - apply_engine (substitution_ops, validaciones)
 
     Soportar múltiples instancias por capability via list.
     instance_id=0 es la instancia primaria (compatibilidad).

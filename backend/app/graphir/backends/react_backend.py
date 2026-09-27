@@ -959,8 +959,9 @@ def generate_datasource_artifacts(
 ) -> list[FileOp]:
     """Generate datasource infrastructure files from contract.
 
-    Called once per workspace (bootstrap), not per plan execution.
-    Generates TypeScript types + hook implementation.
+    Produces FileOps (types + hook) for the single materialization flow.
+    It never writes: the ops join the effective FileOps set and are applied
+    by the single terminal apply together with the plan FileOps.
 
     Returns FileOps with path relative to workspace_root.
     """

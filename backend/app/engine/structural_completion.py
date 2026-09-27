@@ -148,30 +148,6 @@ class SubstitutionOp:
     source: str
     target: str
 
-    @property
-    def pair(self) -> tuple[str, str]:
-        """(old, new) tuple para backward compat."""
-        return (self.source, self.target)
-
-
-@dataclass(frozen=True)
-class SubstitutionRecord:
-    """DEPRECATED — use SubstitutionOp instead.
-
-    Mantenido temporalmente para backward compat.
-    Phase 4: todo nuevo código usa SubstitutionOp.
-    """
-    source_capability: str
-    target_capability: str
-
-    @property
-    def pair(self) -> tuple[str, str]:
-        return (self.source_capability, self.target_capability)
-
-    def to_op(self) -> SubstitutionOp:
-        """Convert to canonical Phase 4 SubstitutionOp."""
-        return SubstitutionOp(source=self.source_capability, target=self.target_capability)
-
 
 @dataclass(frozen=True)
 class StructuralIR:
@@ -187,8 +163,6 @@ class StructuralIR:
     capabilities incluye todas (para auditoría/trazabilidad).
     layout_hints: metadata de layout (MOVE scope, REPLACE anchor).
     substitution_ops: stream de SubstitutionOp — independiente del lifecycle.
-                      Phase 4: la sustitución NO afecta CREATE/MODIFY/DELETE/KEEP.
-    substitutions: tuple[SubstitutionRecord, ...] heredado (DEPRECATED).
     composition_sync_trace: Phase 5C — traza de syncs de composición.
     """
     contract_id: str
@@ -199,21 +173,7 @@ class StructuralIR:
     completion_warnings: tuple[str, ...] = ()
     layout_hints: dict[str, dict] = field(default_factory=dict)
     substitution_ops: tuple[SubstitutionOp, ...] = ()
-    substitutions: tuple[SubstitutionRecord, ...] = ()
     composition_sync_trace: tuple[RefactorChange, ...] = ()
-
-    @property
-    def replace_pairs(self) -> list[tuple[str, str]]:
-        """Backward compat: deriva de substitution_ops como lista de tuplas (old, new)."""
-        return [s.pair for s in self.substitution_ops] or [s.pair for s in self.substitutions]
-
-    @property
-    def replace_pairs_index(self) -> dict[str, str]:
-        """Backward compat: lookup O(1) new_cap → old_cap."""
-        ops_idx = {s.target: s.source for s in self.substitution_ops}
-        if ops_idx:
-            return ops_idx
-        return {s.target_capability: s.source_capability for s in self.substitutions}
 
     @property
     def has_resolved_keep_state(self) -> bool:
@@ -228,18 +188,6 @@ class StructuralIR:
             rc.action == KEEP and not rc.instance_only
             for rc in self.capabilities
         )
-
-    def is_replacement(self, capability: str) -> bool:
-        """¿Esta capability reemplaza a otra? (es el 'new' de un replace)"""
-        if any(s.target == capability for s in self.substitution_ops):
-            return True
-        return any(s.target_capability == capability for s in self.substitutions)
-
-    def is_replace_target(self, capability: str) -> bool:
-        """¿Esta capability fue reemplazada por otra? (es el 'old' de un replace)"""
-        if any(s.source == capability for s in self.substitution_ops):
-            return True
-        return any(s.source_capability == capability for s in self.substitutions)
 
     @property
     def pending_deletions(self) -> tuple[PendingDeletion, ...]:
@@ -1201,7 +1149,6 @@ def complete_structure(
         completion_warnings=tuple(warnings),
         layout_hints=layout_hints,
         substitution_ops=substitution_ops,
-        substitutions=(),
         composition_sync_trace=tuple(composition_sync_trace),
     )
 
@@ -1235,9 +1182,6 @@ def _validate_substitution_ops_consistency(
     """
     warnings: list[str] = []
     substitutions = list(structural_ir.substitution_ops)
-    # Fallback a deprecated substitutions si no hay substitution_ops
-    if not substitutions:
-        substitutions = [s.to_op() for s in structural_ir.substitutions]
     if not substitutions:
         return warnings
 

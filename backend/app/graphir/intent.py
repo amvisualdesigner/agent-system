@@ -229,51 +229,12 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDef] = {
 
 
 def resolve_capability_def(capability: str) -> CapabilityDef | None:
-    if capability in CAPABILITY_REGISTRY:
-        return CAPABILITY_REGISTRY[capability]
-    alias = _CAPABILITY_ALIASES.get(capability)
-    if alias and alias in CAPABILITY_REGISTRY:
-        return CAPABILITY_REGISTRY[alias]
-    return None
+    return CAPABILITY_REGISTRY.get(capability)
 
 
 def is_capability_soft(capability: str) -> bool:
     cap = resolve_capability_def(capability)
     return cap.is_soft if cap else False
-
-
-# ── Backward-compatible capability aliases (deprecated) ──────────
-# Old capability strings still resolve correctly.
-# Use new IDs in new code.
-
-_CAPABILITY_ALIASES: dict[str, str] = {
-    "display.kpi_row": "presentation.kpi_row",
-    "display.timeseries": "presentation.timeseries",
-    "display.analytics_table": "presentation.table",
-    "display.filter_panel": "presentation.filter_panel",
-    "embed.external": "presentation.embed",
-    "layout.page": "layout.page",
-    "layout.container": "layout.container",
-    "layout.grid": "layout.grid",
-    "interaction.search": "interaction.search",
-    "interaction.form": "interaction.form",
-    "data.export": "data.export",
-    "data.drilldown": "data.drilldown",
-}
-
-# ── Deprecated capability constants (kept for backward compat) ───
-CAPABILITY_DISPLAY_KPI     = "display.kpi_row"
-CAPABILITY_DISPLAY_TS      = "display.timeseries"
-CAPABILITY_DISPLAY_TABLE   = "display.analytics_table"
-CAPABILITY_DISPLAY_FILTER  = "display.filter_panel"
-CAPABILITY_EMBED           = "embed.external"
-CAPABILITY_DATA_EXPORT     = "data.export"
-CAPABILITY_DATA_DRILLDOWN  = "data.drilldown"
-CAPABILITY_LAYOUT_PAGE     = "layout.page"
-CAPABILITY_LAYOUT_CONTAINER = "layout.container"
-CAPABILITY_LAYOUT_GRID     = "layout.grid"
-CAPABILITY_INTERACTION_SEARCH = "interaction.search"
-CAPABILITY_INTERACTION_FORM   = "interaction.form"
 
 
 # ── Semantic entropy ─────────────────────────────────────────────

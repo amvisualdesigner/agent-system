@@ -51,7 +51,7 @@ class EditOperation:
 class ExtendStrategy(Enum):
     """Controls how EXTEND decisions are applied.
 
-    REPLACE_FILE: legacy behavior — full file rewrite (default).
+    REPLACE_FILE: full file rewrite (default).
     APPEND_REGION: Phase 5 behavior — append after last boundary.
     """
     REPLACE_FILE = "replace_file"

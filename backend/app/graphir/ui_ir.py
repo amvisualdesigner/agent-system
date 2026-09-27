@@ -80,7 +80,7 @@ class UIComponentTree:
         page_data_source — Phase 6: Page-level data source with slices.
             When set, Page is the sole data owner; children receive data via
             JSVariable references from Page's hook result. None means no
-            Page-level data aggregation (legacy/migration mode).
+            Page-level data aggregation (None means no Page-level data source).
     """
     root: UIComponentNode
     semantic_warnings: list[str] = field(default_factory=list)

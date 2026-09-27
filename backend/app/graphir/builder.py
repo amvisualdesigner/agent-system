@@ -142,7 +142,7 @@ class GraphIRBuilder:
 
         Rules (in order):
           1. layout.page (type="Page") wins — structural container
-          2. Fallback: first registered node (legacy behavior)
+          2. Fallback: first registered node (no layout.page present)
 
         Raises:
             AmbiguousStructuralTargetError: if draft is empty (no nodes

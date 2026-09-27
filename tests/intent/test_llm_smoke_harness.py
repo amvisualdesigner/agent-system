@@ -611,37 +611,37 @@ class TestSubstitutionInvariants:
     """Invariantes permanentes: sustitución ≠ DELETE.
 
     Estas pruebas codifican la decisión de diseño:
-    SubstitutionRecord es una operación semántica que NO elimina
+    SubstitutionOp es una operación semántica que NO elimina
     la source. El archivo de la vieja capability permanece en disco.
     Todo DELETE en operations debe venir de una acción 'remove' confirmada.
     """
 
     def test_substitution_source_preserved_on_disk(self):
         """La source de un replace no se convierte en DELETE."""
-        from app.engine.structural_completion import StructuralIR, SubstitutionRecord, ResolvedCapability
+        from app.engine.structural_completion import StructuralIR, SubstitutionOp, ResolvedCapability
         ir = StructuralIR(
             contract_id="test",
             contract_version=1,
             capabilities=(),
             param_provenance={},
             confidence=1.0,
-            substitutions=(
-                SubstitutionRecord(source_capability="presentation.timeseries",
-                                   target_capability="presentation.chart.bar"),
+            substitution_ops=(
+                SubstitutionOp(source="presentation.timeseries",
+                               target="presentation.chart.bar"),
             ),
         )
-        # replace_pairs derivado debe reflejar la tupla
-        assert ir.replace_pairs == [("presentation.timeseries", "presentation.chart.bar")]
-        assert ir.replace_pairs_index == {"presentation.chart.bar": "presentation.timeseries"}
-        assert ir.is_replacement("presentation.chart.bar")
-        assert ir.is_replace_target("presentation.timeseries")
+        # substitution_ops derivado debe reflejar la tupla
+        assert ir.substitution_ops == (
+            SubstitutionOp(source="presentation.timeseries",
+                           target="presentation.chart.bar"),
+        )
         # Ninguna operation debe ser DELETE
         for op in ir.operations:
             assert op["action"] != "DELETE", f"substitution generó DELETE: {op}"
 
     def test_substitution_no_delete_in_operations(self):
         """Un plan con solo replace no produce DELETE operations."""
-        from app.engine.structural_completion import StructuralIR, SubstitutionRecord, ResolvedCapability
+        from app.engine.structural_completion import StructuralIR, SubstitutionOp, ResolvedCapability
         rc1 = ResolvedCapability(name="presentation.chart.bar", params={}, mode="page",
                                  action="CREATE")
         ir = StructuralIR(
@@ -650,9 +650,9 @@ class TestSubstitutionInvariants:
             capabilities=(rc1,),
             param_provenance={},
             confidence=1.0,
-            substitutions=(
-                SubstitutionRecord(source_capability="presentation.timeseries",
-                                   target_capability="presentation.chart.bar"),
+            substitution_ops=(
+                SubstitutionOp(source="presentation.timeseries",
+                               target="presentation.chart.bar"),
             ),
         )
         actions = [op["action"] for op in ir.operations]
@@ -660,7 +660,7 @@ class TestSubstitutionInvariants:
 
     def test_delete_only_from_remove_action(self):
         """DELETE operations solo se generan por remove, no por replace."""
-        from app.engine.structural_completion import StructuralIR, SubstitutionRecord, ResolvedCapability
+        from app.engine.structural_completion import StructuralIR, SubstitutionOp, ResolvedCapability
         rc1 = ResolvedCapability(name="presentation.kpi_row", params={}, mode="page",
                                  action="DELETE")
         rc2 = ResolvedCapability(name="presentation.chart.bar", params={}, mode="page",
@@ -671,9 +671,9 @@ class TestSubstitutionInvariants:
             capabilities=(rc1, rc2),
             param_provenance={},
             confidence=1.0,
-            substitutions=(
-                SubstitutionRecord(source_capability="presentation.timeseries",
-                                   target_capability="presentation.chart.bar"),
+            substitution_ops=(
+                SubstitutionOp(source="presentation.timeseries",
+                               target="presentation.chart.bar"),
             ),
         )
         delete_targets = [

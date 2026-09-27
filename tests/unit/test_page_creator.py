@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"
 from app.engine.page_creator import (
     PageCreateTargetExistsError,
     create_page_ops,
-    create_page_ops_dry,
     _suggest_page_name,
     _find_router_path,
     _has_route_for_context,
@@ -115,13 +114,6 @@ class TestCreatePageOps(unittest.TestCase):
             router_ops = [o for o in ops if o.action == "MODIFY"]
             self.assertEqual(len(router_ops), 0)
 
-    def test_create_page_ops_dry(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ops = create_page_ops_dry("analytics", tmp)
-            self.assertEqual(len(ops), 1)
-            self.assertEqual(ops[0]["action"], "CREATE")
-            self.assertIn("/analytics/AnalyticsDashboardPage.tsx", ops[0]["path"])
-
 
 class TestPageCreatorPhysicalValidation(unittest.TestCase):
     """F11 locks: page CREATE against an existing target is a CONFLICT."""
@@ -177,13 +169,6 @@ class TestPageCreatorPhysicalValidation(unittest.TestCase):
                 create_page_ops("analytics", tmp)
             with self.assertRaises(PageCreateTargetExistsError):
                 create_page_ops("analytics", tmp)
-
-    def test_create_page_ops_dry_conflicts_when_target_exists(self):
-        # F11.1: dry variant applies the same physical validation.
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed_page(tmp)
-            with self.assertRaises(PageCreateTargetExistsError):
-                create_page_ops_dry("analytics", tmp)
 
 
 if __name__ == "__main__":

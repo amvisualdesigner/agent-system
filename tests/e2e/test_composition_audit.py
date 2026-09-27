@@ -350,5 +350,5 @@ class TestCompositionReplace:
         )
         assert found, (
             f"Should find SubstitutionOp(timeseries→kpi_row), "
-            f"got: {[(s.source, s.target) for s in struktural.substitutions]}"
+            f"got: {[(s.source, s.target) for s in struktural.substitution_ops]}"
         )
