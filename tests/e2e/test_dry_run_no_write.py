@@ -96,6 +96,40 @@ class TestDryRunNoWrite:
         # …but it MUST NOT write a single byte.
         assert after == before, "dry_run performed writes"
 
+    def test_real_apply_writes_exactly_the_operations(self):
+        from app.engine.apply_engine import apply_engine
+
+        run_id = str(uuid.uuid4())
+        ws = _seed_workspace(run_id)
+        plan = _plan_dict()
+        ctx = build_context(run_id)
+        seed_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ws, capture_output=True, text=True
+        ).stdout.strip()
+        try:
+            applied = apply_engine(
+                run_id, plan, ctx, dry_run=False, confirmed_deletions=[]
+            )
+            ops = applied.get("execution", {}).get("operations", [])
+            assert applied.get("execution", {}).get("status") == "ok", applied
+            assert ops
+
+            # Workspace changes since the seed commit must be EXACTLY the applied
+            # FileOps targets plus the gated State-Layer memory evidence file.
+            # Provenance: no earlier stage may write, and dry_run preview writes
+            # nothing — this locks the single-terminal-write-point invariant.
+            changed = subprocess.run(
+                ["git", "diff", "--name-only", seed_commit], cwd=ws,
+                capture_output=True, text=True,
+            ).stdout.splitlines()
+            expected = {op.get("path") for op in ops} | {".opencode/semantic_memory.json"}
+            assert set(changed) == expected, (
+                f"changes {sorted(set(changed))} != ops {sorted(expected)}"
+            )
+        finally:
+            delete_run_state(run_id)
+            shutil.rmtree(ws, ignore_errors=True)
+
     def test_preview_fileops_equals_applied_fileops(self):
         from app.engine.apply_engine import apply_engine
 
