@@ -103,19 +103,20 @@ async def agent_apply(run_id: str, dry_run: bool = False):
 
 
 # -------------------------
-# ONE-SHOT (auto: interpret → confirm → apply)
+# ONE-SHOT (interpret only, human-in-the-loop)
 # -------------------------
 @mcp.tool()
-async def agent_run(prompt: str, dry_run: bool = False):
-    """One-shot: interpret → auto-confirm with proposed actions → apply.
+async def agent_run(prompt: str):
+    """Interpret a prompt and leave the Run in awaiting_confirmation.
 
-    Fast path — no human-in-the-loop. Uses the proposed_actions from the
-    interpreter directly without allowing edits.
+    S1-A.5: agent_run never confirms nor applies. It delegates to the same
+    canonical /agent/interpret→/agent/confirm→/agent/apply flow as the API and
+    returns the Run waiting for an explicit human confirmation. It cannot
+    produce confirmed/applying/completed on its own.
     """
     async with httpx.AsyncClient(timeout=180) as client:
         run_id = str(uuid.uuid4())
 
-        # 1. INTERPRET
         interp_resp = await client.post(
             f"{BASE_URL}/agent/interpret",
             json={"run_id": run_id, "message": prompt, "conversation": []}
@@ -123,33 +124,15 @@ async def agent_run(prompt: str, dry_run: bool = False):
         interp_resp.raise_for_status()
         interp_data = interp_resp.json()
 
-        # 2. CONFIRM (auto-accept proposed actions)
-        actions = interp_data.get("proposed_actions", [])
-        confirm_resp = await client.post(
-            f"{BASE_URL}/agent/confirm",
-            json={
-                "run_id": run_id,
-                "interpretation_id": interp_data["interpretation_id"],
-                "contract_id": interp_data["contract_id"],
-                "actions": actions,
-            }
-        )
-        confirm_resp.raise_for_status()
-        confirm_data = confirm_resp.json()
-
-        # 3. APPLY
-        apply_resp = await client.post(
-            f"{BASE_URL}/agent/apply",
-            json={"run_id": run_id, "dry_run": dry_run}
-        )
-        apply_resp.raise_for_status()
-
     return {
         "run_id": run_id,
         "interpretation": interp_data,
-        "plan_preview": confirm_data.get("plan_preview"),
-        "dry_run": dry_run,
-        "result": apply_resp.json()
+        "status": "awaiting_confirmation",
+        "detail": (
+            "Run created in awaiting_confirmation. Confirm via agent_confirm, "
+            "then execute via agent_apply. agent_run performs no confirmation "
+            "and no application on its own."
+        ),
     }
 
 
@@ -193,27 +176,30 @@ async def agent_review(run_id: str):
 
 
 # -------------------------
-# APPROVE DIFF
+# APPROVE — pending migration to session_merge
 # -------------------------
 @mcp.tool()
 async def agent_approve(run_id: str):
-    validate_run_id(run_id)
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{BASE_URL}/runs/{run_id}/approve")
-    r.raise_for_status()
-    return {"run_id": run_id, "status": "approved", "result": r.json()}
+    """Approve Run changes for integration.
 
-
-# -------------------------
-# REJECT DIFF
-# -------------------------
-@mcp.tool()
-async def agent_reject(run_id: str):
+    S1-A.4: the legacy approve→commit→merge path has been removed. A Run's
+    commit belongs to its successful Apply (confirm→apply→commit), and there is
+    no per-run merge into the base branch. Integration of session branches is
+    the future agent_session_merge(session_id) operation — not implemented in
+    the current model. This tool is explicitly marked pending that migration:
+    it performs no commit, no merge, and no branch deletion.
+    """
     validate_run_id(run_id)
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{BASE_URL}/runs/{run_id}/reject")
-    r.raise_for_status()
-    return {"run_id": run_id, "status": "rejected", "result": r.json()}
+    return {
+        "run_id": run_id,
+        "status": "pending_session_merge_migration",
+        "detail": (
+            "approve Run → commit → merge no longer exists. Commits belong to "
+            "the successful Apply; base-branch integration will be handled by "
+            "agent_session_merge(session_id) in the Session phase. Inspect the "
+            "Run with agent_review and verify its Apply result instead."
+        ),
+    }
 
 
 # -------------------------

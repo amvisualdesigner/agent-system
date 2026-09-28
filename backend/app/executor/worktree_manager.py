@@ -137,23 +137,6 @@ def create_worktree(run_id: str) -> str:
     )
 
     # ----------------------------
-    # 7. copiar .opencode/ local gitignorado al worktree
-    # ----------------------------
-    src_opencode = os.path.join(repo_root, ".opencode")
-    dst_opencode = os.path.join(workspace, ".opencode")
-    if os.path.isdir(src_opencode):
-        os.makedirs(dst_opencode, exist_ok=True)
-        for fname in os.listdir(src_opencode):
-            src = os.path.join(src_opencode, fname)
-            dst = os.path.join(dst_opencode, fname)
-            if os.path.isfile(src):
-                if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
-                    try:
-                        shutil.copy2(src, dst)
-                        print(f"[worktree] seeded {fname}")
-                    except Exception as e:
-                        print(f"[worktree] WARN: failed to seed {fname}: {e}")
-
     print(f"[worktree] ready at {workspace}")
 
     return workspace

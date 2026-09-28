@@ -139,5 +139,14 @@ def _agent_apply(req: ApplyRequest):
         "changed_paths": concurrency_conflicts[:20],
     }
 
-    transition_phase(run_id, RunPhase.COMPLETED)
+    # S1-A.2/S1-A.3: COMPLETED is only valid for a real successful apply
+    # (accepted, verified, and committed — or explicitly NO_CHANGES). Any other
+    # terminal outcome (rejected / verify_failed / clarification_needed / error)
+    # lands the Run in FAILED. Never COMPLETED by side effect.
+    execution_status = result.get("execution", {}).get("status")
+    if execution_status in ("ok", "no_changes"):
+        transition_phase(run_id, RunPhase.COMPLETED)
+    else:
+        transition_phase(run_id, RunPhase.FAILED)
+    save_run_state(run_id, {"apply_result": execution_status})
     return result

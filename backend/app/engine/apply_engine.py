@@ -135,17 +135,26 @@ def _check_orphan_components_3layer(
     return orphans
 
 
-def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | None, str | None]:
+def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | None, str | None, bool]:
+    """Single productive commit route for a run (S1-A.1).
+
+    Returns (diff, err, committed). On a successful apply that produced zero
+    effective changes, returns (None, None, False): the caller must report the
+    explicit NO_CHANGES result — never an empty commit and never a git failure.
+    """
     subprocess.run(["git", "add", "-A"], cwd=workspace, check=False)
     diff = generate_diff(workspace)
+    changed = bool(diff.strip())
     if not dry_run:
+        if not changed:
+            return None, None, False
         r = subprocess.run(
             ["git", "commit", "-m", f"agent:{run_id}"],
             cwd=workspace, capture_output=True, text=True,
         )
         if r.returncode != 0:
-            return None, r.stderr
-    return diff, None
+            return None, r.stderr, False
+    return (diff or None), None, bool(diff.strip())
 
 
 def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str,
@@ -1742,12 +1751,16 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         diff = generate_diff(context.workspace)
         logger.warning("[apply] verify failed — skipping git commit, status=verify_failed")
     else:
-        diff, err = _run_git_flow(context.workspace, run_id, dry_run)
+        diff, err, committed = _run_git_flow(context.workspace, run_id, dry_run)
         if err:
             return {
                 "execution": {"status": "rejected", "reason": "git_commit_failed", "detail": err, "diff": None, "operations": []},
                 "context": {"repo_snapshot": []},
             }
+        if not dry_run and not committed:
+            execution_status = "no_changes"
+            diff = None
+            logger.info("[apply] apply succeeded with no effective changes — status=no_changes")
 
     # ── Step 4: Filter plan for artifacts (strip decomposition fields) ──
     clean_plan = {k: v for k, v in plan.items() if k not in ("intents", "decomposition")}

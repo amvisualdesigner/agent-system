@@ -342,9 +342,8 @@ El sistema incluye un servidor MCP (Model Context Protocol) en `backend/mcp-serv
 | `agent_apply` | `run_id: str, plan: dict, dry_run: bool` | Ejecutar plan en sandbox |
 | `get_run` | `run_id: str` | Obtener metadata del run |
 | `agent_review` | `run_id: str` | Inspeccionar plan, diff, ejecución |
-| `agent_run` | `prompt: str, dry_run: bool` | One-shot plan + apply |
-| `agent_approve` | `run_id: str` | Aprobar y mergear cambios |
-| `agent_reject` | `run_id: str` | Rechazar y limpiar |
+| `agent_run` | `prompt: str` | Interpretar y dejar el Run en `awaiting_confirmation` (sin auto-confirm) |
+| `agent_approve` | `run_id: str` | Pendiente de migración a `agent_session_merge(session_id)`; sin commit/merge en el modelo actual |
 
 ### Conexión
 
@@ -375,13 +374,17 @@ El backend clona/usa un repo Git en `REPO_ROOT`. Cada run:
 1. Crea un branch `agent-{run_id[:8]}` desde `master`
 2. Crea un worktree en `{RUNS_DIR}/{run_id}/workspace/`
 3. Aplica operaciones (create, modify, delete)
-4. Hace `git add -A` y `git commit -m "agent:{run_id}"`
+4. `git add -A` y (si hay cambios efectivos) `git commit -m "agent:{run_id}"` — **única** ruta de commit (S1-A.1)
 5. Genera diff
 
-Para limpiar worktrees antiguos:
-```bash
-curl -X POST http://localhost:8000/maintenance/cleanup
-```
+Resultados del Apply (S1-A.2/S1-A.3):
+
+- Apply verificado y con cambios → `execution.status = "ok"`, un commit, Run `completed`
+- Apply exitoso sin cambios efectivos → `execution.status = "no_changes"`, **sin commit vacío**, Run `completed`
+- Verificación fallida (`verify_failed`) → **nunca** se commitea; los cambios quedan staged y el Run termina en `failed` (sin reset limpio automático)
+- Cualquier otro resultado (`rejected`, `clarification_needed`, `error`) → Run `failed`
+
+El path legacy `approve Run → commit → merge` (`POST /runs/{id}/approve`) fue eliminado en S1-A.4. No existe merge por run; la integración de ramas a la base será responsabilidad de la operación de Session `session_merge`.
 
 ---
 
