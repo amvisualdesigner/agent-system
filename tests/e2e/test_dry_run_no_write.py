@@ -115,17 +115,27 @@ class TestDryRunNoWrite:
             assert ops
 
             # Workspace changes since the seed commit must be EXACTLY the applied
-            # FileOps targets plus the gated State-Layer memory evidence file.
-            # Provenance: no earlier stage may write, and dry_run preview writes
-            # nothing — this locks the single-terminal-write-point invariant.
+            # FileOps targets. Provenance: no earlier stage may write, and dry_run
+            # preview writes nothing — this locks the single-terminal-write-point
+            # invariant.
+            # S2 Fase 1 / L1: the State-Layer memory evidence file is git-isolated
+            # (`.opencode/.gitignore`), so it never appears in the git diff; it
+            # still persists on disk with its exact policy. The `.gitignore`
+            # anchor itself appears exactly once (bootstrap scaffold), never the
+            # memory file.
             changed = subprocess.run(
                 ["git", "diff", "--name-only", seed_commit], cwd=ws,
                 capture_output=True, text=True,
             ).stdout.splitlines()
-            expected = {op.get("path") for op in ops} | {".opencode/semantic_memory.json"}
+            expected = {op.get("path") for op in ops} | {".opencode/.gitignore"}
             assert set(changed) == expected, (
                 f"changes {sorted(set(changed))} != ops {sorted(expected)}"
             )
+            assert ".opencode/semantic_memory.json" not in changed, (
+                "memory evidence must never be part of git changes"
+            )
+            mem_path = os.path.join(ws, ".opencode", "semantic_memory.json")
+            assert os.path.exists(mem_path), "memory evidence still persists on disk"
         finally:
             delete_run_state(run_id)
             shutil.rmtree(ws, ignore_errors=True)

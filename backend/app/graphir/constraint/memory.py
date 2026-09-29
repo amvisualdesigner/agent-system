@@ -31,6 +31,29 @@ from app.graphir.constraint.identity import CanonicalIdentity
 
 logger = logging.getLogger(__name__)
 
+# The state dir keeps internal bookkeeping OUT of the run's functional commit
+# (S2 Fase 1 / L1): the run commit must represent exclusively the functional
+# changes produced by that run. Memory itself keeps its exact policy (load/
+# merge/save/accumulate in the workspace), it is just never stageable.
+GITIGNORE_CONTENT = "*\n!.gitignore\n"
+
+
+def _ensure_gitignored(directory: str) -> None:
+    """Make git ignore every file inside the state dir (S2 Fase 1 / L1).
+
+    Writes `.opencode/.gitignore` (if absent) with `*` + `!.gitignore` so the
+    dir stays discoverable by git (the ignore file is its trackable anchor)
+    while `semantic_memory.json` and any transient `.tmp` files are never
+    staged by `git add -A`. Best-effort: never raises.
+    """
+    try:
+        ignore_path = os.path.join(directory, ".gitignore")
+        if not os.path.exists(ignore_path):
+            with open(ignore_path, "w") as f:
+                f.write(GITIGNORE_CONTENT)
+    except OSError as e:
+        logger.warning("Failed to write %s/.gitignore: %s", directory, e)
+
 
 def _memory_record_from_raw(key: str, value: object) -> MemoryRecord | None:
     """Parse a single memory entry, supporting both old and new formats.
@@ -119,6 +142,7 @@ class RepositorySemanticMemory:
         directory = os.path.dirname(self.memory_path)
         try:
             os.makedirs(directory, exist_ok=True)
+            _ensure_gitignored(directory)
             serializable = {
                 fp: {
                     "fingerprint": rec.fingerprint,
