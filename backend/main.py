@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.api.agent_apply import router as agent_apply
 from app.api.agent_interpret import router as agent_interpret_router
 from app.api.agent_confirm import router as agent_confirm_router
+from app.api.session_routes import router as session_router
 from app.utils.run_id import validate_run_id
 from app.utils.path_guard import guard_within
 from app.config.settings import settings
@@ -22,6 +23,7 @@ def value_error_handler(request, exc):
 app.include_router(agent_apply)
 app.include_router(agent_interpret_router)
 app.include_router(agent_confirm_router)
+app.include_router(session_router)
 
 # -------- MODELOS --------
 class RepoFile(BaseModel):

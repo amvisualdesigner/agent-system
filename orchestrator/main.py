@@ -30,10 +30,11 @@ logger = logging.getLogger("orchestrator.main")
 background_tasks: dict[str, asyncio.Task] = {}
 
 
-def _build_initial_state(run_id: str, task: str, start_node: str = "interpret") -> dict:
+def _build_initial_state(run_id: str, task: str, start_node: str = "interpret", session_id: str | None = None) -> dict:
     return {
         "task": task,
         "run_id": run_id,
+        "session_id": session_id,
         "plan": None,
         "execution": None,
         "run_details": None,
@@ -104,11 +105,11 @@ async def health():
 @app.post("/run", response_model=RunResponse)
 async def create_run(req: RunRequest):
     run_id = str(uuid.uuid4())
-    logger.info("[run_id=%s] POST /run task=%s", run_id, req.task[:80])
+    logger.info("[run_id=%s] POST /run task=%s session_id=%s", run_id, req.task[:80], req.session_id)
 
     emitter.register(run_id)
 
-    state = _build_initial_state(run_id, req.task, start_node="interpret")
+    state = _build_initial_state(run_id, req.task, start_node="interpret", session_id=req.session_id)
     task = asyncio.create_task(run_graph(state))
     background_tasks[run_id] = task
 
@@ -160,7 +161,7 @@ async def confirm_run(run_id: str, req: ConfirmRequest):
         "page_context_choice": req.page_context_choice,
     }
 
-    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm")
+    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm", session_id=snapshot.get("session_id"))
     state["interpretation"] = interpretation
     state["confirmed_intent"] = confirmed_intent
     state["phase"] = "confirming"
@@ -201,7 +202,7 @@ async def apply_run(run_id: str, req: ApplyRequest = ApplyRequest()):
 
     logger.info("[run_id=%s] POST /run/%s/apply dry_run=%s", run_id, run_id, req.dry_run)
 
-    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="apply")
+    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="apply", session_id=snapshot.get("session_id"))
     state["interpretation"] = snapshot.get("interpretation")
     state["confirmed_intent"] = snapshot.get("confirmed_intent")
     state["plan"] = snapshot.get("plan")

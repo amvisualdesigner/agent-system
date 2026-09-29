@@ -14,10 +14,25 @@ def ensure_worktree(context: RunContext) -> str:
       1. Instance flag (context.worktree_created)
       2. Filesystem check (workspace dir exists)
       3. create_worktree (solo si no existe en FS)
+
+    Run WITH Session → reutiliza el worktree de la Session (nunca lo recrea;
+    si falta, error explícito via session_manager). Run WITHOUT Session →
+    comportamiento legacy por-run.
+
     Retorna workspace path.
     """
     if context.worktree_created:
         return context.workspace
+
+    if context.session_id is not None:
+        from app.executor.session_manager import ensure_session_worktree, resolve_session
+
+        record = resolve_session(context.session_id)
+        workspace = ensure_session_worktree(record)
+        context.workspace = workspace
+        context.session_branch = record.branch
+        context.worktree_created = True
+        return workspace
 
     workspace = f"{settings.RUNS_DIR}/{context.run_id}"
 

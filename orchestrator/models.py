@@ -7,6 +7,7 @@ from run_id import validate_run_id
 
 class RunRequest(BaseModel):
     task: str
+    session_id: str | None = None
 
 
 class RunResponse(BaseModel):

@@ -79,6 +79,22 @@ def _agent_confirm(req: ConfirmRequest):
             "gate": {"blocked": True, "reason": "no_draft"},
         }
 
+    # ── S1-B: run bound to a Session must keep using that Session ──
+    session_id = state.get("session_id")
+    if session_id:
+        from app.executor.session_manager import resolve_session
+        from app.session.models import SessionStatus
+        session_rec = resolve_session(session_id)
+        if session_rec.status != SessionStatus.ACTIVE:
+            return {
+                "status": "rejected",
+                "reason": (
+                    f"Session {session_id} is '{session_rec.status.value}'. "
+                    "Only ACTIVE sessions accept run continuation."
+                ),
+                "gate": {"blocked": True, "reason": "session_not_active"},
+            }
+
     current_phase = RunPhase(state.get("phase", RunPhase.INTERPRETING.value))
     if current_phase not in (RunPhase.AWAITING_CONFIRMATION, RunPhase.CONFIRMED):
         return {
@@ -230,7 +246,7 @@ def _agent_confirm(req: ConfirmRequest):
             from app.runtime.context import build_context
             context = extract_requested_context(req.user_message)
             if context:
-                ctx = build_context(run_id)
+                ctx = build_context(run_id, session_id=session_id)
                 ops = create_page_ops(context, ctx.workspace)
                 page_creator_ops = [op.to_dict() for op in ops]
                 # Extract the page path from the CREATE op for forced anchoring
@@ -267,7 +283,7 @@ def _agent_confirm(req: ConfirmRequest):
         from app.graphir.utils import FileOp
         from app.runtime.context import build_context
 
-        eff_ctx = build_context(run_id)
+        eff_ctx = build_context(run_id, session_id=session_id)
         ensure_worktree(eff_ctx)
         eff_ops = [op if isinstance(op, FileOp) else FileOp(**op) for op in page_creator_ops]
         eff_result = apply_engine(
@@ -329,7 +345,7 @@ def _agent_confirm(req: ConfirmRequest):
         from app.engine.worktree_snapshot import snapshot_worktree
         from app.runtime.context import build_context
         from app.executor.worktree_manager import ensure_worktree
-        _snap_ctx = build_context(run_id)
+        _snap_ctx = build_context(run_id, session_id=session_id)
         ensure_worktree(_snap_ctx)
         apply_snapshot = snapshot_worktree(_snap_ctx.workspace)
     except Exception as e:

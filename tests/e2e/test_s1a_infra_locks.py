@@ -11,12 +11,22 @@ Enforces the S1-A contract before Session Lifecycle:
      terminal FAILED, and the apply outcome is persisted in run_state.
   3. verify_failed stages the worktree and STOPS: no commit, and no destructive
      reset/clean/checkout of the worktree state.
-  4. The legacy approve→commit→merge path is gone: no /runs/{id}/approve route,
-     no approve_run/get_base_branch, and the MCP agent_approve no longer calls
-     it (marked pending session_merge migration). No /maintenance/cleanup HTTP
-     and no /agent/latest either.
-  5. agent_run is interpret-only: it can never produce confirmed/applying/
-     completed on its own (no auto-confirm, no confirm/apply delegation).
+4. The legacy approve→commit→merge path is gone: no /runs/{id}/approve route,
+      no approve_run/get_base_branch, and the MCP agent_approve has been removed
+      and migrated to the Session tools (agent_create_session /
+      agent_session_status / agent_session_merge, S1-B). No /maintenance/cleanup
+      HTTP and no /agent/latest either.
+   5. agent_run is interpret-only: it can never produce confirmed/applying/
+      completed on its own (no auto-confirm, no confirm/apply delegation).
+
+S1-B lock extensions:
+   - integration moves from 0 git-merge call-sites (S1-A) to EXACTLY ONE
+     productive call-site: POST /session/{session_id}/merge in
+     backend/app/api/session_routes.py (single integration route, D8a).
+     The only other `git merge` token is the mandated `git merge --abort`
+     after a conflict — never --ours/--theirs/reset --hard/pull --rebase.
+   - agent_approve no longer exists; its migration (pending_session_merge_migration)
+     is complete.
 """
 
 import inspect
@@ -98,9 +108,14 @@ class TestSingleCommitRoute:
         assert matches[0][0].endswith("backend/app/engine/apply_engine.py"), matches
 
     def test_zero_merge_callsites_in_backend(self):
+        """S1-A: 0 merge sites. S1-B: EXACTLY ONE productive site (--no-ff in
+        session_routes.py). The only other git-merge token is the mandated
+        `git merge --abort` after a conflict (never --ours/--theirs/reset)."""
         backend_dir = os.path.join(
             os.path.dirname(__file__), "..", "..", "backend"
         )
+        productive = []
+        aborts = []
         for root, _dirs, files in os.walk(backend_dir):
             if "__pycache__" in root:
                 continue
@@ -110,9 +125,17 @@ class TestSingleCommitRoute:
                 path = os.path.join(root, f)
                 with open(path, encoding="utf-8") as fh:
                     for line in fh:
-                        assert '"git", "merge"' not in line and "'git', 'merge'" not in line, (
-                            f"{path}: git merge calls must not exist after S1-A.4"
-                        )
+                        if '"git", "merge"' not in line and "'git', 'merge'" not in line:
+                            continue
+                        if '"git", "merge", "--no-ff"' in line:
+                            productive.append((path, line.strip()))
+                        elif '"git", "merge", "--abort"' in line:
+                            aborts.append((path, line.strip()))
+        assert len(productive) == 1, f"exactly one productive merge expected, got {productive}"
+        assert productive[0][0].endswith("backend/app/api/session_routes.py"), productive
+        assert len(aborts) == 1 and aborts[0][0].endswith(
+            "backend/app/api/session_routes.py"
+        ), f"abort must exist and live next to the merge, got {aborts}"
 
     def test_real_changes_produce_exactly_one_commit(self, run_id):
         from app.engine.apply_engine import _run_git_flow
@@ -196,7 +219,7 @@ class TestPhaseMapping:
         })
 
         fake_ctx = type("Ctx", (), {"workspace": "/tmp/irrelevant"})()
-        monkeypatch.setattr(mod, "build_context", lambda run_id: fake_ctx)
+        monkeypatch.setattr(mod, "build_context", lambda run_id, *a, **k: fake_ctx)
         monkeypatch.setattr(mod, "ensure_worktree", lambda ctx: ctx.workspace)
         monkeypatch.setattr(mod, "apply_engine", lambda *a, **k: engine_result)
 
@@ -297,17 +320,24 @@ class TestApprovalLegacyRemoved:
     def test_mcp_approve_no_longer_calls_approve(self):
         src = open(MCP_SRC, encoding="utf-8").read()
         assert "/runs/" in src and "/approve" not in src, (
-            "agent_approve must not POST to /runs/{id}/approve"
+            "the legacy approve path must not be reachable from MCP"
         )
-        assert "pending_session_merge_migration" in src
+        assert "pending_session_merge_migration" not in src, (
+            "S1-B completed the session_merge migration; the legacy marker is gone"
+        )
         for token in ('"git", "commit"', '"git", "merge"', '"git", "branch"'):
             assert token not in src, f"MCP must never run git ops (found {token!r})"
 
-    def test_mcp_approve_tool_kept_but_inert(self):
+    def test_mcp_approve_removed_session_tools_present(self):
+        """agent_approve is gone; Session tools (S1-B) are present."""
         src = open(MCP_SRC, encoding="utf-8").read()
-        assert "async def agent_approve" in src, (
-            "agent_approve is kept (not removed) but marked pending migration"
-        )
+        assert "agent_approve" not in src, "agent_approve tool must be removed"
+        for tool in (
+            "async def agent_create_session",
+            "async def agent_session_status",
+            "async def agent_session_merge",
+        ):
+            assert tool in src, f"session tool {tool!r} must be registered in MCP"
 
 
 class TestAgentRunNoAutoConfirm:

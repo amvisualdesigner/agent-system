@@ -1,7 +1,7 @@
 # Agent System — Canonical System Flow
 
 ## Status
-Canonical flow for the system after F10/F11 cleanup. There is exactly one materialization route for semantic component operations.
+Canonical flow for the system after F10/F11 cleanup + S1-B Session Lifecycle. There is exactly one materialization route for semantic component operations and exactly one integration route for a Session (`session_merge`).
 
 ## Canonical flow
 
@@ -84,6 +84,23 @@ Not a semantic authority. `create_page_ops` materializes a page CREATE chosen by
 ### Orchestrator
 Coordinate stages and state transitions. It does not make domain decisions.
 
+## Session Lifecycle (S1-B)
+
+```text
+POST /session                     → ACTIVE + unique worktree + branch agent/session-{sid[:8]}
+POST /agent/interpret {session_id}→ run bound to Session (run_state.session_id; gate ACTIVE)
+POST /agent/confirm {run_id}      → session_id read from run_state; gate ACTIVE
+POST /agent/apply {run_id}        → Session lock; re-fingerprint inside lock; 1 commit agent:{run_id}
+POST /session/{id}/merge          → single integration: git merge --no-ff -m session:{sid[:8]}
+```
+
+A Session is physical continuity + lifecycle (never semantic authority). A Run
+is the atomic unit of change. Session states: `ACTIVE → MERGED/CONFLICT/FAILED`
+(`CONFLICT` recoverable, `MERGED`/`FAILED` terminal). `MERGE_READY` is derived
+at read-time from merge preconditions. One lock per Session (in-process) shared
+by apply and merge. Recovery is file + git based (no silent recreate).
+See `SESSION_LIFECYCLE.md`.
+
 ## Closure baseline (F10/F11)
 The system is not in production; no legacy compatibility is preserved. The final contract:
 
@@ -104,6 +121,9 @@ The system is not in production; no legacy compatibility is preserved. The final
 15. `dry_run` is preview-only: it generates the complete effective FileOps with ZERO writes (terminal apply AND semantic-memory persistence are gated).
 16. Preview == effective applied scope: confirmation derives the preview from a deterministic dry_run generation; a real apply writes exactly those operations (locked by tests).
 17. Pre-apply concurrency (option C): a recorded worktree snapshot is re-checked at apply; any change → `NO WRITE` (`conflict`/`concurrency`), phase back to `confirmed`. No merge, no reinterpretation.
+18. Session ≠ semantic authority: it stores lifecycle + physical identity only (no intent/plan/preview/FileOps). `Confirmed Plan` remains the semantic authority per Run.
+19. Single integration route (D8a Option A): `POST /session/{id}/merge` runs the only productive `git merge --no-ff`; on conflict it runs `git merge --abort` and marks the Session `CONFLICT` (recoverable). No per-run merge, no second mechanism.
+20. Session continuity is physical: one worktree + one branch `agent/session-{sid[:8]}` per Session, commits `agent:{run_id}` max 1 per successful Run; recovery reconstructs from `session_id` + session file + branch + worktree + git log. Never auto-recreate/repair a Session workspace.
 
 ## Canonical-route rule
 There is one semantic route from confirmed intent to applied changes. Helpers may exist outside it, but must not intercept and silently rewrite the plan.

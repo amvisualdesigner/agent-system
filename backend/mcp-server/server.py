@@ -10,6 +10,7 @@ import httpx
 import json
 
 from app.utils.run_id import validate_run_id
+from app.utils.session_id import validate_session_id
 
 mcp = FastMCP("agent-runtime")
 
@@ -24,20 +25,23 @@ BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 # INTERPRET
 # -------------------------
 @mcp.tool()
-async def agent_interpret(prompt: str, run_id: str = None):
+async def agent_interpret(prompt: str, run_id: str = None, session_id: str = None):
     """Interpret a user prompt into a structured intent (step 1 of 3).
 
     Returns an InterpretationDraft with proposed_actions, contract_id, and interpretation_id.
     Pass those to agent_confirm for step 2.
+    session_id (optional): run this Run inside an existing Session.
     """
     if run_id is None:
         run_id = str(uuid.uuid4())
 
+    payload = {"run_id": run_id, "message": prompt, "conversation": []}
+    if session_id:
+        validate_session_id(session_id)
+        payload["session_id"] = session_id
+
     async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            f"{BASE_URL}/agent/interpret",
-            json={"run_id": run_id, "message": prompt, "conversation": []}
-        )
+        r = await client.post(f"{BASE_URL}/agent/interpret", json=payload)
 
     r.raise_for_status()
     data = r.json()
@@ -106,21 +110,24 @@ async def agent_apply(run_id: str, dry_run: bool = False):
 # ONE-SHOT (interpret only, human-in-the-loop)
 # -------------------------
 @mcp.tool()
-async def agent_run(prompt: str):
+async def agent_run(prompt: str, session_id: str = None):
     """Interpret a prompt and leave the Run in awaiting_confirmation.
 
     S1-A.5: agent_run never confirms nor applies. It delegates to the same
     canonical /agent/interpret→/agent/confirm→/agent/apply flow as the API and
     returns the Run waiting for an explicit human confirmation. It cannot
     produce confirmed/applying/completed on its own.
+    session_id (optional): run this Run inside an existing Session.
     """
     async with httpx.AsyncClient(timeout=180) as client:
         run_id = str(uuid.uuid4())
 
-        interp_resp = await client.post(
-            f"{BASE_URL}/agent/interpret",
-            json={"run_id": run_id, "message": prompt, "conversation": []}
-        )
+        payload = {"run_id": run_id, "message": prompt, "conversation": []}
+        if session_id:
+            validate_session_id(session_id)
+            payload["session_id"] = session_id
+
+        interp_resp = await client.post(f"{BASE_URL}/agent/interpret", json=payload)
         interp_resp.raise_for_status()
         interp_data = interp_resp.json()
 
@@ -176,30 +183,48 @@ async def agent_review(run_id: str):
 
 
 # -------------------------
-# APPROVE — pending migration to session_merge
+# SESSION — physical continuity + lifecycle (S1-B)
 # -------------------------
 @mcp.tool()
-async def agent_approve(run_id: str):
-    """Approve Run changes for integration.
+async def agent_create_session(base_branch: str = "master"):
+    """Create a new Session (ACTIVE): one worktree + one branch from base.
 
-    S1-A.4: the legacy approve→commit→merge path has been removed. A Run's
-    commit belongs to its successful Apply (confirm→apply→commit), and there is
-    no per-run merge into the base branch. Integration of session branches is
-    the future agent_session_merge(session_id) operation — not implemented in
-    the current model. This tool is explicitly marked pending that migration:
-    it performs no commit, no merge, and no branch deletion.
+    Returns session_id, branch, workspace, status. Runs can then be created
+    inside it by passing session_id to agent_run / agent_interpret.
     """
-    validate_run_id(run_id)
-    return {
-        "run_id": run_id,
-        "status": "pending_session_merge_migration",
-        "detail": (
-            "approve Run → commit → merge no longer exists. Commits belong to "
-            "the successful Apply; base-branch integration will be handled by "
-            "agent_session_merge(session_id) in the Session phase. Inspect the "
-            "Run with agent_review and verify its Apply result instead."
-        ),
-    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(f"{BASE_URL}/session", json={"base_branch": base_branch})
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+async def agent_session_status(session_id: str):
+    """Inspect a Session: status, derived merge_ready, reasons, and its Runs.
+
+    merge_ready is derived at read-time from merge preconditions (never
+    persisted as a state).
+    """
+    validate_session_id(session_id)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{BASE_URL}/session/{session_id}")
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+async def agent_session_merge(session_id: str):
+    """Integrate a Session into the base branch (the ONLY integration route).
+
+    Performs git merge --no-ff with message session:{session_id[:8]}. On unmet
+    preconditions or a git conflict, the base is restored (git merge --abort)
+    and the Session becomes CONFLICT (recoverable). No auto-resolution.
+    """
+    validate_session_id(session_id)
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(f"{BASE_URL}/session/{session_id}/merge")
+    r.raise_for_status()
+    return r.json()
 
 
 # -------------------------

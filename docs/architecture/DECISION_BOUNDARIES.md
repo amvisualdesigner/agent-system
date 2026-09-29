@@ -100,6 +100,24 @@ The terminal `FileOpApplier` executes the complete converged set (structural + d
 ## Orchestrator
 Coordinate state and stages. No domain decisions.
 
+## Session (S1-B)
+A Session is **physical continuity + lifecycle bookkeeping only** — never a
+semantic authority (no intent/plan/preview/FileOps). Boundaries:
+
+- `session_id ≠ run_id`; a Run is the atomic unit of change and keeps its own
+  Confirmed Plan authority.
+- One Session = one worktree + one branch (`agent/session-{sid[:8]}`). There is
+  never a branch-per-run inside a Session.
+- The Session gates runs: only `ACTIVE` Sessions accept new/continued Runs;
+  `MERGED`/`CONFLICT`/`FAILED` reject before any change.
+- Integration is a **single route** (`POST /session/{id}/merge`, D8a Option A:
+  `git merge --no-ff`), with `git merge --abort` on conflict and the Session
+  marked `CONFLICT` (recoverable). No auto-resolution, no per-run merge.
+- The Session never auto-recreates/repairs a workspace; physical mismatches and
+  orphans are explicit errors (`FAILED`), never silent deletion or resync.
+- UI and merge UX are out of scope of the backend authority; the backend owns
+  the physical + lifecycle contract.
+
 ## Forbidden patterns
 - CREATE silently becoming UPDATE after confirmation.
 - Target A silently becoming target B.

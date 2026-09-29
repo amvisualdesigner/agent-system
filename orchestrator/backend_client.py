@@ -12,11 +12,14 @@ MAX_RETRIES = 2
 RETRY_DELAY_MS = 500
 
 
-async def call_interpret(task: str, run_id: str = "") -> Dict[str, Any]:
+async def call_interpret(task: str, run_id: str = "", session_id: str | None = None) -> Dict[str, Any]:
+    payload = {"run_id": run_id, "message": task, "conversation": []}
+    if session_id:
+        payload["session_id"] = session_id
     async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             f"{BACKEND_URL}/agent/interpret",
-            json={"run_id": run_id, "message": task, "conversation": []},
+            json=payload,
         )
         r.raise_for_status()
         return r.json()

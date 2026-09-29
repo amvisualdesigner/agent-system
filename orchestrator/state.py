@@ -11,6 +11,7 @@ class TraceEntry(TypedDict):
 class AgentState(TypedDict):
     task: str
     run_id: str
+    session_id: Optional[str]
     plan: Optional[Dict[str, Any]]
     execution: Optional[Dict[str, Any]]
     run_details: Optional[Dict[str, Any]]

@@ -35,7 +35,9 @@ async def interpret_node(state: AgentState) -> dict:
 
     start = time.time()
     try:
-        draft = await call_interpret(state["task"], run_id=run_id)
+        draft = await call_interpret(
+            state["task"], run_id=run_id, session_id=state.get("session_id")
+        )
         latency = int((time.time() - start) * 1000)
     except Exception as e:
         latency = int((time.time() - start) * 1000)

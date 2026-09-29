@@ -140,14 +140,15 @@ entry ──┬→ interpret (POST /agent/interpret)
 ```
 backend/
 ├── app/
-│   ├── api/                   # FastAPI endpoints (/agent/interpret, /confirm, /apply)
+│   ├── api/                   # FastAPI endpoints (/agent/interpret, /confirm, /apply, /session/*)
 │   ├── intent/                # IntentInterpreter, PlanCompiler, models, state machine
 │   │   ├── models.py          # InterpretationDraft, ConfirmedIntent, CompiledPlan, RunPhase
 │   │   ├── interpreter.py     # IntentInterpreter (único LLM)
 │   │   ├── plan_compiler.py   # PlanCompiler (determinista)
 │   │   └── llm_client.py      # LLM client
 │   ├── catalog/               # capability_catalog.json loader
-│   ├── state/                 # RunState persistence (JSON files by run_id)
+│   ├── session/               # Session lifecycle: models (estados/transiciones), locks (apply/merge)
+│   ├── state/                 # RunState + SessionState persistence (JSON files; STATE_DIR)
 │   ├── signature/             # Component signature extraction
 │   │   └── extractor.py       # Regex scanner para interfaces TSX
 │   ├── engine/                # ApplyEngine, StructuralIndex, complete_structure
@@ -208,8 +209,9 @@ REPO_ROOT=/path/to/repo pytest tests/ -q
 | Variable | Requerida | Default | Propósito |
 |----------|-----------|---------|-----------|
 | `REPO_ROOT` | Sí | — | Ruta al repositorio origen |
-| `RUNS_DIR` | No | `/opt/agent-repos/worktrees` | Directorio de worktrees |
+| `RUNS_DIR` | No | `/opt/agent-repos/worktrees` | Directorio de worktrees (y workspaces de Session) |
 | `ARTIFACTS_DIR` | No | `/opt/agent-repos/artifacts` | Directorio de artefactos |
+| `STATE_DIR` | No | `RUNS_DIR` o `backend/run_states` | Directorio de run-state JSON y sessions/ |
 | `LLM_BASE_URL` | No | `http://localhost:7000` | URL del LLM |
 | `LLM_MODEL` | No | `Qwen/Qwen2.5-Coder-3B-Instruct` | Modelo LLM |
 
@@ -342,8 +344,11 @@ El sistema incluye un servidor MCP (Model Context Protocol) en `backend/mcp-serv
 | `agent_apply` | `run_id: str, plan: dict, dry_run: bool` | Ejecutar plan en sandbox |
 | `get_run` | `run_id: str` | Obtener metadata del run |
 | `agent_review` | `run_id: str` | Inspeccionar plan, diff, ejecución |
-| `agent_run` | `prompt: str` | Interpretar y dejar el Run en `awaiting_confirmation` (sin auto-confirm) |
-| `agent_approve` | `run_id: str` | Pendiente de migración a `agent_session_merge(session_id)`; sin commit/merge en el modelo actual |
+| `agent_run` | `prompt: str, session_id: str (opcional)` | Interpretar y dejar el Run en `awaiting_confirmation` (sin auto-confirm) |
+| `agent_interpret` | `message: str, run_id: str, session_id: str (opcional)` | Interpretación |
+| `agent_create_session` | — | Crear Session (worktree + branch únicos) |
+| `agent_session_status` | `session_id: str` | Estado + `merge_ready`/`merge_reasons` |
+| `agent_session_merge` | `session_id: str` | Integración única (`git merge --no-ff`) |
 
 ### Conexión
 
@@ -384,7 +389,26 @@ Resultados del Apply (S1-A.2/S1-A.3):
 - Verificación fallida (`verify_failed`) → **nunca** se commitea; los cambios quedan staged y el Run termina en `failed` (sin reset limpio automático)
 - Cualquier otro resultado (`rejected`, `clarification_needed`, `error`) → Run `failed`
 
-El path legacy `approve Run → commit → merge` (`POST /runs/{id}/approve`) fue eliminado en S1-A.4. No existe merge por run; la integración de ramas a la base será responsabilidad de la operación de Session `session_merge`.
+El path legacy `approve Run → commit → merge` (`POST /runs/{id}/approve`) fue eliminado en S1-A.4. No existe merge por run; la integración de ramas a la base es una operación de **Session** (`POST /session/{id}/merge`).
+
+## Session Lifecycle (S1-B)
+
+```text
+POST /session                     → Session ACTIVE + worktree único + branch agent/session-{sid[:8]}
+POST /agent/interpret {session_id}→ Run vinculado a la Session (session_id persistido en run_state)
+POST /agent/confirm {run_id}      → gate Session ACTIVE (session_id leído de run_state)
+POST /agent/apply {run_id}        → lock de Session + 1 commit por run (agent:{run_id})
+POST /session/{id}/merge          → única integración: git merge --no-ff -m "session:{sid[:8]}"
+GET /session/{id}                 → status + merge_ready/merge_reasons derivados + runs
+```
+
+- Session = continuidad física + lifecycle (N Runs); Run = unidad atómica.
+- Estados: `active` → `merged`/`conflict`/`failed` (`conflict` recuperable vía re-merge).
+- Conflicto de merge → `git merge --abort`, base limpia, Session `conflict`.
+- La Session **nunca** se auto-repara; ante inconsistencia física → `failed`.
+- Más: `docs/architecture/SESSION_LIFECYCLE.md`.
+
+Orquestador: transporta `session_id` (interpret), sin endpoints de Session propios.
 
 ---
 

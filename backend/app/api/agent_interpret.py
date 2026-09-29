@@ -20,6 +20,7 @@ class InterpretRequest(BaseModel):
     run_id: str
     message: str
     conversation: list[dict] = []
+    session_id: str | None = None
 
 
 class InterpretResponse(BaseModel):
@@ -36,6 +37,24 @@ def agent_interpret(req: InterpretRequest):
 
     run_id = validate_run_id(req.run_id)
 
+    # ── Session gate + registration (S1-B) ──────────────────────────
+    session_id = None
+    if req.session_id:
+        from app.utils.session_id import validate_session_id
+        from app.executor.session_manager import resolve_session
+        from app.session.models import SessionStatus
+
+        session_id = validate_session_id(req.session_id)
+        record = resolve_session(session_id)
+        if record.status != SessionStatus.ACTIVE:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Session {session_id} is '{record.status.value}'. "
+                    "Only ACTIVE sessions accept new Runs."
+                ),
+            )
+
     # Optional: load StructuralIndex for worktree_capabilities + PageContextResolver
     structural_index = None
     index_snapshot = None
@@ -44,7 +63,7 @@ def agent_interpret(req: InterpretRequest):
         from app.runtime.context import build_context
         from app.executor.worktree_manager import ensure_worktree
 
-        context = build_context(run_id)
+        context = build_context(run_id, session_id=session_id)
         ensure_worktree(context)
         structural_index = _SI.from_worktree(context.workspace)
         index_snapshot = {cap: structural_index.resolve_all_paths(cap) for cap in structural_index}
@@ -111,13 +130,26 @@ def agent_interpret(req: InterpretRequest):
     # Persist state: store interpretation draft, transition to awaiting_confirmation
     try:
         from app.state.run_state import save_run_state, transition_phase
-        save_run_state(run_id, {
+        save_extra: dict = {
             "interpretation_draft": draft_dict,
             "phase": RunPhase.AWAITING_CONFIRMATION.value,
-        })
+        }
+        if session_id:
+            save_extra["session_id"] = session_id
+        save_run_state(run_id, save_extra)
         transition_phase(run_id, RunPhase.AWAITING_CONFIRMATION)
     except Exception as e:
         logger.error("Failed to persist interpret state for run_id=%s: %s\n%s",
                       run_id, e, traceback.format_exc())
+
+    # ── Register the Run on its Session (after successful persistence) ──
+    if session_id:
+        try:
+            from app.state.session_state import load_session, save_session
+            session_rec = load_session(session_id)
+            if session_rec is not None and run_id not in session_rec.run_ids:
+                save_session(session_id, run_ids=list(session_rec.run_ids) + [run_id])
+        except Exception as e:
+            logger.error("Failed to register run in session %s: %s", session_id, e)
 
     return draft_dict

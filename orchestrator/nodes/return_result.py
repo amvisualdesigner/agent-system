@@ -65,6 +65,7 @@ async def return_result_node(state: AgentState) -> dict:
     snapshot = {
         "run_id": run_id,
         "task": state.get("task"),
+        "session_id": state.get("session_id"),
         "phase": phase_label,
         "status": result.status,
         "plan": result.plan,
