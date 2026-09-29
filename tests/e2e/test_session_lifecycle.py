@@ -21,7 +21,8 @@ import uuid
 import pytest
 
 from app.config.settings import settings
-from app.engine.apply_engine import _run_git_flow
+from app.engine.apply_engine import _stash_verify_failed_residue, _run_git_flow
+from app.executor.diff_generator import generate_diff
 from app.executor.session_manager import (
     SessionPhysicalError,
     create_session,
@@ -617,3 +618,60 @@ class TestE2EFullSessionFlow:
         _run_commit(b, str(uuid.uuid4()), {"own.txt": "FROM-B\n"})
         # A's workspace untouched
         assert not os.path.exists(os.path.join(a.workspace, "own.txt"))
+
+# ---------------------------------------------------------------------------
+# D2 — residuo de verify_failed (\git stash push\ aisla el residuo)
+# ---------------------------------------------------------------------------
+
+class TestVerifyFailedResidue:
+    def test_stash_isolates_failed_run_residue_from_next_commit(self, new_session):
+        ent = new_session()
+        record = ent["record"]
+        ws = ensure_session_worktree(record)
+        baseline = "seed.txt"
+        assert _read(ws, baseline) == "v0\n"
+
+        # Run 0 (exitoso): crea un fichero trackeado para poder probar el
+        # residuo de tipo eliminación del Run fallido contra un fichero HEAD.
+        _run_commit(record, "run_0", {"base2.txt": "base2 v1\n"})
+        run0_sha = _git(["git", "rev-parse", "HEAD"], cwd=ws).stdout.strip()
+
+        # Run A (verify_failed): modificación + fichero nuevo + eliminación, y
+        # la semántica exacta del branch verify_failed de apply_engine:
+        #   git add -A  ->  generate_diff  ->  stash (D2)
+        _write(ws, baseline, "modified by run A\n")
+        _write(ws, "new_from_a.txt", "new from run A\n")
+        _git(["git", "rm", "base2.txt"], cwd=ws)
+        _git(["git", "add", "-A"], cwd=ws)
+        diff = generate_diff(ws)
+        assert diff  # el residuo produce un diff staged
+        _stash_verify_failed_residue(ws, "run_a_failed")
+
+        # Workspace e índice limpios respecto a HEAD
+        status = _git(["git", "status", "--porcelain"], cwd=ws, check=False).stdout
+        assert status.strip() == ""
+        assert _read(ws, baseline) == "v0\n"
+        assert not os.path.exists(os.path.join(ws, "new_from_a.txt"))
+        assert os.path.exists(os.path.join(ws, "base2.txt"))
+
+        # Run B: el commit contiene EXCLUSIVAMENTE los cambios de B
+        _run_commit(record, "run_b", {"B.txt": "content B\n"})
+
+        head_msg = _git(["git", "log", "-1", "--pretty=%s"], cwd=ws).stdout.strip()
+        assert head_msg == "agent:run_b"
+        names = _git(
+            ["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=ws
+        ).stdout.splitlines()
+        assert sorted(names) == sorted(["seed.txt", "base2.txt", "B.txt"])
+        touched = _git(
+            ["git", "diff", "--name-only", run0_sha, "HEAD"], cwd=ws
+        ).stdout.splitlines()
+        assert touched == ["B.txt"]
+
+        # El residuo de A sigue recuperable desde el stash
+        stash_list = _git(["git", "stash", "list"], cwd=ws).stdout
+        assert "verify_failed:run_a_failed" in stash_list
+        _git(["git", "stash", "apply", "stash@{0}"], cwd=ws)
+        assert _read(ws, baseline) == "modified by run A\n"
+        assert _read(ws, "new_from_a.txt") == "new from run A\n"
+        assert not os.path.exists(os.path.join(ws, "base2.txt"))

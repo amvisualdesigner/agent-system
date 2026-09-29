@@ -70,6 +70,7 @@ _CONTRACT_KEYWORDS: dict[str, set[str]] = {
     },
     "analytics.filter": {
         "filter", "facet", "filter panel", "refine", "filtering",
+        "filtro", "filtrar", "filtros", "panel de filtros", "facetar",
     },
     "analytics.chart_bar": {
         "bar chart", "barchart", "bar graph", "categories", "values",
@@ -333,17 +334,25 @@ def _validate_output(
             if not verb_allowed:
                 warnings.append(f"Verb '{verb}' not allowed for '{cap}' (allowed: {allowed})")
 
-    # Check if actions reference capabilities that don't exist in worktree
+    # Check if actions reference capabilities that don't exist in worktree.
+    # D1: emit an observable, deterministic warning when MODIFY/REMOVE targets
+    # an absent capability. Never converts to CREATE, never retargets, never
+    # blocks — RepositoryValidation remains the decision authority.
     present_ids = {w["id"] for w in worktree_caps if w.get("present")}
-    clarification = None
+    existence_verbs = set(_ACTION_TRIGGERS["modify"]) | set(_ACTION_TRIGGERS["remove"])
     for action in raw.get("actions", []):
         cap = action.get("target_capability", "")
-        verb = action.get("verb", "")
-        if verb in ("modify", "remove") and cap and cap not in present_ids:
-            # It's possible the capability doesn't exist — warn but don't block
-            pass
+        verb = (action.get("verb") or "").lower()
+        if not cap or not verb or cap not in cap_ids:
+            continue
+        if cap in present_ids or verb not in existence_verbs:
+            continue
+        warnings.append(
+            f"Capability '{cap}' not present in repository context — "
+            f"'{verb}' targets an absent capability and may conflict at RepositoryValidation"
+        )
 
-    return warnings, clarification
+    return warnings, None
 
 
 # ── Build worktree_capabilities from index snapshot ────────────────

@@ -38,6 +38,27 @@ class TestContractSelection:
     def test_select_filter_panel(self):
         assert _select_contract("Add a filter for date range") == "analytics.filter"
 
+    def test_select_filter_panel_spanish_filtro(self):
+        assert _select_contract("Crea un filtro con Región y Producto") == "analytics.filter"
+
+    def test_select_filter_panel_spanish_filtrar(self):
+        assert _select_contract("Quiero filtrar los resultados por fecha") == "analytics.filter"
+
+    def test_select_filter_panel_spanish_filtros(self):
+        assert _select_contract("Añade filtros para el dashboard de ventas") == "analytics.filter"
+
+    def test_select_filter_panel_spanish_panel_de_filtros(self):
+        assert _select_contract("Pon un panel de filtros en la página") == "analytics.filter"
+
+    def test_select_filter_panel_spanish_facetar(self):
+        assert _select_contract("Facetar las ventas por región") == "analytics.filter"
+
+    def test_select_filter_panel_english_keywords_still_work(self):
+        assert _select_contract("Add a filter for date range") == "analytics.filter"
+        assert _select_contract("Refine by region with a facet") == "analytics.filter"
+        assert _select_contract("Filter the dashboard") == "analytics.filter"
+        assert _select_contract("Add a filter panel for region and channel") == "analytics.filter"
+
     def test_select_bar_chart(self):
         assert _select_contract("Create a bar chart of revenue by quarter") == "analytics.chart_bar"
 

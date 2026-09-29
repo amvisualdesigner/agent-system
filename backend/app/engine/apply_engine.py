@@ -157,6 +157,23 @@ def _run_git_flow(workspace: str, run_id: str, dry_run: bool) -> tuple[str | Non
     return (diff or None), None, bool(diff.strip())
 
 
+def _stash_verify_failed_residue(workspace: str, run_id: str) -> None:
+    """D2: aislar el residuo de un Run que terminó en verify_failed.
+
+    Tras verify_failed el workspace queda con todos los cambios del Run
+    staged (git add -A). git stash push revierte índice + working tree a
+    HEAD preservando el residuo de forma recuperable en un stash identificado
+    con el run_id del Run fallido. Nunca usa reset --hard y no borra contenido
+    del workspace: el residuo queda disponible para diagnóstico/recovery vía
+    stash, y el workspace queda limpio respecto a HEAD para que un Run
+    posterior commitee únicamente su propio cambio.
+    """
+    subprocess.run(
+        ["git", "stash", "push", "-m", f"verify_failed:{run_id}"],
+        cwd=workspace, check=False,
+    )
+
+
 def _write_artifacts(artifacts_dir: str, run_id: str, plan: dict, operations: list, results: list, diff: str,
                      audit: dict | None = None, fidelity: dict | None = None,
                      verify: dict | None = None):
@@ -1749,6 +1766,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         execution_status = "verify_failed"
         subprocess.run(["git", "add", "-A"], cwd=context.workspace, check=False)
         diff = generate_diff(context.workspace)
+        _stash_verify_failed_residue(context.workspace, run_id)
         logger.warning("[apply] verify failed — skipping git commit, status=verify_failed")
     else:
         diff, err, committed = _run_git_flow(context.workspace, run_id, dry_run)
