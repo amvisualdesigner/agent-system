@@ -196,3 +196,33 @@ class TestPhysicalAnchorMatrix:
             assert any(op["action"] == "modify" and SECOND_PAGE_REL in op["path"] for op in ops)
         finally:
             shutil.rmtree(ws, ignore_errors=True)
+
+
+def _anchor_record(result: dict, component: str = "FilterPanel") -> dict:
+    audit = result.get("meta", {}).get("audit", {}).get("anchor_resolution", {})
+    assert component in audit, f"missing audit record for {component}: {audit}"
+    return audit[component]
+
+
+class TestG2AuditBasis:
+    """S2·F3·F1 — G2: la resolución '1 página física' queda explícitamente
+    marcada como resolución física provisional (no forzada, no semántica,
+    no contract-composition)."""
+
+    def test_singleton_is_recorded_as_physical_not_forced(self, phase6_repo_copy):
+        rec = _anchor_record(_apply(phase6_repo_copy))
+        assert rec["decision"] == "single", rec
+        assert rec["basis"] == "physical_singleton", rec
+        assert rec["authority"] == "physical", rec
+        assert rec["basis"] != "forced", (
+            "un singleton por exclusión física NO es una decisión del plan/usuario"
+        )
+        assert rec["authority"] != "plan", rec
+
+    def test_forced_is_recorded_as_plan_decision(self, phase6_repo_copy):
+        forced = os.path.join(phase6_repo_copy, PAGE_REL)
+        result = _apply(phase6_repo_copy, forced_anchor_path=forced)
+        rec = _anchor_record(result)
+        assert rec["decision"] == "forced", rec
+        assert rec["basis"] == "forced", rec
+        assert rec["authority"] == "plan", rec

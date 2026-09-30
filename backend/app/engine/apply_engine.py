@@ -276,6 +276,88 @@ def _validate_delete_authority(structural_ir: StructuralIR, plan: dict) -> None:
             )
 
 
+# ── G1 (S2·F3·F1): No silent-drop ────────────────────────────────
+# Un plan confirmado con acciones funcionales (create/modify/remove/...)
+# cuyo target capability NO es expresable en el contrato seleccionado
+# (closed-world) NO puede terminar en status=ok con operational ops [].
+# El Confirmed Plan sigue siendo la autoridad semántica: la caída se
+# convierte en clarificación usando la semántica de conflicto existente
+# (missing_component). Nunca reinterpreta, nunca re-selecciona contrato,
+# nunca inventa una capability.
+_KEEP_VERBS = frozenset({"keep", "maintain", "preserve", "leave"})
+
+
+def _is_functional_action(verb: str) -> bool:
+    """Verbos 'functional' exigen expresarse en una capability.
+
+    Los verbos KEEP (keep/maintain/preserve/leave) son idempotentes por
+    diseño: un all-KEEP tras ellos es un no-op legítimo.
+    """
+    return verb not in _KEEP_VERBS
+
+
+def _detect_dropped_actions(plan: dict, contract, semantic_resolution=None) -> list[dict]:
+    """Detecta acciones del plan que el contrato no puede expresar.
+
+    Una acción se considera DROPPED si su target capability no está en el
+    universo expresable del contrato (contract caps + soft-augment +
+    closed-world match). Usa exactamente las mismas fuentes que
+    complete_structure() para no introducir una nueva autoridad semántica.
+
+    Returns: lista de dicts {verb, object, target_capability} caídos.
+      Vacía → sin drop (flujo actual intacto).
+    """
+    from app.engine.structural_completion import (
+        _augment_capabilities,
+        _infer_capabilities_from_contract,
+        _match_actions_to_capabilities,
+    )
+
+    if not isinstance(plan, dict):
+        return []
+
+    frame = plan.get("semantic_frame")
+    frame_actions = (frame or {}).get("actions", []) if isinstance(frame, dict) else []
+    if not frame_actions:
+        return []
+
+    contract_caps = _infer_capabilities_from_contract(contract)
+    expressible = set(contract_caps)
+    if semantic_resolution is not None:
+        expressible.update(_augment_capabilities(contract_caps, semantic_resolution, None, frame))
+    matched = _match_actions_to_capabilities(frame_actions, contract_caps, contract)
+    expressible.update(matched)
+
+    top_actions = plan.get("actions") or []
+    if not isinstance(top_actions, list):
+        top_actions = []
+
+    dropped: list[dict] = []
+    for idx, fa in enumerate(frame_actions):
+        verb = (fa.get("verb") or "").strip().lower()
+        if not verb or not _is_functional_action(verb):
+            continue
+        obj = fa.get("object") or fa.get("direct_object") or ""
+        target = ""
+        if idx < len(top_actions) and isinstance(top_actions[idx], dict):
+            target = (top_actions[idx].get("target_capability") or "").strip()
+        if target:
+            if target not in expressible:
+                dropped.append({
+                    "verb": verb, "object": obj, "target_capability": target,
+                })
+        else:
+            # Legacy shape sin plan["actions"]: la acción es expresable si el
+            # matcher closed-world la casó con alguna capability del contrato.
+            per_action = _match_actions_to_capabilities([fa], contract_caps, contract)
+            if not per_action:
+                dropped.append({
+                    "verb": verb, "object": obj, "target_capability": target,
+                })
+
+    return dropped
+
+
 def _has_materializable_graph(structural_ir: StructuralIR) -> bool:
     """F1: True if the Confirmed Plan carries any CREATE/MODIFY operation.
 
@@ -1150,6 +1232,31 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         except ValueError as e:
             return FallbackExecutionRequest(
                 reason=str(e), conflict_type="delete_authority", level=2,
+            ).to_result()
+
+        # ── G1 (S2·F3·F1): No silent-drop ──
+        # Acciones confirmadas que el contrato no puede expresar jamás terminan
+        # en status=ok con operations=[] (ni se caen de planes mixtos).
+        # Se convierten en clarificación explícita con la semántica existente.
+        dropped_actions = _detect_dropped_actions(plan, contract, semantic_resolution)
+        if dropped_actions:
+            drop_desc = "; ".join(
+                f"{d['verb']} {d['object'] or d['target_capability']}"
+                f" (capability={d['target_capability'] or d['object']} not in contract)"
+                for d in dropped_actions
+            )
+            return FallbackExecutionRequest(
+                reason=(
+                    f"Action(s) cannot be expressed by the selected contract "
+                    f"'{structural_ir.contract_id}': {drop_desc}. The Confirmed "
+                    f"Plan cannot be reduced to a no-op. Correct the plan or "
+                    f"select the contract that can express it (no reinterpretation)."
+                ),
+                conflict_type="missing_component",
+                level=2,
+                details={
+                    "dropped_actions": dropped_actions,
+                },
             ).to_result()
 
         # ── Early exit: all capabilities resolved to KEEP ──

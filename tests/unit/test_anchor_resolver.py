@@ -495,3 +495,110 @@ class TestDecisionAuditRecord:
             ]
         finally:
             shutil.rmtree(ws)
+
+
+# ── S2·F3·F1 — G2: audit de la resolución singleton (provisional/física) ─
+
+class TestG2AuditBasis:
+    """El decision record debe clasificar EXPLÍCITAMENTE la base/autoridad de
+    cada decisión. Un singleton por exclusión física es una resolución física
+    PROVISIONAL: nunca 'forced', nunca semántica, nunca contract-composition."""
+
+    def test_singleton_basis_is_physical(self):
+        ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            _mo, _un, decisions, _cf = resolve_anchors(fops, si, ws)
+            rec = decisions["FilterPanel"]
+            assert rec["decision"] == "single"
+            assert rec["basis"] == "physical_singleton"
+            assert rec["authority"] == "physical"
+            assert rec["basis"] != "forced"
+            assert rec["authority"] != "plan"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_forced_basis_is_plan(self):
+        ws = _mk_workspace({
+            "pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE,
+            "pages/marketing/Page.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx", "pages/marketing/Page.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            _mo, _un, decisions, _cf = resolve_anchors(
+                fops, si, ws, forced_anchor_path="pages/marketing/Page.tsx",
+            )
+            rec = decisions["FilterPanel"]
+            assert rec["decision"] == "forced"
+            assert rec["basis"] == "forced"
+            assert rec["authority"] == "plan"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_zero_candidates_conflict_basis(self):
+        ws = _mk_workspace({})
+        si = StructuralIndex.empty()
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert len(conflicts) == 1
+            rec = decisions["FilterPanel"]
+            assert rec["decision"] == "conflict"
+            assert rec["basis"] == "physical_exclusion_conflict"
+            assert rec["authority"] == "physical"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_n_candidates_conflict_basis(self):
+        ws = _mk_workspace({
+            "pages/dashboard/Page.tsx": RICH_PAGE,
+            "pages/marketing/Page.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/dashboard/Page.tsx", "pages/marketing/Page.tsx")
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert len(conflicts) == 1
+            rec = decisions["FilterPanel"]
+            assert rec["decision"] == "conflict"
+            assert rec["basis"] == "physical_exclusion_conflict"
+            assert rec["authority"] == "physical"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_contract_composition_basis(self):
+        """Contract child (kpi_row→page) → basis contract_composition, no
+        física provisional."""
+        ws = _mk_workspace({"pages/dashboard/Page.tsx": RICH_PAGE})
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        try:
+            fops = [_create("components/KpiRow.tsx")]
+            _mo, _un, decisions, _cf = resolve_anchors(
+                fops, si, ws, composition_map={"presentation.kpi_row": "layout.page"},
+            )
+            rec = decisions["KpiRow"]
+            assert rec["decision"] == "single"
+            assert rec["basis"] == "contract_composition"
+            assert rec["authority"] == "contract"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_composed_skip_basis_is_renderer(self):
+        ws = _mk_workspace({"pages/dashboard/Page.tsx": COMPOSED_PAGE})
+        si = _si_with_page("pages/dashboard/Page.tsx")
+        renderer_modify = FileOp(
+            action="modify", path="pages/dashboard/Page.tsx",
+            content=COMPOSED_PAGE, pipeline_route="renderer",
+        )
+        try:
+            fops = [renderer_modify, _create("components/KpiRow.tsx")]
+            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            assert conflicts == []
+            rec = decisions["KpiRow"]
+            assert rec["decision"] == "composed_skip"
+            assert rec["basis"] == "renderer_composed"
+            assert rec["authority"] == "renderer"
+        finally:
+            shutil.rmtree(ws)

@@ -16,6 +16,13 @@ F1/C4 invariants — the result is STRICTLY PHYSICAL, never semantic:
       0 candidates     → CONFLICT
       1 candidate      → use it
       N candidates     → CONFLICT unless the plan already specified which one
+  - G2 (S2·F3·F1): a decision with 1 candidate derived by physical exclusion
+    (orphan component, no contract composition parent, exactly one page
+    container exists) is recorded as basis="physical_singleton" /
+    authority="physical" in the audit — it is a PROVISIONAL PHYSICAL
+    resolution, NOT a user/plan decision and NOT contract-defined. It carries
+    no semantic authority, is never presented as "forced", and is never
+    re-read as input to any other decision.
   - A CREATE component whose parent is being regenerated this run is already
     composed by the renderer (import present in the anchor content) → skipped
     as composed, never double-mounted.
@@ -388,6 +395,8 @@ def resolve_anchors(
             decision = "forced"
             picked = [forced_path]
             reason = f"plan-specified anchor {forced_path}"
+            basis = "forced"
+            authority = "plan"
         else:
             cap = _capability_for_path(structural_index, fop.path)
             parent_cap = composition_map.get(cap) if cap else None
@@ -397,9 +406,13 @@ def resolve_anchors(
                     if inst.file_path
                 })
                 source = f"contract composition {cap}→{parent_cap}"
+                basis = "contract_composition"
+                authority = "contract"
             else:
                 picked = [a.file_path for a in page_anchors]
                 source = "physical page containers"
+                basis = "physical_singleton"
+                authority = "physical"
 
             n = len(picked)
             if n == 0:
@@ -411,6 +424,7 @@ def resolve_anchors(
                     fop.path, "conflict", None,
                     [{"path": p, "type": "feature_page"} for p in picked],
                     f"{source}: 0 physical anchors",
+                    "physical_exclusion_conflict", "physical",
                 )
                 continue
             if n > 1:
@@ -422,6 +436,7 @@ def resolve_anchors(
                     fop.path, "conflict", None,
                     [{"path": p, "type": "feature_page"} for p in sorted(picked)],
                     f"{source}: {n} physical anchors (ambiguous)",
+                    "physical_exclusion_conflict", "physical",
                 )
                 continue
 
@@ -438,6 +453,7 @@ def resolve_anchors(
                     fop.path, "composed_skip", candidate,
                     [{"path": candidate, "type": "feature_page"}],
                     "1 physical anchor; already composed by the renderer",
+                    "renderer_composed", "renderer",
                 )
                 continue
             decision = "single"
@@ -481,7 +497,7 @@ def resolve_anchors(
             decisions[component_name] = _decision_record(
                 fop.path, decision, anchor_path,
                 [{"path": anchor_path, "type": "feature_page"}],
-                reason,
+                reason, basis, authority,
             )
         else:
             conflicts.append(
@@ -492,6 +508,7 @@ def resolve_anchors(
                 fop.path, "conflict", None,
                 [{"path": anchor_path, "type": "feature_page"}],
                 "1 physical anchor but injection failed (no import site / mount point)",
+                basis, authority,
             )
 
     return modify_ops, unresolved, decisions, conflicts
@@ -503,10 +520,26 @@ def _decision_record(
     selected: str | None,
     candidates: list[dict],
     reason: str,
+    basis: str,
+    authority: str,
 ) -> dict:
+    """Build the audit decision record for one anchor decision.
+
+    G2 (S2·F3·F1): the record makes EXPLICIT the basis and authority of every
+    anchor decision, so a singleton-by-exclusion is never mistaken for a
+    forced (user/plan) decision nor for contract composition:
+      - basis="forced"                    authority="plan"      → user/plan chose
+      - basis="contract_composition"      authority="contract"  → ast_template parent
+      - basis="physical_singleton"        authority="physical"  → 1 page container by
+        physical exclusion — PROVISIONAL resolution, not a user/semantic decision
+      - basis="renderer_composed"         authority="renderer"  → skipped, renderer owned
+      - basis="physical_exclusion_conflict" authority="physical" → 0/N ambiguous
+    """
     record: dict[str, Any] = {
         "component_path": component_path,
         "decision": decision,
+        "basis": basis,
+        "authority": authority,
         "candidates": candidates,
         "reason": reason,
     }
