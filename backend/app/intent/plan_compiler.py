@@ -39,6 +39,8 @@ def _build_actions(
         }
         if action.instance_hint:
             entry["instance_hint"] = action.instance_hint
+        if action.attach:
+            entry["attach"] = action.attach.to_dict()
         result.append(entry)
     return result
 
@@ -163,6 +165,8 @@ def _build_semantic_frame_from_actions(
         }
         if action.instance_hint:
             frame_action["instance_hint"] = action.instance_hint
+        if action.attach:
+            frame_action["attach"] = action.attach.to_dict()
         # Preserve source_capability for transform/swap/replace actions
         src = action.source_capability or action.params.get("source", "")
         if src:

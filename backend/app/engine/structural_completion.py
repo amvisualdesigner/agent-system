@@ -133,6 +133,7 @@ class ResolvedCapability:
     instance_only: bool = False
     instance_id: str | None = None
     instance_hint: str | None = None
+    attach_to: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +244,8 @@ class StructuralIR:
                     op["payload"] = dict(rc.params)
                     if rc.action == CREATE and rc.instance_hint:
                         op["instance_hint"] = rc.instance_hint
+                    if rc.action == CREATE and rc.attach_to:
+                        op["attach_to"] = dict(rc.attach_to)
                 ops.append(op)
         return ops
 
@@ -538,6 +541,56 @@ def _match_actions_to_capabilities(
                 continue
 
     return matched
+
+
+def _match_single_capability(
+    action: dict,
+    contract_caps: list[str],
+    contract: SkillContract | None = None,
+) -> str | None:
+    """Match ONE semantic action to a capability (Step A per-action).
+
+    Reutiliza las mismas reglas que _match_actions_to_capabilities para
+    enlazar metadata por acción (p.ej. attach) de forma determinista.
+    """
+    from app.graphir.semantic_frame import _OBJECT_KEYWORDS
+
+    verb = action.get("verb", "")
+    obj = action.get("object", "")
+    target_hint = action.get("target_hint", "")
+
+    if not verb:
+        return None
+
+    all_targets_list = sorted(set(contract_caps))
+    if target_hint and target_hint in all_targets_list:
+        return target_hint
+
+    if not obj:
+        return None
+
+    template_reverse: dict[str, str] = {}
+    if contract is not None:
+        for key, val in contract.ast_template.get("capabilities", {}).items():
+            template_reverse[key.lower()] = val
+
+    SEMANTIC_ALIASES: dict[str, str] = {"dashboard": "page"}
+    obj_lower = obj.lower()
+    aliases = {obj_lower, SEMANTIC_ALIASES.get(obj_lower, "")} - {""}
+
+    for cap in all_targets_list:
+        cap_lower = cap.lower()
+        obj_type = _OBJECT_KEYWORDS.get(obj_lower)
+        if obj_type and obj_type in cap_lower:
+            return cap
+        suffix_key = cap.rsplit(".", 1)[-1].lower()
+        if suffix_key in obj_lower or obj_lower in suffix_key or obj_lower == suffix_key:
+            return cap
+        if any(a in cap_lower for a in aliases):
+            return cap
+        if any(a in template_reverse and template_reverse[a] == cap for a in aliases):
+            return cap
+    return None
 
 
 def _resolve_action(
@@ -1017,6 +1070,18 @@ def complete_structure(
                     instance_hints[cap] = hint
                     break
 
+    # Build attach_map: {capability: attach_dict} from semantic actions.
+    # WHAT/WHERE — cada acción CREATE con attach explicita el destino físico
+    # (capability + instance label) donde se monta el componente.
+    attach_map: dict[str, dict] = {}
+    for action in semantic_resolution.actions:
+        att = action.get("attach")
+        if not att:
+            continue
+        cap = _match_single_capability(action, capabilities, contract)
+        if cap is not None:
+            attach_map[cap] = att
+
     for cap in capabilities:
         action_verb = action_map.get(cap)
 
@@ -1116,6 +1181,7 @@ def complete_structure(
             provenance=cap_provenance,
             instance_only=instance_only,
             instance_hint=instance_hints.get(cap) if action == CREATE else None,
+            attach_to=attach_map.get(cap) if action == CREATE else None,
         ))
 
     # F1/C3: no anchor-preservation pass. A KEEP/DELETE operation never invents

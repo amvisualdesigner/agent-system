@@ -1,15 +1,17 @@
 """F1/C4 — Anchor resolution is STRICTLY PHYSICAL, end to end.
 
 The anchor decision must follow the hard matrix:
-  forced (plan-specified) → use it
-  0 physical candidates    → CONFLICT (anchor_ambiguity, blocking)
-  1 physical candidate     → use it
-  N physical candidates    → CONFLICT unless the plan specified one
+  forced (plan-specified)              → use it
+  attach target (plan, capability+label) → resolve against page labels:
+                                       0 → CONFLICT target_not_found,
+                                       1 → use it,
+                                       N → CONFLICT target_ambiguity
+  orphan without attach/composition     → STANDALONE (no MODIFY, no conflict)
+  contract composition parent           → its physical instances (0/N conflict)
 
-No semantic scoring may re-rank candidates. Orphan components (no
-composition parent in the contract, e.g. FilterPanel in analytics.filter)
-are mounted into existing page container files; 0/N of them is a blocking
-conflict surfaced as clarification_needed, never a silent guess.
+No semantic scoring may re-rank candidates. A blocking 0/N conflict surfaces
+as clarification_needed (target_not_found / target_ambiguity), never a
+silent guess.
 
 Each test exercises apply_engine() (GraphIR → renderer → Anchor Resolution)
 against a copy of the real agent-test-repo.
@@ -76,18 +78,22 @@ PAGE_REL = os.path.join("frontend", "src", "pages", "dashboard", "SalesOverviewP
 SECOND_PAGE_REL = os.path.join("frontend", "src", "pages", "analytics", "AnalyticsOverviewPage.tsx")
 
 
-def _filter_panel_plan() -> dict:
+def _filter_panel_plan(attach_label: str | None = None) -> dict:
     """Plan for CREATE analytics.filter / presentation.filter_panel (orphan)."""
+    action = IntentAction(
+        verb="create",
+        target_capability="presentation.filter_panel",
+        params={"filters": ["region"]},
+    )
+    if attach_label is not None:
+        from app.intent.models import AttachRef, TargetRef
+        action.attach = AttachRef(
+            target=TargetRef(capability="layout.page", instance_label=attach_label),
+        )
     confirmed = ConfirmedIntent(
         contract_id="analytics.filter",
         contract_version=1,
-        actions=[
-            IntentAction(
-                verb="create",
-                target_capability="presentation.filter_panel",
-                params={"filters": ["region"]},
-            ),
-        ],
+        actions=[action],
         params={"filters": ["region"]},
         user_message="Add a filter panel for region",
         interpretation_id="c4-anchor-matrix",
@@ -95,7 +101,8 @@ def _filter_panel_plan() -> dict:
     return compile_plan(confirmed).to_dict()
 
 
-def _apply(workspace: str, forced_anchor_path: str | None = None) -> dict:
+def _apply(workspace: str, forced_anchor_path: str | None = None,
+           attach_label: str | None = None) -> dict:
     from app.engine.apply_engine import apply_engine
     from app.runtime.context import RunContext
 
@@ -108,7 +115,7 @@ def _apply(workspace: str, forced_anchor_path: str | None = None) -> dict:
     )
     try:
         return apply_engine(
-            ctx.run_id, _filter_panel_plan(), ctx,
+            ctx.run_id, _filter_panel_plan(attach_label=attach_label), ctx,
             dry_run=True, forced_anchor_path=forced_anchor_path,
         )
     finally:
@@ -116,47 +123,62 @@ def _apply(workspace: str, forced_anchor_path: str | None = None) -> dict:
 
 
 class TestPhysicalAnchorMatrix:
-    """forced → use; 0 → CONFLICT; 1 → use; N → CONFLICT (unless forced)."""
+    """forced → use; attach 1 → use; attach 0 → target_not_found; attach N →
+    target_ambiguity; orphan sin attach → standalone."""
 
     def test_one_candidate_is_mounted(self, phase6_repo_copy):
-        """Existing repo has exactly ONE page container → single candidate → mount."""
-        result = _apply(phase6_repo_copy)
+        """Existing repo has exactly ONE page container matching the attach
+        target label → single candidate → mount."""
+        result = _apply(phase6_repo_copy, attach_label="SalesOverviewPage")
         ex = result["execution"]
         assert ex["status"] in ("ok", "verify_failed"), ex
         ops = ex["operations"]
         assert any(op["action"] == "create" and "FilterPanel" in op["path"] for op in ops), ops
         assert any(op["action"] == "modify" and PAGE_REL in op["path"] for op in ops), (
-            f"single physical page must be the anchor: {[(o['action'], o['path']) for o in ops]}"
+            f"attach target must be the anchor: {[(o['action'], o['path']) for o in ops]}"
         )
         anchor = next(o for o in ops if o["action"] == "modify" and PAGE_REL in o["path"])
         assert "FilterPanel" in anchor.get("content", "")
 
+    def test_orphan_without_attach_is_standalone(self, phase6_repo_copy):
+        """Orphan sin attach ni composición → standalone (create, NO modify de
+        página, sin conflicto). El Confirmed Plan decide el destino vía attach."""
+        result = _apply(phase6_repo_copy)
+        ex = result["execution"]
+        assert ex["status"] in ("ok", "verify_failed"), ex
+        ops = ex["operations"]
+        assert any(op["action"] == "create" and "FilterPanel" in op["path"] for op in ops), ops
+        assert not any(op["action"] == "modify" and PAGE_REL in op["path"] for op in ops), (
+            "orphan sin attach no debe modificar ninguna página"
+        )
+
     def test_zero_candidates_conflict(self, phase6_repo_copy):
-        """0 physical page containers → blocking CONFLICT, plan must specify."""
+        """Attach a página inexistente → CONFLICT target_not_found (blocking)."""
         ws = shutil.copytree(phase6_repo_copy, f"{phase6_repo_copy}_z", dirs_exist_ok=True)
         os.remove(os.path.join(ws, PAGE_REL))
         try:
-            result = _apply(ws)
+            result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
             assert ex["status"] == "clarification_needed", ex
-            assert ex.get("conflict") == "anchor_ambiguity", ex
+            assert ex.get("conflict") == "target_not_found", ex
             assert ex.get("operations") == [], ex
-            assert "0 physical anchors" in ex.get("detail", ""), ex
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 
     def test_two_candidates_conflict(self, phase6_repo_copy):
-        """2 physical page containers + no plan-specified anchor → CONFLICT."""
+        """2 instancias de página con la MISMA etiqueta + attach → CONFLICT
+        target_ambiguity (blocking): el plan debe concretar una."""
         ws = shutil.copytree(phase6_repo_copy, f"{phase6_repo_copy}_n", dirs_exist_ok=True)
-        os.makedirs(os.path.dirname(os.path.join(ws, SECOND_PAGE_REL)), exist_ok=True)
-        with open(os.path.join(ws, SECOND_PAGE_REL), "w") as f:
+        homonym_rel = os.path.join("frontend", "src", "pages", "analytics", "SalesOverviewPage.tsx")
+        os.makedirs(os.path.dirname(os.path.join(ws, homonym_rel)), exist_ok=True)
+        with open(os.path.join(ws, homonym_rel), "w") as f:
             f.write(SECOND_PAGE)
         try:
-            result = _apply(ws)
+            result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
             assert ex["status"] == "clarification_needed", ex
-            assert ex.get("conflict") == "anchor_ambiguity", ex
-            assert "2 physical anchors" in ex.get("detail", ""), ex
+            assert ex.get("conflict") == "target_ambiguity", ex
+            assert "target_ambiguity" in ex.get("detail", ""), ex
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 
@@ -205,19 +227,25 @@ def _anchor_record(result: dict, component: str = "FilterPanel") -> dict:
 
 
 class TestG2AuditBasis:
-    """S2·F3·F1 — G2: la resolución '1 página física' queda explícitamente
-    marcada como resolución física provisional (no forzada, no semántica,
-    no contract-composition)."""
+    """S2·F3·F1 — G2: la resolución de huérfano standalone queda
+    explícitamente marcada como resolución física provisional (no forzada,
+    no semántica, no contract-composition)."""
 
-    def test_singleton_is_recorded_as_physical_not_forced(self, phase6_repo_copy):
+    def test_standalone_is_recorded_as_physical_not_forced(self, phase6_repo_copy):
         rec = _anchor_record(_apply(phase6_repo_copy))
-        assert rec["decision"] == "single", rec
-        assert rec["basis"] == "physical_singleton", rec
+        assert rec["decision"] == "standalone", rec
+        assert rec["basis"] == "standalone_orphan", rec
         assert rec["authority"] == "physical", rec
         assert rec["basis"] != "forced", (
-            "un singleton por exclusión física NO es una decisión del plan/usuario"
+            "un standalone por exclusión física NO es una decisión del plan/usuario"
         )
         assert rec["authority"] != "plan", rec
+
+    def test_attach_target_is_recorded_as_plan_decision(self, phase6_repo_copy):
+        rec = _anchor_record(_apply(phase6_repo_copy, attach_label="SalesOverviewPage"))
+        assert rec["decision"] == "single", rec
+        assert rec["basis"] == "attach_target", rec
+        assert rec["authority"] == "plan", rec
 
     def test_forced_is_recorded_as_plan_decision(self, phase6_repo_copy):
         forced = os.path.join(phase6_repo_copy, PAGE_REL)

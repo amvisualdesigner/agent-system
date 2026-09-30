@@ -505,6 +505,21 @@ def _validate_create_physical_targets(
     return None
 
 
+def _anchor_conflict_type(msg: str) -> str:
+    """Classify an anchor conflict for FallbackExecutionRequest.conflict_type.
+
+    Anchor resolution conflicts from attach targets carry a kind prefix
+    ("target_not_found:", "target_ambiguity:") so the API can distinguish a
+    missing instance from an ambiguous one without re-reading anchor decisions
+    as input. Legacy/physical conflicts classify as "anchor_ambiguity".
+    """
+    if msg.startswith("target_not_found:"):
+        return "target_not_found"
+    if msg.startswith("target_ambiguity:"):
+        return "target_ambiguity"
+    return "anchor_ambiguity"
+
+
 def validate_fileop_plan_provenance(
     fileops: list[FileOp],
     structural_ir: StructuralIR,
@@ -1795,15 +1810,24 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # physical parent instances are the only candidate sources.
     # anchor_decisions → meta.audit.anchor_resolution only (diagnostic).
     # Invariant: never read back as input to any decision.
+    # WHAT/WHERE: attach_map = {child_capability: attach} from StructuralIR
+    # CREATE ops with attach_to. El Confirmed Plan es la única autoridad
+    # semántica sobre dónde se monta cada componente; AnchorResolver solo
+    # resuelve el destino físico (capability + instance label).
+    attach_map: dict[str, dict] = {}
+    for op in getattr(structural_ir, "operations", []):
+        if op.get("action") == "CREATE" and op.get("attach_to"):
+            attach_map[op["target"]] = op["attach_to"]
     anchor_modify_ops, anchor_unresolved, anchor_decisions, anchor_conflicts = resolve_anchors(
         fileops, structural_index, context.workspace,
         forced_anchor_path=forced_anchor_path,
         composition_map=_build_contract_composition_map(contract),
+        attach_map=attach_map,
     )
     if anchor_conflicts:
         return FallbackExecutionRequest(
             reason="; ".join(anchor_conflicts),
-            conflict_type="anchor_ambiguity", level=2,
+            conflict_type=_anchor_conflict_type(anchor_conflicts[0]), level=2,
             details={"anchor_conflicts": anchor_conflicts},
         ).to_result()
     if anchor_modify_ops:

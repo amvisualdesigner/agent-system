@@ -391,36 +391,39 @@ class TestPhase6DataFlowWithRealRepo:
             shutil.rmtree(artifacts_tmp, ignore_errors=True)
 
     def test_orphan_create_mounts_into_anchor(self, phase6_repo_copy):
-        """CREATE orphan component (e.g. FilterPanel) must be mounted into
-        an existing anchor file (layout/page/section) via Anchor Resolution.
+        """CREATE orphan component (e.g. FilterPanel) is mounted into an
+        existing anchor file via Anchor Resolution ONLY when the Confirmed
+        Plan provide el attach (WHAT/WHERE). Sin attach → standalone.
 
-        This is the critical cross-contract scenario that was broken for
-        weeks: the system must produce BOTH a CREATE op for the component
-        AND a MODIFY op for the anchor file that mounts it.
+        This is the critical cross-contract scenario: the system must produce
+        BOTH a CREATE op for the component AND a MODIFY op for the anchor file
+        that mounts it, driven por el attach del plan (no por scoring).
 
         Verifies:
           1. apply_engine succeeds (ok/verify_failed)
           2. Operations contain CREATE for the component
-          3. Operations contain MODIFY for an existing anchor file
+          3. Operations contain MODIFY for the attach target page
           4. The modified file contains the component import and JSX
         """
         from app.engine.apply_engine import apply_engine
         from app.runtime.context import RunContext
-        from app.intent.models import ConfirmedIntent, IntentAction
+        from app.intent.models import AttachRef, ConfirmedIntent, IntentAction, TargetRef
         from app.intent.plan_compiler import compile_plan
 
-        # Create a FilterPanel — orphan component (no Page parent in contract)
+        # Create a FilterPanel — orphan component, attach explícito al plan
+        action = IntentAction(
+            verb="create", target_capability="presentation.filter_panel",
+            params={"filters": ["region", "channel"]},
+        )
+        action.attach = AttachRef(
+            target=TargetRef(capability="layout.page", instance_label="SalesOverviewPage"),
+        )
         confirmed = ConfirmedIntent(
             contract_id="analytics.filter",
             contract_version=1,
-            actions=[
-                IntentAction(
-                    verb="create", target_capability="presentation.filter_panel",
-                    params={"filters": ["region", "channel"]},
-                ),
-            ],
+            actions=[action],
             params={"filters": ["region", "channel"]},
-            user_message="Add a filter panel for region and channel",
+            user_message="Add a filter panel for region and channel in SalesOverviewPage",
             interpretation_id="e2e-anchor-resolver",
         )
         plan = compile_plan(confirmed)
@@ -451,7 +454,7 @@ class TestPhase6DataFlowWithRealRepo:
                 f"{[op.get('path') for op in ops]}"
             )
 
-            # 2. There must be a MODIFY op for an existing anchor file
+            # 2. There must be a MODIFY op for the attach target page
             modify_ops = [op for op in ops if op["action"] == "modify"]
             assert len(modify_ops) >= 1, (
                 f"No MODIFY ops found in operations: "
@@ -475,6 +478,58 @@ class TestPhase6DataFlowWithRealRepo:
                     f"MODIFY op for {anchor_path} should contain FilterPanel. "
                     f"Got:\n{content}"
                 )
+        finally:
+            shutil.rmtree(artifacts_tmp, ignore_errors=True)
+
+    def test_orphan_without_attach_is_standalone(self, phase6_repo_copy):
+        """Orphan sin attach y sin composición → standalone: CREA el componente
+        pero NO modifica ninguna página y no produce conflicto."""
+        from app.engine.apply_engine import apply_engine
+        from app.runtime.context import RunContext
+        from app.intent.models import ConfirmedIntent, IntentAction
+        from app.intent.plan_compiler import compile_plan
+
+        confirmed = ConfirmedIntent(
+            contract_id="analytics.filter",
+            contract_version=1,
+            actions=[
+                IntentAction(
+                    verb="create", target_capability="presentation.filter_panel",
+                    params={"filters": ["region"]},
+                ),
+            ],
+            params={"filters": ["region"]},
+            user_message="Add a filter panel",
+            interpretation_id="e2e-anchor-standalone",
+        )
+        plan = compile_plan(confirmed)
+
+        artifacts_tmp = tempfile.mkdtemp(prefix="artifacts_standalone_", dir=settings.ARTIFACTS_DIR)
+        ctx = RunContext(
+            run_id=str(uuid.uuid4()),
+            base_dir=phase6_repo_copy,
+            workspace=phase6_repo_copy,
+            artifacts=artifacts_tmp,
+        )
+
+        try:
+            result = apply_engine(ctx.run_id, plan.to_dict(), ctx, dry_run=False)
+            ex = result["execution"]
+            assert ex["status"] in ("ok", "verify_failed"), (
+                f"Expected ok/verify_failed, got {ex['status']}: {ex.get('conflict')}"
+            )
+            create_filters = [
+                op for op in ex["operations"]
+                if op["action"] == "create" and "FilterPanel" in op.get("path", "")
+            ]
+            assert len(create_filters) >= 1
+            page_modifies = [
+                op for op in ex["operations"]
+                if op["action"] == "modify" and "pages/" in op.get("path", "")
+            ]
+            assert page_modifies == [], (
+                f"standalone orphan no debe modificar páginas: {page_modifies}"
+            )
         finally:
             shutil.rmtree(artifacts_tmp, ignore_errors=True)
 

@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 __all__ = [
     "IntentAction",
+    "TargetRef",
+    "AttachRef",
     "InterpretationDraft",
     "ConfirmedIntent",
     "CompiledPlan",
@@ -85,6 +87,64 @@ class RunState:
 
 
 @dataclass
+class TargetRef:
+    """Referencia al destinatario físico de un AttachRef.
+
+    capability: capability del contexto destino (p.ej. layout.page).
+    instance_label: etiqueta de la instancia física (p.ej. SalesOverviewPage).
+                   None => etiqueta desconocida/no especificada (ambiguo).
+    """
+    capability: str
+    instance_label: str | None = None
+
+    def to_dict(self) -> dict:
+        d = {"capability": self.capability}
+        if self.instance_label:
+            d["instance_label"] = self.instance_label
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> TargetRef:
+        if not d:
+            return cls(capability="")
+        return cls(
+            capability=d.get("capability", ""),
+            instance_label=d.get("instance_label"),
+        )
+
+
+@dataclass
+class AttachRef:
+    """Relación WHAT/WHERE: indica dónde se une un componente que se crea.
+
+    journey: child-first — el contrato semántico lo gobierna la capability del
+             hijo; el padre se expresa SOLO como destino físico vía target.
+    kind: tipo de unión (por ahora "container").
+    provenance: "candidate" (propuesta) | "frozen" (confirmada por el plan).
+    """
+    target: TargetRef
+    kind: str = "container"
+    provenance: str = "candidate"
+
+    def to_dict(self) -> dict:
+        return {
+            "target": self.target.to_dict(),
+            "kind": self.kind,
+            "provenance": self.provenance,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AttachRef:
+        if not d:
+            return cls(target=TargetRef(capability=""), kind="container", provenance="candidate")
+        return cls(
+            target=TargetRef.from_dict(d.get("target", {})),
+            kind=d.get("kind", "container"),
+            provenance=d.get("provenance", "candidate"),
+        )
+
+
+@dataclass
 class IntentAction:
     verb: str
     target_capability: str
@@ -92,6 +152,7 @@ class IntentAction:
     params: dict = field(default_factory=dict)
     confidence: float = 1.0
     instance_hint: str | None = None
+    attach: AttachRef | None = None
 
 
 # ── InterpretationDraft (output of IntentInterpreter) ───────────────
@@ -140,10 +201,23 @@ class ConfirmedIntent:
 
     @classmethod
     def from_dict(cls, d: dict) -> ConfirmedIntent:
+        actions = []
+        for a in d.get("actions", []):
+            action = IntentAction(
+                verb=a.get("verb", ""),
+                target_capability=a.get("target_capability", ""),
+                source_capability=a.get("source_capability"),
+                params=a.get("params", {}) or {},
+                confidence=a.get("confidence", 1.0),
+                instance_hint=a.get("instance_hint"),
+            )
+            if a.get("attach"):
+                action.attach = AttachRef.from_dict(a["attach"])
+            actions.append(action)
         return cls(
             contract_id=d["contract_id"],
             contract_version=d.get("contract_version", 1),
-            actions=[IntentAction(**a) for a in d.get("actions", [])],
+            actions=actions,
             params=d.get("params", {}),
             user_message=d.get("user_message", ""),
             interpretation_id=d.get("interpretation_id", ""),
@@ -209,6 +283,8 @@ class FallbackExecutionRequest:
         "repository_conflict",
         "fileop_provenance",
         "anchor_ambiguity",
+        "target_ambiguity",
+        "target_not_found",
     ]
     level: int  # 0=info, 1=warning, 2=blocking
     details: dict = field(default_factory=dict)

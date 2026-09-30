@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.intent.models import ConfirmedIntent, IntentAction, RunPhase, PendingDeletion
+from app.intent.models import ConfirmedIntent, IntentAction, RunPhase, PendingDeletion, AttachRef
 from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.utils.run_id import validate_run_id
@@ -131,12 +131,19 @@ def _agent_confirm(req: ConfirmRequest):
             "reason": f"Contract '{req.contract_id}' not found",
         }
 
-    # Build ConfirmedIntent — only pass fields IntentAction accepts
+    # Build ConfirmedIntent — only pass fields IntentAction accepts.
+    # WHAT/WHERE: 'attach' viaja por acción (decisión semántica del plan).
     _ia_fields = {"verb", "target_capability", "params", "confidence", "instance_hint"}
+    actions: list[IntentAction] = []
+    for a in req.actions:
+        action = IntentAction(**{k: v for k, v in a.items() if k in _ia_fields})
+        if a.get("attach"):
+            action.attach = AttachRef.from_dict(a["attach"])
+        actions.append(action)
     confirmed = ConfirmedIntent(
         contract_id=req.contract_id,
         contract_version=req.contract_version,
-        actions=[IntentAction(**{k: v for k, v in a.items() if k in _ia_fields}) for a in req.actions],
+        actions=actions,
         params=req.params,
         user_message=req.user_message,
         interpretation_id=req.interpretation_id,
@@ -183,6 +190,10 @@ def _agent_confirm(req: ConfirmRequest):
         label = cap_labels.get(cap, cap.split(".")[-1])
         if verb and cap:
             summary_parts.append(f"{verb.capitalize()} {label}")
+            if a.attach is not None and a.attach.target.instance_label:
+                summary_parts[-1] = (
+                    f"{summary_parts[-1]} → {a.attach.target.instance_label}"
+                )
     summary = "; ".join(summary_parts) if summary_parts else "No changes"
 
     # Structural operations from confirmed actions
@@ -193,10 +204,13 @@ def _agent_confirm(req: ConfirmRequest):
             action_verb = "DELETE"
         elif action_verb not in ("CREATE", "MODIFY", "DELETE", "KEEP"):
             action_verb = a.verb.upper()
-        structural_ops.append({
+        op = {
             "action": action_verb,
             "target": a.target_capability,
-        })
+        }
+        if a.attach is not None:
+            op["attach"] = a.attach.to_dict()
+        structural_ops.append(op)
 
     # 3D: Estimated files now derived from structural_ops (not all contract files)
     # Only include files for capabilities that will actually be touched.

@@ -7,22 +7,19 @@ Pipeline position:
 F1/C4 invariants — the result is STRICTLY PHYSICAL, never semantic:
   - No name-overlap, no domain affinities, no weighted scoring, no type
     fallback chains. The old semantic score is gone as a decision authority.
-  - The anchor is derived from the contract composition map
-    ({child_capability: parent_capability}, built from the contract's own
-    ast_template slots) and the parent capability's PHYSICAL instances, or
-    from a plan/user-specified anchor path (forced).
-  - Decision matrix (exactly, no heuristics):
-      forced           → use it (the plan already specified which one)
-      0 candidates     → CONFLICT
-      1 candidate      → use it
-      N candidates     → CONFLICT unless the plan already specified which one
-  - G2 (S2·F3·F1): a decision with 1 candidate derived by physical exclusion
-    (orphan component, no contract composition parent, exactly one page
-    container exists) is recorded as basis="physical_singleton" /
-    authority="physical" in the audit — it is a PROVISIONAL PHYSICAL
-    resolution, NOT a user/plan decision and NOT contract-defined. It carries
-    no semantic authority, is never presented as "forced", and is never
-    re-read as input to any other decision.
+  - The anchor is derived (in priority order) from:
+      1. a plan/specified anchor path (forced);
+      2. the plan's attach target (WHAT/WHERE) — a capability + instance label
+         resolved deterministically against the page anchors (0 → not-found
+         CONFLICT, N → ambiguity CONFLICT, 1 → use);
+      3. the contract composition map
+         ({child_capability: parent_capability}, built from the contract's own
+         ast_template slots) plus the parent capability's PHYSICAL instances;
+      4. NOTHING for an orphan without attach or contract composition parent →
+         the component is created STANDALONE (no page MODIFY, no conflict).
+  - G2 (S2·F3·F1): every decision records basis + authority explicitly in the
+    audit. Orphan standalone is basis="standalone_orphan" / authority="physical";
+    attach resolution is basis="attach_target" / authority="plan".
   - A CREATE component whose parent is being regenerated this run is already
     composed by the renderer (import present in the anchor content) → skipped
     as composed, never double-mounted.
@@ -332,18 +329,38 @@ def _normalize_forced_path(
 AnchorResolutionDecisions = dict[str, dict]
 
 
+def _normalize_label(name: str) -> str:
+    """Normalize a page label for deterministic comparison.
+
+    E.g. "SalesOverviewPage", "sales-overview-page" y "Sales Overview Page"
+    comparan igual.
+    """
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _page_label_matches(page_name: str, label: str) -> bool:
+    """True si el nombre físico de la página coincide con la etiqueta del plan."""
+    norm_label = _normalize_label(label)
+    if not norm_label:
+        return False
+    return _normalize_label(page_name) == norm_label
+
+
 def resolve_anchors(
     all_fileops: list[FileOp],
     structural_index: StructuralIndex,
     workspace: str,
     forced_anchor_path: str | None = None,
     composition_map: dict[str, str] | None = None,
+    attach_map: dict[str, dict] | None = None,
 ) -> tuple[list[FileOp], list[str], AnchorResolutionDecisions, list[str]]:
     """Resolve anchors for mountable CREATE FileOps and produce MODIFY FileOps.
 
-    The decision is STRICTLY PHYSICAL (F1/C4): forced → use; 0 candidates →
-    CONFLICT; 1 candidate → use; N candidates → CONFLICT unless the plan
-    specified one (forced). No semantic scoring.
+    The decision is STRICTLY PHYSICAL: forced → use; attach target → resolve
+    capability+instance_label against page anchors (0 → CONFLICT not-found,
+    N → CONFLICT ambiguity, 1 → use); contract composition parent → use its
+    instances (0/N → CONFLICT); orphan without attach/composition → standalone
+    (no MODIFY, no conflict). No semantic scoring.
 
     Args:
         all_fileops: All FileOps from the pipeline (both CREATE and others).
@@ -354,13 +371,18 @@ def resolve_anchors(
             component, overriding ambiguity.
         composition_map: {child_capability: parent_capability} derived from
             the contract's ast_template (physical composition hierarchy).
+        attach_map: {child_capability: attach_dict} from the Confirmed Plan
+            (WHAT/WHERE). Each attach carries the destination capability and
+            instance label selected by the plan for this component.
 
     Returns:
         (modify_ops, unresolved, decisions, conflicts): MODIFY FileOps for
         anchor injection, list of unresolved component paths (kept empty for
         backwards-compat callers), the audit decisions dict, and a list of
-        physical-ambiguity CONFLICT messages (0 candidates or N candidates).
-        Callers must treat any conflict as a whole-run CONFLICT.
+        CONFLICT messages (0 candidates or N candidates). Conflict messages
+        carry a kind prefix ("target_not_found:", "target_ambiguity:") when
+        they come from attach resolution. Callers must treat any conflict as
+        a whole-run CONFLICT.
     """
     create_fileops = [fop for fop in all_fileops if fop.action == "create"]
     mountable = [fop for fop in create_fileops if _is_mountable_ui_component(fop)]
@@ -369,6 +391,7 @@ def resolve_anchors(
         return [], [], {}, []
 
     composition_map = composition_map or {}
+    attach_map = attach_map or {}
 
     # Physical page containers (orphan candidates). Files being created THIS
     # run are excluded: a brand-new page composes its own children at render;
@@ -397,10 +420,58 @@ def resolve_anchors(
             reason = f"plan-specified anchor {forced_path}"
             basis = "forced"
             authority = "plan"
+            source = "forced"
         else:
             cap = _capability_for_path(structural_index, fop.path)
+            attach = attach_map.get(cap) if cap else None
             parent_cap = composition_map.get(cap) if cap else None
-            if parent_cap is not None:
+            if attach is not None:
+                target = attach.get("target") or {}
+                target_cap = target.get("capability", "")
+                target_label = target.get("instance_label")
+                source = f"attach target {target_cap}.{target_label}"
+                if not target_label:
+                    conflicts.append(
+                        f"target_ambiguity: {fop.path}: {source or 'attach target without label'}"
+                        f" → no instance label — plan must specify one"
+                    )
+                    decisions[component_name] = _decision_record(
+                        fop.path, "conflict", None, [],
+                        f"{source}: no instance label (ambiguous)",
+                        "target_ambiguity", "plan",
+                    )
+                    continue
+                picked = sorted({
+                    a.file_path for a in page_anchors
+                    if _page_label_matches(a.page_name, target_label)
+                })
+                basis = "attach_target"
+                authority = "plan"
+                n = len(picked)
+                if n == 0:
+                    conflicts.append(
+                        f"target_not_found: {fop.path}: {source} → 0 physical anchors "
+                        f"-- no page instance matches '{target_label}'"
+                    )
+                    decisions[component_name] = _decision_record(
+                        fop.path, "conflict", None, [],
+                        f"{source}: 0 physical anchors (not found)",
+                        "target_not_found", "physical",
+                    )
+                    continue
+                if n > 1:
+                    conflicts.append(
+                        f"target_ambiguity: {fop.path}: {source} → {n} physical anchors "
+                        f"{sorted(picked)} — ambiguous, plan must specify one"
+                    )
+                    decisions[component_name] = _decision_record(
+                        fop.path, "conflict", None,
+                        [{"path": p, "type": "feature_page"} for p in sorted(picked)],
+                        f"{source}: {n} physical anchors (ambiguous)",
+                        "target_ambiguity", "physical",
+                    )
+                    continue
+            elif parent_cap is not None:
                 picked = sorted({
                     inst.file_path for inst in structural_index.get_instances(parent_cap)
                     if inst.file_path
@@ -408,36 +479,43 @@ def resolve_anchors(
                 source = f"contract composition {cap}→{parent_cap}"
                 basis = "contract_composition"
                 authority = "contract"
+                n = len(picked)
+                if n == 0:
+                    conflicts.append(
+                        f"{fop.path}: {source} → 0 physical anchors "
+                        f"(nothing to mount into; plan must specify one)"
+                    )
+                    decisions[component_name] = _decision_record(
+                        fop.path, "conflict", None,
+                        [{"path": p, "type": "feature_page"} for p in picked],
+                        f"{source}: 0 physical anchors",
+                        "physical_exclusion_conflict", "physical",
+                    )
+                    continue
+                if n > 1:
+                    conflicts.append(
+                        f"{fop.path}: {source} → {n} physical anchors "
+                        f"{sorted(picked)} — ambiguous, plan must specify one"
+                    )
+                    decisions[component_name] = _decision_record(
+                        fop.path, "conflict", None,
+                        [{"path": p, "type": "feature_page"} for p in sorted(picked)],
+                        f"{source}: {n} physical anchors (ambiguous)",
+                        "physical_exclusion_conflict", "physical",
+                    )
+                    continue
             else:
-                picked = [a.file_path for a in page_anchors]
-                source = "physical page containers"
-                basis = "physical_singleton"
-                authority = "physical"
-
-            n = len(picked)
-            if n == 0:
-                conflicts.append(
-                    f"{fop.path}: {source} → 0 physical anchors "
-                    f"(nothing to mount into; plan must specify one)"
-                )
+                # Standalone orphan: sin attach y sin composición de contrato →
+                # el componente no se monta en ninguna página (no MODIFY, no conflicto).
                 decisions[component_name] = _decision_record(
-                    fop.path, "conflict", None,
-                    [{"path": p, "type": "feature_page"} for p in picked],
-                    f"{source}: 0 physical anchors",
-                    "physical_exclusion_conflict", "physical",
+                    fop.path, "standalone", None, [],
+                    "orphan without attach or contract composition → standalone",
+                    "standalone_orphan", "physical",
                 )
                 continue
-            if n > 1:
-                conflicts.append(
-                    f"{fop.path}: {source} → {n} physical anchors "
-                    f"{sorted(picked)} — ambiguous, plan must specify one"
-                )
-                decisions[component_name] = _decision_record(
-                    fop.path, "conflict", None,
-                    [{"path": p, "type": "feature_page"} for p in sorted(picked)],
-                    f"{source}: {n} physical anchors (ambiguous)",
-                    "physical_exclusion_conflict", "physical",
-                )
+
+            n = len(picked)
+            if n != 1:
                 continue
 
             candidate = picked[0]
@@ -529,11 +607,13 @@ def _decision_record(
     anchor decision, so a singleton-by-exclusion is never mistaken for a
     forced (user/plan) decision nor for contract composition:
       - basis="forced"                    authority="plan"      → user/plan chose
+      - basis="attach_target"             authority="plan"      → plan attach target
       - basis="contract_composition"      authority="contract"  → ast_template parent
-      - basis="physical_singleton"        authority="physical"  → 1 page container by
-        physical exclusion — PROVISIONAL resolution, not a user/semantic decision
+      - basis="standalone_orphan"         authority="physical"  → no parent, standalone
       - basis="renderer_composed"         authority="renderer"  → skipped, renderer owned
-      - basis="physical_exclusion_conflict" authority="physical" → 0/N ambiguous
+      - basis="physical_exclusion_conflict" authority="physical" → 0/N composition anchors
+      - basis="target_not_found"          authority="physical"  → attach target absent
+      - basis="target_ambiguity"          authority="physical/plan" → attach label 0/N
     """
     record: dict[str, Any] = {
         "component_path": component_path,

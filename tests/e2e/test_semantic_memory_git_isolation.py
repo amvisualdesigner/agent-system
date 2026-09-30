@@ -88,10 +88,15 @@ def _find_file(ws, basename) -> list[str]:
 
 
 def _apply(ws, artifacts, run_id, verb, contract_id="analytics.filter",
-           target="presentation.filter_panel", params=None):
+           target="presentation.filter_panel", params=None, attach_label=None):
     """Apply a deterministic plan for real (dry_run=False) on the workspace."""
+    actions = [{"verb": verb, "target_capability": target, "confidence": 0.9}]
+    if attach_label:
+        actions[0]["attach"] = {
+            "target": {"capability": "layout.page", "instance_label": attach_label},
+        }
     plan = build_plan_from_actions(
-        [{"verb": verb, "target_capability": target, "confidence": 0.9}],
+        actions,
         params=params or {},
         contract_id=contract_id,
     )
@@ -118,14 +123,14 @@ class TestFunctionalRunCommit:
         run_id = str(uuid.uuid4())
         before = _commit_count(ws)
 
-        res = _apply(ws, artifacts_dir, run_id, "create")
+        res = _apply(ws, artifacts_dir, run_id, "create", attach_label="Page")
         assert res.get("execution", {}).get("status") == "ok", res
 
         assert _commit_count(ws) == before + 1, "funcional → exactamente 1 commit"
         assert _head_message(ws) == f"agent:{run_id}"
         head = _head_files(ws)
 
-        # … y el commit contiene el cambio funcional (FilterPanel + montaje).
+        # … y el commit contiene el cambio funcional (FilterPanel + montaje por attach).
         created = _find_file(ws, "FilterPanel.tsx")
         assert created, "Run A debe materializar FilterPanel.tsx"
         assert created[0] in head, "el cambio funcional debe estar en el commit"
@@ -219,12 +224,14 @@ class TestFailedRun:
         _git(["git", "commit", "-m", "seed"], cwd=ws)
         before = _commit_count(ws)
 
-        # Run A: CREATE filter sin ninguna página física → anchor_ambiguity
-        # DESPUÉS de que Memory ya se guardó (1577). Fallo sin commit.
+        # Run A: CREATE filter con attach a 'Page' que NO existe física →
+        # target_not_found (conflicto bloqueante). Fallo sin commit.
         run_a = str(uuid.uuid4())
-        res_a = _apply(ws, artifacts_dir, run_a, "create", params={"filters": ["Channel"]})
+        res_a = _apply(ws, artifacts_dir, run_a, "create", params={"filters": ["Channel"]},
+                       attach_label="Page")
         status_a = res_a.get("execution", {}).get("status")
         assert status_a in ("clarification_needed", "rejected"), res_a
+        assert res_a.get("execution", {}).get("conflict") == "target_not_found", res_a
         assert _commit_count(ws) == before, "un Run fallido no puede crear commit"
         assert _head_message(ws) == "seed"
 
@@ -249,7 +256,8 @@ class TestFailedRun:
         _git(["git", "commit", "-m", "baseline page"], cwd=ws)
 
         run_b = str(uuid.uuid4())
-        res_b = _apply(ws, artifacts_dir, run_b, "create", params={"filters": ["Channel"]})
+        res_b = _apply(ws, artifacts_dir, run_b, "create", params={"filters": ["Channel"]},
+                       attach_label="Page")
         assert res_b.get("execution", {}).get("status") == "ok", res_b
         head_b = _head_files(ws)
         assert MEM_REL not in head_b, (

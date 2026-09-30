@@ -2,10 +2,13 @@
 
 F1/C4 invariants locked here:
   - The anchor decision is STRICTLY PHYSICAL, never semantic:
-      forced (plan specified) → use it
-      0 candidates     → CONFLICT
-      1 candidate      → use it
-      N candidates     → CONFLICT unless the plan specified one (forced)
+      forced (plan specified)          → use it
+      attach target (capability + instance label) → resolve against pages:
+                                              0 → CONFLICT target_not_found
+                                              N → CONFLICT target_ambiguity
+                                              1 → use it
+      contract composition parent      → its physical instances (0/N → CONFLICT)
+      orphan without attach/composition → STANDALONE (no MODIFY, no conflict)
   - No scoring, no domain affinities, no word overlap, no type fallback.
   - A component already composed by the renderer → composed_skip (no
     double mount, no spurious unresolved warning).
@@ -259,6 +262,9 @@ class TestPhysicalMatrix:
             shutil.rmtree(ws)
 
     def test_n_candidates_conflict_without_forced(self):
+        """Orphan sin attach y sin composición → standalone (no MODIFY, no
+        conflicto). La ambigüedad física de páginas ya NO es un conflicto para
+        huérfanos: el Confirmed Plan decide el destino vía attach."""
         ws = _mk_workspace({
             "pages/One.tsx": RICH_PAGE,
             "pages/Two.tsx": RICH_PAGE,
@@ -268,21 +274,62 @@ class TestPhysicalMatrix:
             fops = [_create("components/FilterPanel.tsx")]
             modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
             assert modify_ops == []
+            assert conflicts == []
+            assert decisions["FilterPanel"]["decision"] == "standalone"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_attach_n_matching_targets_conflict(self):
+        """Dos instancias de página con la MISMA etiqueta → target_ambiguity."""
+        ws = _mk_workspace({
+            "pages/sales/SalesOverviewPage.tsx": RICH_PAGE,
+            "pages/marketing/SalesOverviewPage.tsx": RICH_PAGE,
+        })
+        si = _si_with_page("pages/sales/SalesOverviewPage.tsx", "pages/marketing/SalesOverviewPage.tsx")
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "SalesOverviewPage"},
+        }}
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
+            assert modify_ops == []
             assert len(conflicts) == 1
             assert "2 physical anchors" in conflicts[0]
             assert decisions["FilterPanel"]["decision"] == "conflict"
         finally:
             shutil.rmtree(ws)
 
-    def test_zero_candidates_conflict(self):
+    def test_zero_candidates_orphan_is_standalone(self):
+        """Huérfano sin attach y sin composición → standalone aunque no exista
+        ninguna página física. No hay conflicto: el componente no se monta."""
         ws = _mk_workspace({})
         si = StructuralIndex.empty()
         try:
             fops = [_create("components/FilterPanel.tsx")]
             modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
             assert modify_ops == []
+            assert conflicts == []
+            assert decisions["FilterPanel"]["decision"] == "standalone"
+        finally:
+            shutil.rmtree(ws)
+
+    def test_attach_target_not_found_conflict(self):
+        """Attach a una instance_label inexistente → CONFLICT target_not_found."""
+        ws = _mk_workspace({})
+        si = StructuralIndex.empty()
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "Nope"},
+        }}
+        try:
+            fops = [_create("components/FilterPanel.tsx")]
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
+            assert modify_ops == []
             assert len(conflicts) == 1
-            assert "0 physical anchors" in conflicts[0]
+            assert "target_not_found" in conflicts[0]
             assert decisions["FilterPanel"]["decision"] == "conflict"
         finally:
             shutil.rmtree(ws)
@@ -303,16 +350,24 @@ class TestPhysicalMatrix:
             shutil.rmtree(ws)
 
     def test_single_candidate_is_used(self):
+        """Attach con instance_label única → se monta en esa página."""
         ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
         si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "SalesOverviewPage"},
+        }}
         try:
             fops = [_create("components/FilterPanel.tsx")]
-            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
             assert conflicts == []
             assert len(modify_ops) == 1
             assert modify_ops[0].path == "pages/dashboard/SalesOverviewPage.tsx"
             assert "FilterPanel" in modify_ops[0].content
             assert decisions["FilterPanel"]["decision"] == "single"
+            assert decisions["FilterPanel"]["basis"] == "attach_target"
+            assert decisions["FilterPanel"]["authority"] == "plan"
         finally:
             shutil.rmtree(ws)
 
@@ -370,7 +425,10 @@ class TestPhysicalMatrix:
         )
         fops = [renderer_modify, _create("components/KpiRow.tsx")]
         try:
-            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws,
+                composition_map={"presentation.kpi_row": "layout.page"},
+            )
             assert conflicts == []
             assert unresolved == []
             assert modify_ops == []
@@ -379,7 +437,7 @@ class TestPhysicalMatrix:
             shutil.rmtree(ws)
 
     def test_injection_failure_is_conflict(self):
-        """A single physical anchor with no usable mount point (self-closing
+        """A single attach anchor with no usable mount point (self-closing
         root) is physically unmountable → CONFLICT, not a silent skip."""
         ws = _mk_workspace({
             "pages/dashboard/Page.tsx": (
@@ -388,9 +446,14 @@ class TestPhysicalMatrix:
             ),
         })
         si = _si_with_page("pages/dashboard/Page.tsx")
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "Page"},
+        }}
         try:
             fops = [_create("components/FilterPanel.tsx")]
-            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
             assert modify_ops == []
             assert len(conflicts) == 1
             assert decisions["FilterPanel"]["decision"] == "conflict"
@@ -412,6 +475,10 @@ class TestPhysicalMatrix:
 # ── Merge Into Existing FileOps (no collisions) ─────────────────────────
 
 class TestModifyMerge:
+    ATTACH = {"presentation.filter_panel": {
+        "target": {"capability": "layout.page", "instance_label": "SalesOverviewPage"},
+    }}
+
     def test_merges_into_existing_modify_instead_of_duplicate(self):
         ws = _mk_workspace({
             "pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE,
@@ -423,7 +490,9 @@ class TestModifyMerge:
         )
         fops = [renderer_modify, _create("components/FilterPanel.tsx")]
         try:
-            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=self.ATTACH,
+            )
             assert conflicts == []
             assert len(modify_ops) == 0
             updated = fops[0]
@@ -438,7 +507,9 @@ class TestModifyMerge:
         si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
         fops = [_create("components/FilterPanel.tsx")]
         try:
-            modify_ops, unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            modify_ops, unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=self.ATTACH,
+            )
             assert conflicts == []
             assert len(modify_ops) == 1
             assert modify_ops[0].pipeline_route == "anchor_resolution"
@@ -481,9 +552,14 @@ class TestDecisionAuditRecord:
     def test_decisions_carry_candidates_and_selected(self):
         ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
         si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "SalesOverviewPage"},
+        }}
         fops = [_create("components/FilterPanel.tsx")]
         try:
-            _modify_ops, _unresolved, decisions, conflicts = resolve_anchors(fops, si, ws)
+            _modify_ops, _unresolved, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
             assert conflicts == []
             rec = decisions["FilterPanel"]
             assert rec["decision"] == "single"
@@ -501,18 +577,18 @@ class TestDecisionAuditRecord:
 
 class TestG2AuditBasis:
     """El decision record debe clasificar EXPLÍCITAMENTE la base/autoridad de
-    cada decisión. Un singleton por exclusión física es una resolución física
+    cada decisión. Un huérfano standalone es una resolución física
     PROVISIONAL: nunca 'forced', nunca semántica, nunca contract-composition."""
 
-    def test_singleton_basis_is_physical(self):
+    def test_standalone_basis_is_physical(self):
         ws = _mk_workspace({"pages/dashboard/SalesOverviewPage.tsx": RICH_PAGE})
         si = _si_with_page("pages/dashboard/SalesOverviewPage.tsx")
         try:
             fops = [_create("components/FilterPanel.tsx")]
             _mo, _un, decisions, _cf = resolve_anchors(fops, si, ws)
             rec = decisions["FilterPanel"]
-            assert rec["decision"] == "single"
-            assert rec["basis"] == "physical_singleton"
+            assert rec["decision"] == "standalone"
+            assert rec["basis"] == "standalone_orphan"
             assert rec["authority"] == "physical"
             assert rec["basis"] != "forced"
             assert rec["authority"] != "plan"
@@ -537,33 +613,45 @@ class TestG2AuditBasis:
         finally:
             shutil.rmtree(ws)
 
-    def test_zero_candidates_conflict_basis(self):
+    def test_target_not_found_conflict_basis(self):
+        """Attach a una instancia inexistente → CONFLICT basis target_not_found."""
         ws = _mk_workspace({})
         si = StructuralIndex.empty()
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "Nope"},
+        }}
         try:
             fops = [_create("components/FilterPanel.tsx")]
-            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            _mo, _un, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
             assert len(conflicts) == 1
             rec = decisions["FilterPanel"]
             assert rec["decision"] == "conflict"
-            assert rec["basis"] == "physical_exclusion_conflict"
+            assert rec["basis"] == "target_not_found"
             assert rec["authority"] == "physical"
         finally:
             shutil.rmtree(ws)
 
     def test_n_candidates_conflict_basis(self):
+        """Attach cuya etiqueta matchea 2 páginas → CONFLICT basis target_ambiguity."""
         ws = _mk_workspace({
-            "pages/dashboard/Page.tsx": RICH_PAGE,
-            "pages/marketing/Page.tsx": RICH_PAGE,
+            "pages/sales/SalesOverviewPage.tsx": RICH_PAGE,
+            "pages/marketing/SalesOverviewPage.tsx": RICH_PAGE,
         })
-        si = _si_with_page("pages/dashboard/Page.tsx", "pages/marketing/Page.tsx")
+        si = _si_with_page("pages/sales/SalesOverviewPage.tsx", "pages/marketing/SalesOverviewPage.tsx")
+        attach_map = {"presentation.filter_panel": {
+            "target": {"capability": "layout.page", "instance_label": "SalesOverviewPage"},
+        }}
         try:
             fops = [_create("components/FilterPanel.tsx")]
-            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            _mo, _un, decisions, conflicts = resolve_anchors(
+                fops, si, ws, attach_map=attach_map,
+            )
             assert len(conflicts) == 1
             rec = decisions["FilterPanel"]
             assert rec["decision"] == "conflict"
-            assert rec["basis"] == "physical_exclusion_conflict"
+            assert rec["basis"] == "target_ambiguity"
             assert rec["authority"] == "physical"
         finally:
             shutil.rmtree(ws)
@@ -594,7 +682,9 @@ class TestG2AuditBasis:
         )
         try:
             fops = [renderer_modify, _create("components/KpiRow.tsx")]
-            _mo, _un, decisions, conflicts = resolve_anchors(fops, si, ws)
+            _mo, _un, decisions, conflicts = resolve_anchors(
+                fops, si, ws, composition_map={"presentation.kpi_row": "layout.page"},
+            )
             assert conflicts == []
             rec = decisions["KpiRow"]
             assert rec["decision"] == "composed_skip"

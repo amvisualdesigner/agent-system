@@ -159,6 +159,9 @@ def build_plan_from_actions(
         }
         if a.get("instance_hint"):
             entry["instance_hint"] = a["instance_hint"]
+        if a.get("attach"):
+            from app.intent.models import AttachRef
+            entry["attach"] = AttachRef.from_dict(a["attach"])
         clean.append(IntentAction(**entry))
 
     confirmed = ConfirmedIntent(
