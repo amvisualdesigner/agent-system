@@ -277,7 +277,7 @@ class TestCompleteStructureStrictFail:
         """Phase 3: explicit modify intent resolves params and produces STRICT_FAIL mode."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"], "dimensions": ["region"]},
-            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8}],
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8, "target_capability": "domain.sales"}],
         )
         contract = make_contract(
             params={"metrics": ["net_revenue"], "dimensions": ["region"]},
@@ -297,7 +297,7 @@ class TestCompleteStructureSafeSkip:
         """Phase 3: explicit modify + low confidence → SAFE_SKIP + warning."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]}, confidence=0.5,
-            actions=[{"verb": "modify", "object": "sales", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.5, "target_capability": "domain.sales"}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -310,7 +310,7 @@ class TestCompleteStructureSafeSkip:
         """Phase 3: explicit modify on kpi resolves params even when domain is skipped."""
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]}, confidence=0.5,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5, "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -327,7 +327,7 @@ class TestCompleteStructureSafeComplete:
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5, "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -337,7 +337,7 @@ class TestCompleteStructureSafeComplete:
         """timeseries gets metric via slot mapping: metric ← timeseries_metric."""
         semantic = make_semantic(
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5, "target_capability": "presentation.timeseries"}],
         )
         contract = make_contract(
             params={"timeseries_metric": "growth"},
@@ -350,7 +350,7 @@ class TestCompleteStructureSafeComplete:
         """Without SkillIR, contract default 'revenue' flows via slot mapping."""
         semantic = make_semantic(
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5, "target_capability": "presentation.timeseries"}],
         )
         # Create ContractResolution from SkillIR without timeseries_metric
         from app.contracts.skill_ir import SkillIR
@@ -369,7 +369,7 @@ class TestCompleteStructureSafeComplete:
         """No semantic, no contract params → contract input_schema default 'revenue' via slot mapping."""
         semantic = make_semantic(
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5, "target_capability": "presentation.timeseries"}],
         )
         contract = make_contract(confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -383,7 +383,7 @@ class TestCompleteStructureSafeComplete:
         semantic = make_semantic(
             params={"time_granularity": "monthly"},
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "timeseries", "confidence": 0.5, "target_capability": "presentation.timeseries"}],
         )
         contract = make_contract(params={"timeseries_metric": "revenue"}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -408,7 +408,7 @@ class TestCompleteStructureSafeComplete:
         """Phase 3: explicit modify intent resolves table columns from semantic."""
         semantic = make_semantic(
             params={"columns": ["revenue", "growth"]},
-            actions=[{"verb": "modify", "object": "table", "confidence": 0.8}],
+            actions=[{"verb": "modify", "object": "table", "confidence": 0.8, "target_capability": "presentation.table"}],
         )
         contract = make_contract(params={"columns": ["revenue", "growth"]})
         ready = complete_structure(semantic, contract, table_contract)
@@ -418,7 +418,7 @@ class TestCompleteStructureSafeComplete:
         """When semantic layer has no metrics, contract provides them via slot mapping."""
         semantic = make_semantic(
             confidence=0.5,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.5, "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.5)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -429,7 +429,7 @@ class TestCompleteStructureSafeComplete:
         semantic = make_semantic(
             params={"metrics": ["user_specified_metric"]},
             confidence=0.8,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.8}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.8, "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["contract_default"]}, confidence=0.8)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -449,7 +449,7 @@ class TestCompleteStructureHintAugmentation:
         contract = make_contract(confidence=0.5)
         frame = {
             "objects": [{"type": "table", "confidence": 0.9}],
-            "actions": [{"verb": "show", "object": "table", "confidence": 0.8}],
+            "actions": [{"verb": "show", "object": "table", "confidence": 0.8, "target_capability": "presentation.table"}],
         }
         ready = complete_structure(semantic, contract, dashboard_contract, frame_dict=frame)
         assert "presentation.table" in _cap_names(ready)
@@ -523,7 +523,7 @@ class TestStructuralIR:
         semantic = make_semantic(
             params={"metrics": ["net_revenue"]},
             confidence=0.8,
-            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8}],
+            actions=[{"verb": "modify", "object": "sales", "confidence": 0.8, "target_capability": "domain.sales"}],
         )
         contract = make_contract(params={"metrics": ["net_revenue"]}, confidence=0.8)
         ready = complete_structure(semantic, contract, dashboard_contract)
@@ -589,8 +589,8 @@ class TestPipelineInvariants:
             params={"metrics": ["net_revenue"], "time_granularity": "monthly"},
             confidence=0.8,
             actions=[
-                {"verb": "modify", "object": "kpi", "confidence": 0.8},
-                {"verb": "modify", "object": "timeseries", "confidence": 0.8},
+                {"verb": "modify", "object": "kpi", "confidence": 0.8, "target_capability": "presentation.kpi_row"},
+                {"verb": "modify", "object": "timeseries", "confidence": 0.8, "target_capability": "presentation.timeseries"},
             ],
         )
         contract = make_contract(
@@ -654,52 +654,6 @@ class TestPipelineInvariants:
 # ═══════════════════════════════════════════════════════════════════
 
 
-class TestActionMatching:
-    """_match_actions_to_capabilities — Step A."""
-
-    def test_matches_by_object_keywords(self, dashboard_contract):
-        from app.engine.structural_completion import _match_actions_to_capabilities
-        caps = ["presentation.kpi_row", "presentation.timeseries", "layout.page"]
-        result = _match_actions_to_capabilities(
-            [{"verb": "modify", "object": "kpi"}], caps, dashboard_contract,
-        )
-        assert result == {"presentation.kpi_row": "modify"}
-
-    def test_matches_by_template_key(self, dashboard_contract):
-        from app.engine.structural_completion import _match_actions_to_capabilities
-        caps = ["presentation.kpi_row", "presentation.timeseries", "layout.page"]
-        result = _match_actions_to_capabilities(
-            [{"verb": "create", "object": "dashboard"}], caps, dashboard_contract,
-        )
-        assert result == {"layout.page": "create"}
-
-    def test_matches_multiple_actions(self, dashboard_contract):
-        from app.engine.structural_completion import _match_actions_to_capabilities
-        caps = ["presentation.kpi_row", "presentation.timeseries",
-                 "presentation.filter_panel", "layout.page"]
-        result = _match_actions_to_capabilities([
-            {"verb": "remove", "object": "timeseries"},
-            {"verb": "add", "object": "filter"},
-        ], caps, dashboard_contract)
-        assert result == {
-            "presentation.timeseries": "remove",
-            "presentation.filter_panel": "add",
-        }
-
-    def test_no_match_returns_empty(self, dashboard_contract):
-        from app.engine.structural_completion import _match_actions_to_capabilities
-        caps = ["presentation.kpi_row", "presentation.timeseries"]
-        result = _match_actions_to_capabilities(
-            [{"verb": "modify", "object": "unknown"}], caps, dashboard_contract,
-        )
-        assert result == {}
-
-    def test_empty_actions_returns_empty(self, dashboard_contract):
-        from app.engine.structural_completion import _match_actions_to_capabilities
-        caps = ["presentation.kpi_row"]
-        result = _match_actions_to_capabilities([], caps, dashboard_contract)
-        assert result == {}
-
 
 class TestActionLifecycle:
     """_resolve_action — Step B deterministic rules."""
@@ -756,7 +710,7 @@ class TestCompleteStructureWithActions:
             semantic_params={"metrics": ["revenue"]},
             semantic_provenance={"metrics": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "create", "object": "kpi", "confidence": 0.9}],
+            actions=[{"verb": "create", "object": "kpi", "confidence": 0.9, "target_capability": "presentation.kpi_row"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
@@ -787,7 +741,7 @@ class TestCompleteStructureWithActions:
             semantic_params={"metrics": ["growth"]},
             semantic_provenance={"metrics": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9, "target_capability": "presentation.kpi_row"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metrics": ["growth"]}, "dashboard.sales_overview"), dashboard_contract,
@@ -803,7 +757,7 @@ class TestCompleteStructureWithActions:
             semantic_params={},
             semantic_provenance={},
             confidence=0.9,
-            actions=[{"verb": "remove", "object": "timeseries", "confidence": 0.9}],
+            actions=[{"verb": "remove", "object": "timeseries", "confidence": 0.9, "target_capability": "presentation.timeseries"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
@@ -823,7 +777,8 @@ class TestCompleteStructureWithActions:
             semantic_params={},
             semantic_provenance={},
             confidence=0.9,
-            actions=[{"verb": "remove", "object": "barchart", "confidence": 0.9}],
+            actions=[{"verb": "remove", "object": "barchart", "confidence": 0.9,
+                    "target_capability": "presentation.chart.bar"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
@@ -872,7 +827,7 @@ class TestCompositionSync:
             semantic_params={"metric": "revenue"},
             semantic_provenance={"metric": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9}],
+            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9, "target_capability": "presentation.timeseries"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,
@@ -891,7 +846,7 @@ class TestCompositionSync:
             semantic_params={},
             semantic_provenance={},
             confidence=0.9,
-            actions=[{"verb": "remove", "object": "kpi", "confidence": 0.9}],
+            actions=[{"verb": "remove", "object": "kpi", "confidence": 0.9, "target_capability": "presentation.kpi_row"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
@@ -915,7 +870,7 @@ class TestCompositionSync:
             semantic_params={},
             semantic_provenance={},
             confidence=0.9,
-            actions=[{"verb": "remove", "object": "dashboard", "confidence": 0.9}],
+            actions=[{"verb": "remove", "object": "dashboard", "confidence": 0.9, "target_capability": "layout.page"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({}, "dashboard.sales_overview"), dashboard_contract,
@@ -936,7 +891,7 @@ class TestCompositionSync:
             semantic_params={"metrics": ["revenue"]},
             semantic_provenance={"metrics": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9}],
+            actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9, "target_capability": "presentation.kpi_row"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metrics": ["revenue"]}, "dashboard.sales_overview"), dashboard_contract,
@@ -956,7 +911,7 @@ class TestCompositionSync:
             semantic_params={"columns": ["A", "B"]},
             semantic_provenance={"columns": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "create", "object": "table", "confidence": 0.9}],
+            actions=[{"verb": "create", "object": "table", "confidence": 0.9, "target_capability": "presentation.table"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"columns": ["A", "B"]}, "analytics.table"), table_contract,
@@ -978,8 +933,8 @@ class TestCompositionSync:
             semantic_provenance={"metric": "user_explicit"},
             confidence=0.9,
             actions=[
-                {"verb": "modify", "object": "dashboard", "confidence": 0.9},
-                {"verb": "create", "object": "timeseries", "confidence": 0.9},
+                {"verb": "modify", "object": "dashboard", "confidence": 0.9, "target_capability": "layout.page"},
+                {"verb": "create", "object": "timeseries", "confidence": 0.9, "target_capability": "presentation.timeseries"},
             ],
         )
         contract_res = ContractResolution.from_skillir(
@@ -1003,7 +958,7 @@ class TestCompositionSync:
             semantic_params={"metric": "revenue"},
             semantic_provenance={"metric": "user_explicit"},
             confidence=0.9,
-            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9}],
+            actions=[{"verb": "create", "object": "timeseries", "confidence": 0.9, "target_capability": "presentation.timeseries"}],
         )
         contract_res = ContractResolution.from_skillir(
             MockSkillIR({"metric": "revenue"}, "dashboard.sales_overview"), dashboard_contract,

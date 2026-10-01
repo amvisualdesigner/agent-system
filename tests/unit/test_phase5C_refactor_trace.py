@@ -124,7 +124,8 @@ class TestCompositionSyncTrace:
     def test_trace_is_present(self, contract_with_composition):
         sem = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                    "target_capability": "presentation.kpi_row"}],
         )
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
@@ -136,7 +137,8 @@ class TestCompositionSyncTrace:
     def test_trace_contains_refactor_change_instances(self, contract_with_composition):
         sem = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                    "target_capability": "presentation.kpi_row"}],
         )
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
@@ -148,7 +150,8 @@ class TestCompositionSyncTrace:
     def test_composition_sync_change_type(self, contract_with_composition):
         sem = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                    "target_capability": "presentation.kpi_row"}],
         )
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
@@ -160,7 +163,8 @@ class TestCompositionSyncTrace:
     def test_trace_is_frozen(self, contract_with_composition):
         sem = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                    "target_capability": "presentation.kpi_row"}],
         )
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
@@ -223,7 +227,8 @@ class TestRefactorChangesFromSubstitution:
         """composition_sync_trace from complete_structure is a tuple of RefactorChange."""
         sem = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                    "target_capability": "presentation.kpi_row"}],
         )
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 

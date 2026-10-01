@@ -97,7 +97,8 @@ class TestStructuralIndexInvariance:
     def test_no_delete_without_remove(self, contract, sir, workspace_with_kpi):
         """StructuralIndex nunca produce DELETE si no hay 'remove' en intent."""
         sf = {
-            "actions": [{"verb": "modify", "object": "layout", "params": {}}],
+            "actions": [{"verb": "modify", "object": "layout", "params": {},
+              "target_capability": "layout.page"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)
@@ -114,7 +115,8 @@ class TestStructuralIndexInvariance:
     def test_delete_only_with_remove(self, contract, sir, workspace_with_kpi):
         """Control: 'remove' produce DELETE — solo bajo esa condicion."""
         sf = {
-            "actions": [{"verb": "remove", "object": "kpi", "params": {}}],
+            "actions": [{"verb": "remove", "object": "kpi", "params": {},
+              "target_capability": "presentation.kpi_row"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)
@@ -132,7 +134,8 @@ class TestStructuralIndexInvariance:
     def test_create_on_existing_produces_create(self, contract, sir, workspace_with_kpi):
         """Phase 3: CREATE on existing → action=CREATE (reconciliation moves to ApplyEngine)."""
         sf = {
-            "actions": [{"verb": "create", "object": "kpi", "params": {}}],
+            "actions": [{"verb": "create", "object": "kpi", "params": {},
+              "target_capability": "presentation.kpi_row"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)
@@ -148,7 +151,8 @@ class TestStructuralIndexInvariance:
     def test_create_without_index_produces_create(self, contract, sir, workspace_with_kpi):
         """CREATE sin index → action=CREATE (reality desconocida)."""
         sf = {
-            "actions": [{"verb": "create", "object": "timeseries", "params": {}}],
+            "actions": [{"verb": "create", "object": "timeseries", "params": {},
+              "target_capability": "presentation.timeseries"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)
@@ -166,7 +170,8 @@ class TestStructuralIndexInvariance:
     def test_index_never_escalates_to_delete(self, contract, sir, workspace_with_kpi):
         """CREATE never becomes DELETE through index."""
         sf = {
-            "actions": [{"verb": "create", "object": "kpi", "params": {}}],
+            "actions": [{"verb": "create", "object": "kpi", "params": {},
+              "target_capability": "presentation.kpi_row"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)
@@ -181,7 +186,8 @@ class TestStructuralIndexInvariance:
     def test_index_never_escalates_modify_to_delete(self, contract, sir, workspace_with_kpi):
         """MODIFY never becomes DELETE through index."""
         sf = {
-            "actions": [{"verb": "modify", "object": "kpi", "params": {}}],
+            "actions": [{"verb": "modify", "object": "kpi", "params": {},
+              "target_capability": "presentation.kpi_row"}],
             "params": {"metrics": ["revenue"]},
         }
         result = _run(sf, sir, contract)

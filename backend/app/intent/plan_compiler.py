@@ -163,6 +163,11 @@ def _build_semantic_frame_from_actions(
             "direct_object": obj,
             "confidence": action.confidence,
         }
+        # WHAT authority (S2·F4): target_capability viaja explícitamente al
+        # frame. Tras la confirmación es la ÚNICA fuente de la capability —
+        # `object`/`direct_object` quedan como provenance/audit y para la
+        # propuesta previa, nunca como autoridad de WHAT.
+        frame_action["target_capability"] = action.target_capability
         if action.instance_hint:
             frame_action["instance_hint"] = action.instance_hint
         if action.attach:
@@ -171,6 +176,11 @@ def _build_semantic_frame_from_actions(
         src = action.source_capability or action.params.get("source", "")
         if src:
             frame_action["reference"] = src
+            # S2·F4: identidad explícita de la capability SUSTITUIDA. La
+            # sustitución es proyección determinista del Plan: source va en
+            # source_capability y target en target_capability. `reference`
+            # queda como provenance/audit y para el anchor WHERE de MOVE.
+            frame_action["source_capability"] = src
         frame_actions.append(frame_action)
         objects.append({
             "type": obj,

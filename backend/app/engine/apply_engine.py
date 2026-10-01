@@ -299,10 +299,11 @@ def _is_functional_action(verb: str) -> bool:
 def _detect_dropped_actions(plan: dict, contract, semantic_resolution=None) -> list[dict]:
     """Detecta acciones del plan que el contrato no puede expresar.
 
-    Una acción se considera DROPPED si su target capability no está en el
-    universo expresable del contrato (contract caps + soft-augment +
-    closed-world match). Usa exactamente las mismas fuentes que
-    complete_structure() para no introducir una nueva autoridad semántica.
+    Una acción se considera DROPPED si su target_capability no está en el
+    universo expresable del contrato (contract caps + soft-augment). Usa
+    exactamente las mismas fuentes que complete_structure() para no introducir
+    una nueva autoridad semántica. S2·F4: sin matching — la validación compara
+    el target confirmado, nunca lo re-deriva.
 
     Returns: lista de dicts {verb, object, target_capability} caídos.
       Vacía → sin drop (flujo actual intacto).
@@ -310,7 +311,6 @@ def _detect_dropped_actions(plan: dict, contract, semantic_resolution=None) -> l
     from app.engine.structural_completion import (
         _augment_capabilities,
         _infer_capabilities_from_contract,
-        _match_actions_to_capabilities,
     )
 
     if not isinstance(plan, dict):
@@ -325,8 +325,6 @@ def _detect_dropped_actions(plan: dict, contract, semantic_resolution=None) -> l
     expressible = set(contract_caps)
     if semantic_resolution is not None:
         expressible.update(_augment_capabilities(contract_caps, semantic_resolution, None, frame))
-    matched = _match_actions_to_capabilities(frame_actions, contract_caps, contract)
-    expressible.update(matched)
 
     top_actions = plan.get("actions") or []
     if not isinstance(top_actions, list):
@@ -341,19 +339,13 @@ def _detect_dropped_actions(plan: dict, contract, semantic_resolution=None) -> l
         target = ""
         if idx < len(top_actions) and isinstance(top_actions[idx], dict):
             target = (top_actions[idx].get("target_capability") or "").strip()
-        if target:
-            if target not in expressible:
-                dropped.append({
-                    "verb": verb, "object": obj, "target_capability": target,
-                })
-        else:
-            # Legacy shape sin plan["actions"]: la acción es expresable si el
-            # matcher closed-world la casó con alguna capability del contrato.
-            per_action = _match_actions_to_capabilities([fa], contract_caps, contract)
-            if not per_action:
-                dropped.append({
-                    "verb": verb, "object": obj, "target_capability": target,
-                })
+        # S2·F4: sin target_capability confirmado no hay WHAT → dropped
+        # (CONFLICT). Nunca se re-deriva por matching.
+        if target and target in expressible:
+            continue
+        dropped.append({
+            "verb": verb, "object": obj, "target_capability": target or obj,
+        })
 
     return dropped
 
@@ -547,8 +539,37 @@ def validate_fileop_plan_provenance(
     sync_parents = {c.target for c in structural_ir.composition_sync_trace}
 
     violations: list[str] = []
+    # S2·F4: los FileOps de sustitución NO están exentos de provenance. Cada
+    # uno debe ser trazable a un SubstitutionOp del Plan confirmado
+    # (source_capability → target_capability). Así ninguna capability
+    # materializable puede entrar por una ruta que no venga del Plan.
+    sub_pairs = {(s.source, s.target) for s in getattr(structural_ir, "substitution_ops", ())}
+    sub_targets = {t for _s, t in sub_pairs}
+
     for fop in fileops:
-        if fop.pipeline_route in ("infrastructure", "substitution"):
+        if fop.pipeline_route == "infrastructure":
+            continue
+        if fop.pipeline_route == "substitution":
+            meta = fop.metadata or {}
+            if fop.action == "create":
+                cap = meta.get("target_capability")
+                if not cap or cap not in sub_targets:
+                    violations.append(
+                        f"{fop.path}: substitution create is not traceable to a "
+                        f"confirmed Plan action (target_capability={cap!r})"
+                    )
+                continue
+            if fop.action == "modify":
+                pair = (meta.get("old_capability"), meta.get("new_capability"))
+                if pair not in sub_pairs:
+                    violations.append(
+                        f"{fop.path}: substitution modify {pair[0]} → {pair[1]} is "
+                        f"not traceable to a confirmed Plan action"
+                    )
+                continue
+            violations.append(
+                f"{fop.path}: substitution FileOp with action '{fop.action}'"
+            )
             continue
         cap = _capability_from_path(fop.path)
         if cap is None:
@@ -1192,6 +1213,75 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             "execution": {"status": "rejected", "reason": "no_semantic_frame", "diff": None, "operations": []},
             "context": {"repo_snapshot": []},
         }
+
+    # ── Preflight: Confirmed Plan es la ÚNICA autoridad del WHAT (S2·F4) ──
+    # Toda acción confirmada debe traer target_capability, y plan["actions"]
+    # debe cubrir las acciones funcionales del frame (proyección 1:1). Si algo
+    # falla → CONFLICT tipificado. Nunca se infiere desde verb/object ni se
+    # sustituye por una capability parecida.
+    confirmed_actions = plan.get("actions")
+    frame_actions = (plan.get("semantic_frame") or {}).get("actions") or []
+    functional_frame = [
+        _f for _f in frame_actions
+        if isinstance(_f, dict) and _is_functional_action(
+            (_f.get("verb") or "").strip().lower()
+        )
+    ]
+    if not isinstance(confirmed_actions, list):
+        confirmed_actions = []
+
+    _plan_shape_error: str | None = None
+    if functional_frame and len(confirmed_actions) < len(functional_frame):
+        _plan_shape_error = (
+            f"plan['actions'] has {len(confirmed_actions)} entries but the "
+            f"confirmed frame declares {len(functional_frame)} functional "
+            f"actions — the Confirmed Plan is the only WHAT authority"
+        )
+    if _plan_shape_error is None:
+        for _a in confirmed_actions:
+            if isinstance(_a, dict) and not (_a.get("target_capability") or "").strip():
+                _plan_shape_error = (
+                    f"confirmed action '{_a.get('verb') or '?'}' has no "
+                    f"target_capability — the Confirmed Plan is the only WHAT "
+                    f"authority (no inference, no fallback). Recompile the plan."
+                )
+                break
+    if _plan_shape_error is None:
+        # El frame es el transporte del WHAT: si pierde el target, el Plan es
+        # inválido aunque plan['actions'] lo traiga (mismo conflicto tipificado,
+        # nunca un handler genérico). La identidad plan↔frame es 1:1 por orden.
+        for _i, _f in enumerate(frame_actions):
+            if not isinstance(_f, dict):
+                continue
+            _fverb = (_f.get("verb") or "").strip().lower()
+            if not _fverb or not _is_functional_action(_fverb):
+                continue
+            _ftarget = (_f.get("target_capability") or "").strip()
+            _ptarget = ""
+            if _i < len(confirmed_actions) and isinstance(confirmed_actions[_i], dict):
+                _ptarget = (confirmed_actions[_i].get("target_capability") or "").strip()
+            if not _ftarget:
+                _plan_shape_error = (
+                    f"frame action {_i} ('{_fverb}') has no target_capability "
+                    f"— the Confirmed Plan is the only WHAT authority "
+                    f"(no inference, no fallback). Recompile the plan."
+                )
+                break
+            if _ptarget and _ftarget != _ptarget:
+                _plan_shape_error = (
+                    f"frame action {_i} target_capability '{_ftarget}' does not "
+                    f"match plan action target_capability '{_ptarget}' — the "
+                    f"Confirmed Plan is the only WHAT authority"
+                )
+                break
+
+    if _plan_shape_error:
+        return FallbackExecutionRequest(
+            reason=f"invalid_confirmed_plan: {_plan_shape_error}",
+            conflict_type="invalid_confirmed_plan",
+            level=2,
+            details={"invalid_plan_actions": confirmed_actions},
+        ).to_result()
 
     # ── Build ExecutionContext ──
     exec_ctx = ExecutionContext(

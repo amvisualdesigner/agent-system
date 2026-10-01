@@ -573,7 +573,8 @@ class TestCompositionChildExpansion:
 
         idx = StructuralIndex.from_worktree("/opt/agent-repos/agent-test-repo")
         sem = SemanticResolution(
-            actions=[{"verb": "create", "object": "line", "confidence": 1.0}],
+            actions=[{"verb": "create", "object": "line", "confidence": 1.0,
+             "target_capability": "presentation.timeseries"}],
             semantic_params={"timeseries_metric": "revenue"},
             semantic_provenance={},
             confidence=1.0,
@@ -624,7 +625,9 @@ class TestCompositionChildExpansion:
 
         idx = StructuralIndex.from_worktree("/opt/agent-repos/agent-test-repo")
         sem = SemanticResolution(
-            actions=[{"verb": "remove", "object": "timeseries", "confidence": 1.0, "instance_hint": "linechart"}],
+            actions=[{"verb": "remove", "object": "timeseries", "confidence": 1.0,
+             "instance_hint": "linechart",
+             "target_capability": "presentation.timeseries"}],
             semantic_params={},
             semantic_provenance={},
             confidence=1.0,

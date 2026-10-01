@@ -285,6 +285,7 @@ class FallbackExecutionRequest:
         "anchor_ambiguity",
         "target_ambiguity",
         "target_not_found",
+        "invalid_confirmed_plan",
     ]
     level: int  # 0=info, 1=warning, 2=blocking
     details: dict = field(default_factory=dict)

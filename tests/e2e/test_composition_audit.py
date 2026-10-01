@@ -301,7 +301,9 @@ class TestCompositionReplace:
 
         struktural = complete_structure(
             semantic_resolution=SemanticResolution(
-                actions=[{"verb": "replace", "object": "timeseries", "reference": "kpi"}],
+                actions=[{"verb": "replace", "object": "timeseries", "reference": "kpi",
+                    "source_capability": "presentation.timeseries",
+                    "target_capability": "presentation.kpi_row"}],
                 semantic_params={},
                 semantic_provenance={},
                 confidence=1.0,
@@ -331,7 +333,9 @@ class TestCompositionReplace:
 
         struktural = complete_structure(
             semantic_resolution=SemanticResolution(
-                actions=[{"verb": "replace", "object": "timeseries", "reference": "kpi"}],
+                actions=[{"verb": "replace", "object": "timeseries", "reference": "kpi",
+                    "source_capability": "presentation.timeseries",
+                    "target_capability": "presentation.kpi_row"}],
                 semantic_params={},
                 semantic_provenance={},
                 confidence=1.0,

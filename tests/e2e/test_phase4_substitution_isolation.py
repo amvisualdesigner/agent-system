@@ -28,7 +28,6 @@ from app.engine.structural_completion import (
     _extract_substitution_ops,
     _resolve_action,
     _infer_capabilities_from_contract,
-    _match_actions_to_capabilities,
     complete_structure,
 )
 from app.contracts.semantic_resolution import SemanticResolution
@@ -127,7 +126,9 @@ class TestBackdoorA_TargetLifecycleContamination:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "source_capability": "presentation.kpi_row",
+                  "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -136,8 +137,13 @@ class TestBackdoorA_TargetLifecycleContamination:
         # substitution_ops debe estar poblado
         assert len(ir.substitution_ops) > 0, "REPLACE debe producir SubstitutionOp"
         sub = ir.substitution_ops[0]
+        # F3: source_capability = SUSTITUIDA, target_capability = NUEVA
         assert sub.source == "presentation.kpi_row"
         assert sub.target == "presentation.chart.bar"
+        # S2·F4: identidad desde el Plan. object/reference no pueden invertirla.
+        assert not (sub.source == "presentation.chart.bar"
+                    and sub.target == "presentation.kpi_row"), (
+            "source/target invertidos: el matching textual no decide el WHAT")
 
         # INVARIANTE: target NO debe aparecer en capabilities lifecycle
         target_rc = _cap(ir, sub.target)
@@ -155,7 +161,8 @@ class TestBackdoorA_TargetLifecycleContamination:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -176,7 +183,8 @@ class TestBackdoorA_TargetLifecycleContamination:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -194,7 +202,8 @@ class TestBackdoorA_TargetLifecycleContamination:
         """REPLACE no debe producir DELETE de la source en operations."""
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -230,7 +239,8 @@ class TestBackdoorB_ImportRedirectBoundary:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -265,7 +275,9 @@ class TestBackdoorB_ImportRedirectBoundary:
             "layout.page",
         ]
         actions = [
-            {"verb": "replace", "object": "kpi", "reference": "bar chart"},
+            {"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "source_capability": "presentation.kpi_row",
+                  "target_capability": "presentation.chart.bar"},
         ]
         resolution = SemanticResolution(
             semantic_params={"metrics": ["revenue"]},
@@ -279,8 +291,53 @@ class TestBackdoorB_ImportRedirectBoundary:
         assert len(ops) == 1
         assert ops[0].source == "presentation.kpi_row"
         assert ops[0].target == "presentation.chart.bar"
+        # S2·F4: los extremos vienen del Plan, no de object/reference.
+        assert (ops[0].source, ops[0].target) == (
+            actions[0]["source_capability"], actions[0]["target_capability"],
+        )
+        assert ops[0].source != "presentation.chart.bar"
         # SubstitutionOp no tiene action lifecycle
         assert not hasattr(ops[0], 'action')
+
+    def test_extract_substitution_ops_never_inverts_from_text(self):
+        """El texto NO puede invertir source/target (S2·F4).
+
+        action = replace(kpi ← bar chart). Matching textual inversion
+        (object↔reference) daría source=chart.bar, target=kpi_row.
+        """
+        actions = [
+            {"verb": "replace", "object": "bar chart", "reference": "kpi",
+                  "source_capability": "presentation.kpi_row",
+                  "target_capability": "presentation.chart.bar"},
+        ]
+        resolution = SemanticResolution(
+            semantic_params={"metrics": ["revenue"]},
+            semantic_provenance={"metrics": "test"},
+            confidence=0.8,
+            actions=actions,
+        )
+        ops = _extract_substitution_ops(resolution, [
+            "presentation.kpi_row", "presentation.chart.bar", "layout.page",
+        ])
+        assert len(ops) == 1
+        assert ops[0].source == "presentation.kpi_row"
+        assert ops[0].target == "presentation.chart.bar"
+
+    def test_extract_substitution_ops_requires_explicit_source(self):
+        """Sin source_capability NO hay op: no se reconstruye por texto."""
+        actions = [
+            {"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.chart.bar"},
+        ]
+        resolution = SemanticResolution(
+            semantic_params={"metrics": ["revenue"]},
+            semantic_provenance={"metrics": "test"},
+            confidence=0.8,
+            actions=actions,
+        )
+        assert _extract_substitution_ops(resolution, [
+            "presentation.kpi_row", "presentation.chart.bar", "layout.page",
+        ]) == []
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -305,7 +362,8 @@ class TestBackdoorC_FilesystemVsLifecycle:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -338,7 +396,8 @@ class TestBackdoorC_FilesystemVsLifecycle:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -380,7 +439,8 @@ class TestSubstitutionBoundedEffects:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -411,7 +471,8 @@ class TestSubstitutionBoundedEffects:
 
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -454,7 +515,8 @@ class TestSubstitutionFailureConsistency:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -494,7 +556,8 @@ class TestEndToEndIsolation:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -516,8 +579,10 @@ class TestEndToEndIsolation:
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
             actions=[
-                {"verb": "replace", "object": "kpi", "reference": "bar chart"},
-                {"verb": "remove", "object": "timeseries"},
+                {"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"},
+                {"verb": "remove", "object": "timeseries",
+                  "target_capability": "presentation.timeseries"},
             ],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
@@ -569,7 +634,8 @@ class TestEndToEndIsolation:
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
             actions=[
-                {"verb": "replace", "object": "kpi", "reference": "bar chart"},
+                {"verb": "replace", "object": "kpi", "reference": "bar chart",
+                  "target_capability": "presentation.kpi_row"},
             ],
         )
         contract = make_contract(params={"metrics": ["revenue"]})

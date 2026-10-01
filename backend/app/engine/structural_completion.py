@@ -455,144 +455,6 @@ def validate_contract_repo_consistency(
     return warnings
 
 
-def _match_actions_to_capabilities(
-    actions: list[dict],
-    contract_caps: list[str],
-    contract: SkillContract | None = None,
-) -> dict[str, str]:
-    """Step A: Match action objects to capability names.
-
-    Phase 3: contract-first closed-world. Solo contract_caps.
-    No repo expansion. StructuralIndex es post-hoc.
-
-    1. target_hint → match directo
-    2. OBJECT_KEYWORDS mapping (e.g., "kpi" → "kpi_row")
-    3. Capability suffix (e.g., "table" → "presentation.table")
-    4. Contract template keys (e.g., "Page" → "layout.page")
-    5. Direct substring match
-
-    Returns: {capability_name: action_verb}
-    """
-    from app.graphir.semantic_frame import _OBJECT_KEYWORDS
-
-    matched: dict[str, str] = {}
-
-    # Universo de targets: solo contract caps (Phase 3 closed-world)
-    all_targets_list = sorted(set(contract_caps))
-
-    # Build reverse lookup from contract template keys (e.g., "Page" → "layout.page")
-    template_reverse: dict[str, str] = {}
-    if contract is not None:
-        for key, val in contract.ast_template.get("capabilities", {}).items():
-            template_reverse[key.lower()] = val
-
-    # Semantic aliases: objects that don't directly map via OBJECT_KEYWORDS
-    # but are clearly the same concept (e.g., "dashboard" → "page")
-    SEMANTIC_ALIASES: dict[str, str] = {
-        "dashboard": "page",
-    }
-
-    for action in actions:
-        verb = action.get("verb", "")
-        obj = action.get("object", "")
-        target_hint = action.get("target_hint", "")
-
-        if not verb:
-            continue
-
-        # Express lane: target_hint pre-resuelto contra contract caps
-        if target_hint and target_hint in all_targets:
-            matched[target_hint] = verb
-            continue
-
-        if not obj:
-            continue
-
-        obj_lower = obj.lower()
-        aliases = {obj_lower, SEMANTIC_ALIASES.get(obj_lower, "")} - {""}
-
-        for cap in all_targets_list:
-            if cap in matched:
-                continue
-            cap_lower = cap.lower()
-
-            # 1. OBJECT_KEYWORDS → short type in capability name
-            obj_type = _OBJECT_KEYWORDS.get(obj_lower)
-            if obj_type and obj_type in cap_lower:
-                matched[cap] = verb
-                continue
-
-            # 2. Suffix map match: suffix key in object or object in suffix key
-            # e.g., "bar" (suffix of presentation.chart.bar) in "barchart" → match
-            suffix_key = cap.rsplit(".", 1)[-1].lower()
-            # Check: suffix is in object, or object is in suffix
-            if suffix_key in obj_lower or obj_lower in suffix_key or obj_lower == suffix_key:
-                matched[cap] = verb
-                continue
-
-            # 3. Direct substring: object or alias in capability name
-            if any(a in cap_lower for a in aliases):
-                matched[cap] = verb
-                continue
-
-            # 4. Contract template key matches (e.g., "page" → "layout.page")
-            if any(a in template_reverse and template_reverse[a] == cap for a in aliases):
-                matched[cap] = verb
-                continue
-
-    return matched
-
-
-def _match_single_capability(
-    action: dict,
-    contract_caps: list[str],
-    contract: SkillContract | None = None,
-) -> str | None:
-    """Match ONE semantic action to a capability (Step A per-action).
-
-    Reutiliza las mismas reglas que _match_actions_to_capabilities para
-    enlazar metadata por acción (p.ej. attach) de forma determinista.
-    """
-    from app.graphir.semantic_frame import _OBJECT_KEYWORDS
-
-    verb = action.get("verb", "")
-    obj = action.get("object", "")
-    target_hint = action.get("target_hint", "")
-
-    if not verb:
-        return None
-
-    all_targets_list = sorted(set(contract_caps))
-    if target_hint and target_hint in all_targets_list:
-        return target_hint
-
-    if not obj:
-        return None
-
-    template_reverse: dict[str, str] = {}
-    if contract is not None:
-        for key, val in contract.ast_template.get("capabilities", {}).items():
-            template_reverse[key.lower()] = val
-
-    SEMANTIC_ALIASES: dict[str, str] = {"dashboard": "page"}
-    obj_lower = obj.lower()
-    aliases = {obj_lower, SEMANTIC_ALIASES.get(obj_lower, "")} - {""}
-
-    for cap in all_targets_list:
-        cap_lower = cap.lower()
-        obj_type = _OBJECT_KEYWORDS.get(obj_lower)
-        if obj_type and obj_type in cap_lower:
-            return cap
-        suffix_key = cap.rsplit(".", 1)[-1].lower()
-        if suffix_key in obj_lower or obj_lower in suffix_key or obj_lower == suffix_key:
-            return cap
-        if any(a in cap_lower for a in aliases):
-            return cap
-        if any(a in template_reverse and template_reverse[a] == cap for a in aliases):
-            return cap
-    return None
-
-
 def _resolve_action(
     capability: str,
     action_verb: str | None,
@@ -695,32 +557,43 @@ def _extract_layout_hints(
 ) -> dict[str, dict]:
     """Convierte acciones MOVE/REPLACE en layout_hints para StructuralIR.
 
-    MOVE (scope="layout"):
-      {"verb": "move", "object": "kpi", "reference": "table"}
-      → {"presentation.kpi_row": {"move_after": "presentation.table", "scope": "layout"}}
+    S2·F4 — los extremos salen del Confirmed Plan, nunca de matching:
 
-    REPLACE:
-      {"verb": "replace", "object": "table", "reference": "bar chart"}
-      → {"presentation.chart.bar": {"replace_anchor": "presentation.table"}}
+    REPLACE (ambos extremos = WHAT explícito, convención F3):
+      {"verb": "replace", "source_capability": "presentation.kpi_row",
+       "target_capability": "presentation.timeseries"}
+      → {"presentation.timeseries": {"replace_anchor": "presentation.kpi_row"}}
+
+    MOVE (el WHAT es explícito; el anchor es WHERE):
+      {"verb": "move", "target_capability": "presentation.kpi_row",
+       "reference": "presentation.table"}
+      → {"presentation.kpi_row": {"move_after": "presentation.table",
+                                  "scope": "layout"}}
+
+    `_match_single_object` queda solo para el anchor de MOVE (WHERE): nunca
+    para decidir qué capability crear, modificar, sustituir, source ni target.
     """
     hints: dict[str, dict] = {}
     for action in semantic_resolution.actions:
-        verb = action.get("verb", "")
-        obj = action.get("object", "")
-        ref = action.get("reference", "")
-        if not verb or not obj:
+        verb = (action.get("verb") or "").lower()
+        if not verb:
             continue
-        if verb in _VERBS_MOVE and ref:
-            target_cap = _match_single_object(obj, contract_caps)
-            ref_cap = _match_single_object(ref, contract_caps)
+        if verb in _VERBS_MOVE:
+            # WHAT: capability confirmada. WHERE: anchor (puede venir de texto).
+            target_cap = (action.get("target_capability") or "").strip()
+            ref_cap = _match_single_object(
+                action.get("source_capability") or action.get("reference") or "",
+                contract_caps,
+            )
             if target_cap and ref_cap and target_cap != ref_cap:
                 hints[target_cap] = {
                     "move_after": ref_cap,
                     "scope": "layout",
                 }
-        elif verb in _VERBS_REPLACE and ref:
-            old_cap = _match_single_object(obj, contract_caps)
-            new_cap = _match_single_object(ref, contract_caps)
+        elif verb in _VERBS_REPLACE:
+            # F3: source_capability = SUSTITUIDA, target_capability = NUEVA.
+            old_cap = (action.get("source_capability") or "").strip()
+            new_cap = (action.get("target_capability") or "").strip()
             if old_cap and new_cap and old_cap != new_cap:
                 hints[new_cap] = {"replace_anchor": old_cap}
     return hints
@@ -728,28 +601,38 @@ def _extract_layout_hints(
 
 def _extract_substitution_ops(
     semantic_resolution: SemanticResolution,
-    contract_caps: list[str],
+    contract_caps: list[str] | None = None,
 ) -> list[SubstitutionOp]:
     """Extrae SubstitutionOps de acciones REPLACE.
 
     Phase 4: stream independiente del lifecycle.
     NO toca _resolve_action, NO produce CREATE/MODIFY/DELETE/KEEP.
 
-    {"verb": "replace", "object": "table", "reference": "bar chart"}
-    → [SubstitutionOp(source="presentation.table", target="presentation.chart.bar")]
+    S2·F4 — proyección determinista del Confirmed Plan (convención F3):
+      source_capability = capability SUSTITUIDA
+      target_capability = capability NUEVA
+
+      {"verb": "replace", "source_capability": "presentation.kpi_row",
+       "target_capability": "presentation.timeseries"}
+      → [SubstitutionOp(source="presentation.kpi_row",
+                        target="presentation.timeseries")]
+
+    Sin matching, sin keywords, sin aliases: los dos extremos son explícitos.
+    `contract_caps` se conserva por compatibilidad de firma y NO se usa para
+    decidir extremos.
 
     La sustitución es semántica: la source NO se elimina.
     """
     ops: list[SubstitutionOp] = []
     for action in semantic_resolution.actions:
-        verb = action.get("verb", "")
-        obj = action.get("object", "")
-        ref = action.get("reference", "")
-        if verb in _VERBS_REPLACE and obj and ref:
-            old_cap = _match_single_object(obj, contract_caps)
-            new_cap = _match_single_object(ref, contract_caps)
-            if old_cap and new_cap and old_cap != new_cap:
-                ops.append(SubstitutionOp(source=old_cap, target=new_cap))
+        verb = (action.get("verb") or "").lower()
+        if verb not in _VERBS_REPLACE:
+            continue
+        source_cap = (action.get("source_capability") or "").strip()
+        target_cap = (action.get("target_capability") or "").strip()
+        if not source_cap or not target_cap or source_cap == target_cap:
+            continue
+        ops.append(SubstitutionOp(source=source_cap, target=target_cap))
     return ops
 
 
@@ -1002,43 +885,49 @@ def complete_structure(
     # Operational mode: contract + action_map definen scope final.
     # Declarative mode: contract + augmentation definen scope final.
     capabilities = _infer_capabilities_from_contract(contract)
+    # Universo expresable (validación): contrato + augmentación de frame.
+    # Una target_capability confirmada fuera de este universo NO se materializa
+    # → G1 la convierte en CONFLICT missing_component (nunca en otra capability).
+    expressible = set(capabilities)
     if not semantic_resolution.actions:
+        # Sin plan confirmado no hay lifecycle: el scope declarativo del
+        # contrato puede ampliarse con la augmentación (p. ej. presentation.table).
         capabilities = _augment_capabilities(
             capabilities, semantic_resolution, contract_resolution, frame_dict,
         )
+    expressible |= set(capabilities)
 
-    # Paso 2b: Step A — match actions from semantic layer to capabilities
-    # Phase 3: contract-first closed-world. Solo contract caps.
-    contract_caps_for_matching = capabilities
-    action_map = _match_actions_to_capabilities(
-        semantic_resolution.actions, contract_caps_for_matching, contract,
-    )
-
-    # ── Post-passes 3B: action_map enrichment ─────────────────────
-    # Phase 3: contract-first closed-world. Sin guards de structural_index.
-
-    # Post-pass A: metrics/params signal → MODIFY kpi_row
-    # Phase 3: solo si hay acciones semánticas (sin intent → no lifecycle).
-    if semantic_resolution.actions and semantic_resolution.semantic_params:
-        metrics_signals = {"metrics", "mentioned_metrics", "columns", "values"}
-        if metrics_signals & semantic_resolution.semantic_params.keys():
-            if "presentation.kpi_row" not in action_map:
-                action_map["presentation.kpi_row"] = "modify"
-
-    # Post-pass B: "modify dashboard" → MODIFY presentational children.
-    # Solo aplica a capabilities del CONTRATO.
+    # Paso 2b: WHAT authority (S2·F4) — binding explícito, SIN matching.
+    # Cada acción confirmada se liga a SU target_capability. No hay
+    # inferencia verb/object → capability, ni fallback, ni compatibilidad.
+    action_map: dict[str, str] = {}
     for action in semantic_resolution.actions:
-        verb = action.get("verb", "").lower()
-        obj = action.get("object", "").lower()
-        if verb in _VERBS_MODIFY and obj in ("dashboard",):
-            for cap in contract_caps_for_matching:
-                if cap.startswith("presentation.") and cap not in action_map:
-                    action_map[cap] = "modify"
+        verb = action.get("verb", "")
+        if not verb:
+            continue
+        target = (action.get("target_capability") or "").strip()
+        if not target:
+            raise ValueError(
+                f"confirmed action '{verb} {action.get('object') or '?'}' has no "
+                f"target_capability — the Confirmed Plan is the only WHAT "
+                f"authority after confirmation (no inference, no fallback)."
+            )
+        if target in expressible:
+            action_map[target] = verb
 
-    # Ampliar scope con targets de acciones que no están en capabilities
-    # (tanto repo-only como CREATE targets que no existen en repo aún)
-    for target in set(action_map) - set(capabilities):
-        capabilities.append(target)
+    # ── S2·F4: NO hay post-passes de enriquecimiento ──────────────
+    # Los antiguos post-pass A (señal de params → MODIFY presentation.kpi_row)
+    # y post-pass B ("modify dashboard" → MODIFY de todos los presentation.*)
+    # inyectaban lifecycle y scope para capabilities NO confirmadas. Con el
+    # Confirmed Plan como única autoridad del WHAT, esa inyección es imposible:
+    # si el usuario no confirmó una acción, no hay acción que materializar.
+    # La sincronización de composición (post-pass C/C2) sigue vigente: es
+    # determinista y deriva de los slots del contrato, no de inferencia.
+
+    # Scope: solo targets explícitos expresables por contrato/contexto.
+    for target in action_map:
+        if target not in capabilities:
+            capabilities.append(target)
 
     # Extraer layout_hints y substitution_ops de acciones semánticas
     layout_hints: dict[str, dict] = {}
@@ -1073,13 +962,15 @@ def complete_structure(
     # Build attach_map: {capability: attach_dict} from semantic actions.
     # WHAT/WHERE — cada acción CREATE con attach explicita el destino físico
     # (capability + instance label) donde se monta el componente.
+    # S2·F4: la capability es la CONFIRMADA (action["target_capability"]);
+    # ya NO se infiere por matching (V2/FR-1 cerrado).
     attach_map: dict[str, dict] = {}
     for action in semantic_resolution.actions:
         att = action.get("attach")
         if not att:
             continue
-        cap = _match_single_capability(action, capabilities, contract)
-        if cap is not None:
+        cap = (action.get("target_capability") or "").strip()
+        if cap:
             attach_map[cap] = att
 
     for cap in capabilities:

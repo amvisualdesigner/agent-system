@@ -208,7 +208,8 @@ class TestStructuralGrounding:
         ir, graph = run_pipeline(
             make_semantic(
                 params={"metrics": ["growth"]},
-                actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9}],
+                actions=[{"verb": "modify", "object": "kpi", "confidence": 0.9,
+                 "target_capability": "presentation.kpi_row"}],
             ),
             make_contract_res(dashboard_contract, params={"metrics": ["growth"]}),
             dashboard_contract,
@@ -234,7 +235,8 @@ class TestStructuralGrounding:
         idx = structural_index("presentation.chart.bar")
         ir, graph = run_pipeline(
             make_semantic(
-                actions=[{"verb": "remove", "object": "chart", "confidence": 0.9}],
+                actions=[{"verb": "remove", "object": "chart", "confidence": 0.9,
+                 "target_capability": "presentation.chart.bar"}],
             ),
             make_contract_res(chart_contract),
             chart_contract,
@@ -276,7 +278,8 @@ class TestStructuralGrounding:
         ir, graph = run_pipeline(
             make_semantic(
                 params={"metrics": ["revenue"]},
-                actions=[{"verb": "add", "object": "kpi", "confidence": 0.9}],
+                actions=[{"verb": "add", "object": "kpi", "confidence": 0.9,
+                 "target_capability": "presentation.kpi_row"}],
             ),
             make_contract_res(dashboard_contract, params={"metrics": ["revenue"]}),
             dashboard_contract,

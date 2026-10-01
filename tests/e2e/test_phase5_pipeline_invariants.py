@@ -111,7 +111,9 @@ class TestStructuralIndexCannotChangeLifecycle:
         """StructuralIR es frozen — no se puede mutar despues de crear."""
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -124,7 +126,9 @@ class TestStructuralIndexCannotChangeLifecycle:
         """El tuple capabilities es inmutable."""
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -142,7 +146,9 @@ class TestStructuralIndexCannotChangeLifecycle:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -166,7 +172,9 @@ class TestStructuralIndexCannotChangeLifecycle:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -193,7 +201,9 @@ class TestStructuralIndexCannotChangeLifecycle:
         """
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 
@@ -226,7 +236,9 @@ class TestStructuralIndexCannotChangeLifecycle:
 
         semantic = make_semantic(
             params={"metrics": ["revenue"]},
-            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart"}],
+            actions=[{"verb": "replace", "object": "kpi", "reference": "bar chart",
+                     "source_capability": "presentation.kpi_row",
+                     "target_capability": "presentation.chart.bar"}],
         )
         contract = make_contract(params={"metrics": ["revenue"]})
 

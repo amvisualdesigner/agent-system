@@ -120,7 +120,8 @@ class TestCompleteStructureWithRealRepo:
         assert idx.exists("presentation.kpi_row")
 
         sem = SemanticResolution(
-            actions=[{"verb": "remove", "object": "kpi", "confidence": 1.0}],
+            actions=[{"verb": "remove", "object": "kpi", "confidence": 1.0,
+             "target_capability": "presentation.kpi_row"}],
             semantic_params={},
             semantic_provenance={},
             confidence=1.0,
@@ -150,7 +151,8 @@ class TestCompleteStructureWithRealRepo:
         assert idx.exists("presentation.timeseries")
 
         sem = SemanticResolution(
-            actions=[{"verb": "create", "object": "line", "confidence": 1.0}],
+            actions=[{"verb": "create", "object": "line", "confidence": 1.0,
+             "target_capability": "presentation.timeseries"}],
             semantic_params={},
             semantic_provenance={},
             confidence=1.0,
@@ -180,7 +182,8 @@ class TestCompleteStructureWithRealRepo:
         idx = StructuralIndex.from_worktree(agent_test_repo_copy)
 
         sem = SemanticResolution(
-            actions=[{"verb": "modify", "object": "dashboard", "confidence": 1.0}],
+            actions=[{"verb": "modify", "object": "dashboard", "confidence": 1.0,
+             "target_capability": "layout.page"}],
             semantic_params={},
             semantic_provenance={},
             confidence=1.0,

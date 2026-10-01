@@ -300,7 +300,7 @@ class TestCompositionContractThroughCompleteStructure:
     """complete_structure end-to-end: promotions and INSTANCE ops survive into StructuralIR."""
 
     def test_create_child_promotes_page_to_modify_with_trace(self, composition_contract):
-        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "kpi"}])
+        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "kpi", "target_capability": "presentation.kpi_row"}])
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
         ir = complete_structure(sem, cr, composition_contract)
@@ -316,7 +316,7 @@ class TestCompositionContractThroughCompleteStructure:
         )
 
     def test_create_page_expands_keep_children_to_instance(self, composition_contract):
-        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "page"}])
+        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "page", "target_capability": "layout.page"}])
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
         ir = complete_structure(sem, cr, composition_contract)
@@ -330,7 +330,7 @@ class TestCompositionContractThroughCompleteStructure:
         assert by_name["presentation.timeseries"].instance_only is True
 
     def test_operations_never_contain_instance_without_contract_child(self, composition_contract):
-        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "page"}])
+        sem = make_semantic(params={"metrics": ["revenue"]}, actions=[{"verb": "create", "object": "page", "target_capability": "layout.page"}])
         cr = make_contract_resolution(params={"metrics": ["revenue"]})
 
         ir = complete_structure(sem, cr, composition_contract)
