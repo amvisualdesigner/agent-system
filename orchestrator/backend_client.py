@@ -45,6 +45,27 @@ async def call_apply(run_id: str, plan: dict, dry_run: bool = False, confirmed_d
         return r.json()
 
 
+async def call_retry(run_id: str, dry_run: bool = False, confirmed_deletions: list[str] | None = None) -> Dict[str, Any]:
+    """Re-apply the SAME Confirmed Plan after a conflict (no reinterpretation)."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        payload: dict = {"run_id": run_id, "dry_run": dry_run}
+        if confirmed_deletions is not None:
+            payload["confirmed_deletions"] = confirmed_deletions
+        r = await client.post(f"{BACKEND_URL}/agent/retry", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+async def call_cancel(run_id: str, reason: str | None = None) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{BACKEND_URL}/agent/cancel",
+            json={"run_id": run_id, "reason": reason},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 async def get_run(run_id: str) -> Dict[str, Any]:
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):

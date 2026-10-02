@@ -63,7 +63,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .phase-interpreting { border-left: 3px solid #818cf8; }
 .phase-awaiting_confirmation { border-left: 3px solid #f59e0b; }
 .phase-confirming { border-left: 3px solid #f97316; }
-.phase-awaiting_apply { border-left: 3px solid #22c55e; }
+.phase-confirmed { border-left: 3px solid #22c55e; }
+.phase-cancelled { border-left: 3px solid #64748b; }
 .phase-applying { border-left: 3px solid #f97316; }
 .phase-completed { border-left: 3px solid #22c55e; }
 .phase-error { border-left: 3px solid #ef4444; }
@@ -73,7 +74,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .status-rejected { color: #f59e0b; font-weight: 600; }
 .status-verify_failed { color: #f59e0b; font-weight: 600; }
 .status-awaiting_confirmation { color: #f59e0b; font-weight: 600; }
-.status-awaiting_apply { color: #22c55e; font-weight: 600; }
+.status-confirmed { color: #22c55e; font-weight: 600; }
+.status-cancelled { color: #94a3b8; font-weight: 600; }
 
 pre {
   background: #0f172a; padding: 8px 10px; border-radius: 4px;
@@ -180,6 +182,9 @@ const phaseBar = document.getElementById("phaseBar");
 
 let runId = null;
 let currentInterpretation = null;
+let selectedInstances = {};
+let instanceChoiceCandidates = [];
+let selectedAlternativeIndex = null;
 let evtSource = null;
 
 // ---- phase bar ----
@@ -241,7 +246,7 @@ function onInterpretationReady(draft) {
   setPanelStatus("panel-interpret", "badge-done", "listo");
   currentInterpretation = draft;
 
-  const isClarification = draft.status === "needs_clarification";
+  const isClarification = draft.status === "clarification_needed";
   const actions = draft.proposed_actions || [];
   const params = draft.params_proposed || {};
   const wc = draft.worktree_capabilities || [];
@@ -263,7 +268,8 @@ function onInterpretationReady(draft) {
       choices.forEach((c, i) => {
         const isCreate = c.id === "create_new";
         const btnClass = isCreate ? "btn-success" : "btn-outline";
-        html += `<button class="${btnClass}" onclick="handlePageChoice('${esc(c.id)}', this)" style="padding:10px 18px;font-size:0.9rem">
+        const regIdx = registerPageChoice(c.id);
+        html += `<button class="${btnClass}" onclick="handlePageChoice(${regIdx}, this)" style="padding:10px 18px;font-size:0.9rem">
           ${isCreate ? "➕ " : "📄 "} ${esc(c.page || c.description)}
         </button>`;
       });
@@ -292,6 +298,45 @@ function onInterpretationReady(draft) {
         <span style="color:#64748b;font-size:0.75rem">${esc(a.label || "")}</span>
         <span style="color:#64748b;font-size:0.7rem">${Math.round((a.confidence || 0) * 100)}%</span>
       </span>`;
+    });
+    html += "</div>";
+  }
+
+  // ── Semantic ambiguity: alternatives (distinct from instance choices) ──
+  const alternatives = draft.alternatives || [];
+  if (alternatives.length > 1) {
+    html += '<div style="margin-top:8px"><strong>Opciones de interpretación</strong>';
+    html += '<div style="color:#94a3b8;font-size:0.8rem;margin:2px 0 6px">Elige una para continuar.</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
+    alternatives.forEach((alt, i) => {
+      html += `<button data-alt-idx="${i}" class="btn-outline"
+        onclick="handleAlternativeChoice(${i},this)"
+        style="padding:8px 14px;font-size:0.85rem">
+        ${esc(alt.label || alt.description || alt.id)}
+        <span style="color:#64748b;font-size:0.7rem"> ${esc((alt.proposed_actions || []).map(a => a.target_capability).join(", "))}</span>
+      </button>`;
+    });
+    html += "</div></div>";
+  }
+
+  // ── Instance ambiguity: structured choices (deterministic, no auto-select) ──
+  const ambiguous = actions.filter(a => (a.instance_choices || []).length > 0);
+  if (ambiguous.length > 0) {
+    html += '<div style="margin-top:10px"><strong>Instancias candidatas</strong>';
+    html += '<div style="color:#94a3b8;font-size:0.8rem;margin:2px 0 6px">Selecciona la instancia exacta. Sin selección no se aplica.</div>';
+    ambiguous.forEach(a => {
+      html += `<div style="margin:6px 0"><span class="target">${esc(a.target_capability)}</span></div><div style="display:flex;flex-wrap:wrap;gap:8px">`;
+      (a.instance_choices || []).forEach(ch => {
+        // Numeric dispatch: capability/hint stay in the registry, never in an
+        // inline JS string literal (no quote-injection surface).
+        const regIdx = registerInstanceChoice(a.target_capability, ch.instance_hint);
+        html += `<button data-inst-cap="${esc(a.target_capability)}" class="btn-outline"
+          onclick="handleInstanceChoice(${regIdx},this)"
+          style="padding:8px 14px;font-size:0.85rem">
+          ${esc(ch.label || ch.instance_id || ch.path)}<span style="color:#64748b;font-size:0.7rem"> ${esc(ch.file_path || ch.path || "")}</span>
+        </button>`;
+      });
+      html += `</div>`;
     });
     html += "</div>";
   }
@@ -387,15 +432,67 @@ function onPlanPreviewReady(data) {
   bodyEl("panel-confirm").innerHTML = html;
 }
 
+// ---- post-confirm conflict (Fase 5B) ----
+// A conflict is NOT terminal: the Confirmed Plan is unchanged and the Run
+// returns to `confirmed`. The only recovery is an explicit retry.
+function onConflictResult(exec, data) {
+  setPanelStatus("panel-apply", "badge-warn", "conflicto");
+  updatePhaseBar("confirm");
+
+  const conflict = exec.conflict || "unknown";
+  const detail = exec.detail || "";
+  const candidates = exec.candidates || [];
+  const retryable = exec.plan_retryable !== false;
+
+  let html = `<div>Status: <span class="status-conflict">CONFLICT</span> <span class="tag">${esc(conflict)}</span></div>`;
+  html += `<div class="kv" style="margin-top:6px">`;
+  html += `<dt>Plan confirmado</dt><dd>${exec.plan_confirmed === false ? "no" : "sí (intacto)"}</dd>`;
+  html += `<dt>Reintentable</dt><dd>${retryable ? "sí" : "no"}</dd>`;
+  html += `<dt>Fase</dt><dd>${esc(exec.run_phase || "confirmed")}</dd>`;
+  html += `</div>`;
+  html += `<div style="color:#f59e0b;margin-top:8px">${esc(detail)}</div>`;
+
+  if (candidates.length > 0) {
+    html += `<div style="margin-top:8px"><strong>Candidatos</strong></div><ul class="file-list">`;
+    candidates.forEach(c => {
+      html += `<li>${esc(c.label || c.instance_hint || c.instance_id || c.path || JSON.stringify(c))}`;
+      if (c.file_path) html += `<span style="color:#64748b;font-size:0.75rem"> ${esc(c.file_path)}</span>`;
+      html += `</li>`;
+    });
+    html += `</ul>`;
+  }
+
+  if (retryable) {
+    html += `<div style="color:#94a3b8;font-size:0.8rem;margin-top:8px">
+      El Plan confirmado NO cambia. El reintento solo vuelve a capturar el estado físico.
+      Para cambiar QUÉ hay que iniciar un nuevo run con nueva confirmación.</div>`;
+    html += `<div class="action-bar" style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
+      <button onclick="handleRetry(this)" class="btn-primary">↻ Reintentar</button>
+      <button onclick="handleCancel(this)" class="btn-outline">✗ Cancelar run</button>
+    </div>`;
+  } else {
+    html += `<div style="color:#ef4444;font-size:0.8rem;margin-top:8px">
+      Este conflicto no es reintentable. El Plan confirmado es inconsistente: inicia un nuevo run.</div>`;
+    html += `<div class="action-bar" style="margin-top:10px;padding-top:10px;border-top:1px solid #334155">
+      <button onclick="handleCancel(this)" class="btn-outline">✗ Cancelar run</button>
+    </div>`;
+  }
+
+  bodyEl("panel-apply").innerHTML = html;
+}
+
 // ---- node_end: call_apply ----
 function onApplyResult(data) {
+  const exec = data.execution || {};
+  const status = exec.status || "ok";
+
+  if (status === "conflict") return onConflictResult(exec, data);
+
   setPanelStatus("panel-apply", "badge-done", "listo");
   updatePhaseBar("apply");
 
-  const exec = data.execution || {};
   const ctx = data.context || {};
   const metaBlock = data.meta || {};
-  const status = exec.status || "ok";
   const ops = exec.operations || [];
 
   let html = `<div>Status: <span class="status-${status}">${esc(status.toUpperCase())}</span>`;
@@ -490,7 +587,7 @@ function handleSSE(evt) {
       break;
 
     case "plan_preview_ready":
-      addPanel("panel-confirm", "📋 Plan", "phase-awaiting_apply");
+      addPanel("panel-confirm", "📋 Plan", "phase-confirmed");
       onPlanPreviewReady(evt.data || {});
       break;
 
@@ -513,8 +610,13 @@ function handleSSE(evt) {
       if (rs === "awaiting_confirmation") {
         runBtn.disabled = false;
         runBtn.textContent = "▶ Run";
-      } else if (rs === "awaiting_apply") {
-        // Already handled by plan_preview_ready
+      } else if (rs === "confirmed") {
+        // Parked after confirm or after a conflict — handled by the panels
+      } else if (rs === "conflict") {
+        // Rendered by onConflictResult in the apply panel
+      } else if (rs === "cancelled") {
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
       } else {
         finalizeResult(evt);
       }
@@ -594,7 +696,11 @@ form.onsubmit = async (e) => {
   if (evtSource) evtSource.close();
   panels.innerHTML = "";
   meta.innerHTML = "";
-  currentPageChoice = null;
+currentPageChoice = null;
+  selectedInstances = {};
+  instanceChoiceCandidates = [];
+  pageChoiceCandidates = [];
+  selectedAlternativeIndex = null;
 
   try {
     const resp = await fetch(`${ORCH}/run`, {
@@ -644,8 +750,16 @@ form.onsubmit = async (e) => {
 
 // ---- page context choice handler ----
 let currentPageChoice = null;
+let pageChoiceCandidates = [];
 
-function handlePageChoice(choiceId, btn) {
+function registerPageChoice(choiceId) {
+  pageChoiceCandidates.push(choiceId || "");
+  return pageChoiceCandidates.length - 1;
+}
+
+function handlePageChoice(regIdx, btn) {
+  const choiceId = pageChoiceCandidates[regIdx];
+  if (choiceId === undefined) return;
   currentPageChoice = choiceId;
   // Deshabilitar todos los botones excepto el elegido
   const parent = btn.closest("div");
@@ -655,6 +769,34 @@ function handlePageChoice(choiceId, btn) {
     btn.textContent = "✓ " + btn.textContent.trim();
   }
   handleConfirm(btn);
+}
+
+// ---- instance choice registry (capability → instance_hint) ----
+function registerInstanceChoice(capability, hint) {
+  instanceChoiceCandidates.push({ capability: capability, hint: hint || "" });
+  return instanceChoiceCandidates.length - 1;
+}
+
+function handleInstanceChoice(regIdx, btn) {
+  const entry = instanceChoiceCandidates[regIdx];
+  if (!entry) return;
+  selectedInstances[entry.capability] = entry.hint;
+  document.querySelectorAll("[data-inst-cap]").forEach(el => {
+    const isSel = el.dataset.instCap === entry.capability;
+    el.style.borderColor = isSel ? "#22c55e" : "#334155";
+    el.style.color = isSel ? "#22c55e" : "#cbd5e1";
+  });
+  if (btn) btn.classList.add("btn-success");
+}
+
+function handleAlternativeChoice(idx, btn) {
+  selectedAlternativeIndex = idx;
+  document.querySelectorAll("[data-alt-idx]").forEach(el => {
+    const isSel = Number(el.dataset.altIdx) === idx;
+    el.style.borderColor = isSel ? "#22c55e" : "#334155";
+    el.style.color = isSel ? "#22c55e" : "#cbd5e1";
+  });
+  if (btn) btn.classList.add("btn-success");
 }
 
 // ---- confirm handler ----
@@ -667,12 +809,21 @@ async function handleConfirm(btn) {
   if (parent) parent.style.display = "none";
 
   const interpretation = currentInterpretation;
-  const actions = (interpretation.proposed_actions || []).map(a => ({
-    verb: a.verb,
-    target_capability: a.target_capability,
-    label: a.label || "",
-    confidence: a.confidence || 1.0,
-  }));
+  const picks = selectedInstances;
+  const actions = (interpretation.proposed_actions || []).map(a => {
+    const action = {
+      verb: a.verb,
+      target_capability: a.target_capability,
+      label: a.label || "",
+      confidence: a.confidence || 1.0,
+    };
+    // Human-selected instance becomes instance_hint (the Plan freezes it).
+    const hint = picks[a.target_capability] || a.instance_hint;
+    if (hint) action.instance_hint = hint;
+    if (a.source_capability) action.source_capability = a.source_capability;
+    if (a.attach) action.attach = a.attach;
+    return action;
+  });
 
   const payload = {
     contract_id: interpretation.contract_id || "",
@@ -683,6 +834,9 @@ async function handleConfirm(btn) {
   };
   if (currentPageChoice) {
     payload.page_context_choice = currentPageChoice;
+  }
+  if (selectedAlternativeIndex !== null) {
+    payload.alternative_index = selectedAlternativeIndex;
   }
 
   try {
@@ -705,11 +859,54 @@ async function handleConfirm(btn) {
   }
 };
 
-// ---- cancel handler ----
-function handleCancel(btn) {
-  const parent = btn.closest(".panel");
-  if (parent) parent.style.display = "none";
-  showError("Cancelado por el usuario");
+// ---- cancel handler (Fase 5B: real lifecycle cancel) ----
+async function handleCancel(btn) {
+  if (btn) btn.disabled = true;
+  if (!runId) {
+    const parent = btn ? btn.closest(".panel") : null;
+    if (parent) parent.style.display = "none";
+    showError("Cancelado por el usuario");
+    return;
+  }
+  try {
+    const resp = await fetch(`${ORCH}/run/${runId}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "cancel rejected");
+    }
+    const parent = btn ? btn.closest(".panel") : null;
+    if (parent) parent.style.display = "none";
+    showError("Run cancelado (sin escrituras)");
+  } catch (err) {
+    showError("Cancel error: " + err.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ---- retry handler (same Confirmed Plan, fresh physical snapshot) ----
+async function handleRetry(btn) {
+  if (!runId) return;
+  btn.disabled = true;
+  btn.textContent = "Reintentando...";
+  try {
+    const resp = await fetch(`${ORCH}/run/${runId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRunCheck.checked }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "retry rejected");
+    }
+  } catch (err) {
+    showError("Retry error: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "↻ Reintentar";
+  }
 }
 
 // ---- apply handler ----

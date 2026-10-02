@@ -54,18 +54,18 @@ class TestLLMInterpret:
     def test_update_dashboard(self):
         draft = llm_interpret("update dashboard")
         # "update dashboard" is ambiguous; real LLM may ask for clarification
-        assert draft.status in ("ok", "needs_clarification")
+        assert draft.status in ("ok", "clarification_needed")
         if draft.status == "ok":
             targets = {a["target_capability"] for a in draft.proposed_actions}
             assert "layout.page" in targets
 
     def test_invalid_needs_clarification(self):
         draft = llm_interpret("I like the dashboard")
-        assert draft.status == "needs_clarification"
+        assert draft.status == "clarification_needed"
 
     def test_unsupported_rejected(self):
         draft = llm_interpret("fix the database schema")
-        assert draft.status in ("unsupported", "needs_clarification")
+        assert draft.status in ("unsupported", "clarification_needed")
 
     def test_semantic_confidence(self):
         draft = llm_interpret("remove the trend chart")

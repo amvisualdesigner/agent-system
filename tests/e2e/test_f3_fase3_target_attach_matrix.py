@@ -125,7 +125,7 @@ class TestCaseC_TargetNotFound:
         try:
             result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
-            assert ex["status"] == "clarification_needed", ex
+            assert ex["status"] == "conflict", ex
             assert ex.get("conflict") == "target_not_found", ex
             assert ex.get("operations") == [], ex
         finally:
@@ -155,7 +155,7 @@ class TestCaseD_AmbiguousTarget:
         try:
             result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
-            assert ex["status"] == "clarification_needed", ex
+            assert ex["status"] == "conflict", ex
             assert ex.get("conflict") == "target_ambiguity", ex
             assert ex.get("operations") == [], ex
         finally:

@@ -230,7 +230,7 @@ class TestFailedRun:
         res_a = _apply(ws, artifacts_dir, run_a, "create", params={"filters": ["Channel"]},
                        attach_label="Page")
         status_a = res_a.get("execution", {}).get("status")
-        assert status_a in ("clarification_needed", "rejected"), res_a
+        assert status_a in ("conflict", "rejected"), res_a
         assert res_a.get("execution", {}).get("conflict") == "target_not_found", res_a
         assert _commit_count(ws) == before, "un Run fallido no puede crear commit"
         assert _head_message(ws) == "seed"

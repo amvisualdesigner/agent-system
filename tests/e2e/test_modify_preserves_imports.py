@@ -357,7 +357,7 @@ class TestCreateThenModifyConsistency:
         ))
         # F1: CREATE on an existing target → explicit conflict, no overwrite,
         # no reinterpretation into MODIFY.
-        assert result3["execution"]["status"] == "clarification_needed", (
+        assert result3["execution"]["status"] == "conflict", (
             f"Second CREATE on existing target must conflict, got {result3['execution']['status']}"
         )
         detail3 = result3["execution"].get("detail", "")

@@ -317,8 +317,8 @@ class TestAmbiguity:
         plan_dict["gate"] = {"blocked": False}
 
         result = _apply_engine(ctx.run_id, plan_dict, ctx, dry_run=True)
-        assert result["execution"]["status"] == "clarification_needed", (
-            f"Expected clarification_needed, got {result['execution']['status']}"
+        assert result["execution"]["status"] == "conflict", (
+            f"Expected conflict, got {result['execution']['status']}"
         )
 
     def test_b3_bad_hint_no_match_raises(self, multi_timeseries_workspace, artifacts_dir):
@@ -344,8 +344,8 @@ class TestAmbiguity:
         plan_dict["gate"] = {"blocked": False}
 
         result = _apply_engine(ctx.run_id, plan_dict, ctx, dry_run=True)
-        assert result["execution"]["status"] == "clarification_needed", (
-            f"Expected clarification_needed, got {result['execution']['status']}"
+        assert result["execution"]["status"] == "conflict", (
+            f"Expected conflict, got {result['execution']['status']}"
         )
         detail = str(result["execution"].get("detail", ""))
         reason = str(result["execution"].get("reason", ""))

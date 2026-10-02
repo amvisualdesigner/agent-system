@@ -10,7 +10,7 @@ The anchor decision must follow the hard matrix:
   contract composition parent           → its physical instances (0/N conflict)
 
 No semantic scoring may re-rank candidates. A blocking 0/N conflict surfaces
-as clarification_needed (target_not_found / target_ambiguity), never a
+as conflict (target_not_found / target_ambiguity), never a
 silent guess.
 
 Each test exercises apply_engine() (GraphIR → renderer → Anchor Resolution)
@@ -159,7 +159,7 @@ class TestPhysicalAnchorMatrix:
         try:
             result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
-            assert ex["status"] == "clarification_needed", ex
+            assert ex["status"] == "conflict", ex
             assert ex.get("conflict") == "target_not_found", ex
             assert ex.get("operations") == [], ex
         finally:
@@ -176,7 +176,7 @@ class TestPhysicalAnchorMatrix:
         try:
             result = _apply(ws, attach_label="SalesOverviewPage")
             ex = result["execution"]
-            assert ex["status"] == "clarification_needed", ex
+            assert ex["status"] == "conflict", ex
             assert ex.get("conflict") == "target_ambiguity", ex
             assert "target_ambiguity" in ex.get("detail", ""), ex
         finally:

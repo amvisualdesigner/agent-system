@@ -98,7 +98,7 @@ _KPI_INDEX = StructuralIndex.from_mapping({
 
 def _conflict(result: dict | None) -> dict:
     assert result is not None, "expected a conflict, got None (VALID)"
-    assert result["execution"]["status"] == "clarification_needed", result
+    assert result["execution"]["status"] == "conflict", result
     return result
 
 

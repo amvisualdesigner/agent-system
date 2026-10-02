@@ -2,6 +2,7 @@ import logging
 import time
 from state import AgentState
 from backend_client import call_apply as backend_call_apply
+from backend_client import call_retry as backend_call_retry
 from sse import emitter
 from models import SSEEvent
 
@@ -14,8 +15,9 @@ async def call_apply_node(state: AgentState) -> dict:
     logger.info("node=call_apply run_id=%s", run_id)
 
     backend_run_id = state.get("backend_run_id", "")
-    phase = "executing"
-    input_data = {"backend_run_id": backend_run_id, "plan": state.get("plan")}
+    is_retry = bool(state.get("is_retry"))
+    phase = "applying"
+    input_data = {"backend_run_id": backend_run_id, "plan": state.get("plan"), "retry": is_retry}
 
     if state.get("cancelled"):
         logger.warning("[run_id=%s] call_apply cancelled", run_id)
@@ -23,7 +25,7 @@ async def call_apply_node(state: AgentState) -> dict:
 
     if state.get("error"):
         logger.warning("[run_id=%s] call_apply skipped (prior error)", run_id)
-        return {**state, "phase": "error", "_next_node": "return_result"}
+        return {**state, "phase": "failed", "_next_node": "return_result"}
 
     if state.get("execution") is not None:
         logger.info("[run_id=%s] call_apply already executed, skipping", run_id)
@@ -39,24 +41,30 @@ async def call_apply_node(state: AgentState) -> dict:
         SSEEvent(
             type="tool_call", node="call_apply", phase=phase,
             run_id=run_id,
-            data={"tool": "/agent/apply", "input": input_data},
+            data={"tool": "/agent/retry" if is_retry else "/agent/apply", "input": input_data},
         ),
     )
 
     start = time.time()
     try:
         confirmed_deletions = state.get("confirmed_deletions")
-        apply_result = await backend_call_apply(
-            run_id, state["plan"],
-            confirmed_deletions=confirmed_deletions,
-        )
+        if is_retry:
+            apply_result = await backend_call_retry(
+                run_id,
+                confirmed_deletions=confirmed_deletions,
+            )
+        else:
+            apply_result = await backend_call_apply(
+                run_id, state["plan"],
+                confirmed_deletions=confirmed_deletions,
+            )
         latency = int((time.time() - start) * 1000)
     except Exception as e:
         latency = int((time.time() - start) * 1000)
         logger.error("[run_id=%s] call_apply failed: %s", run_id, str(e))
         await emitter.emit(
             run_id,
-            SSEEvent(type="node_end", node="call_apply", phase="error", run_id=run_id, data={"error": str(e)}),
+            SSEEvent(type="node_end", node="call_apply", phase="failed", run_id=run_id, data={"error": str(e)}),
         )
         return _error_state(state, run_id, "call_apply", str(e), input_data, latency)
 
@@ -98,6 +106,6 @@ def _error_state(state, run_id, node, error, input_data, latency):
         **state,
         "error": error,
         "trace": trace[-50:],
-        "phase": "error",
+        "phase": "failed",
         "_next_node": "return_result",
     }

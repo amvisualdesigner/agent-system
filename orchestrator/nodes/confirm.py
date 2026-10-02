@@ -19,12 +19,12 @@ async def confirm_node(state: AgentState) -> dict:
 
     if state.get("error"):
         logger.warning("[run_id=%s] confirm skipped (prior error)", run_id)
-        return {**state, "phase": "error", "_next_node": "return_result"}
+        return {**state, "phase": "failed", "_next_node": "return_result"}
 
     interpretation = state.get("interpretation")
     if not interpretation:
         logger.warning("[run_id=%s] confirm: no interpretation", run_id)
-        return {**state, "error": "no_interpretation", "phase": "error", "_next_node": "return_result"}
+        return {**state, "error": "no_interpretation", "phase": "failed", "_next_node": "return_result"}
 
     phase = "confirming"
     await emitter.emit(
@@ -32,27 +32,56 @@ async def confirm_node(state: AgentState) -> dict:
         SSEEvent(type="node_start", node="confirm", phase=phase, run_id=run_id),
     )
 
-    # ── Clarification guard: if interpretation needs clarification and user didn't choose, stop early ──
+    # ── Clarification guard (G6) ────────────────────────────────────
+    # Every ambiguity MUST be resolvable with structured data. There is no
+    # dead end: page-context / alternatives / instance choices are each
+    # satisfied by an explicit human selection in the confirm payload.
     interp_status = interpretation.get("status") if isinstance(interpretation, dict) else None
-    if interp_status == "needs_clarification":
-        choices = interpretation.get("choices", [])
-        pcc = (state.get("confirmed_intent", {}) or {}).get("page_context_choice")
+    if interp_status == "clarification_needed":
+        confirmed = state.get("confirmed_intent") or {}
+        actions = confirmed.get("actions") or []
+        choices = interpretation.get("choices") or []
+        alternatives = interpretation.get("alternatives") or []
+        instance_choices = interpretation.get("instance_choices") or []
+
+        pcc = confirmed.get("page_context_choice")
+        selected_alt = (
+            confirmed.get("alternative_index") is not None
+            or bool(confirmed.get("selected_alternative"))
+        )
+        hinted_caps = {a.get("target_capability") for a in actions if a.get("instance_hint")}
+        unresolved_caps = [c.get("target_capability") for c in instance_choices
+                           if c.get("target_capability") not in hinted_caps]
+
         if choices and not pcc:
-            logger.warning("[run_id=%s] confirm blocked: needs_clarification with choices but no page_context_choice", run_id)
+            reason = ("Clarification required: choose a page context via "
+                      "page_context_choice.")
+        elif alternatives and not selected_alt:
+            reason = ("Clarification required: pick one of the proposed "
+                      "alternatives via alternative_index.")
+        elif unresolved_caps:
+            reason = ("Clarification required: select one instance per capability "
+                      "via instance_hint.")
+        else:
+            reason = "Clarification required: rephrase your request first."
+
+        if reason is not None:
+            logger.warning("[run_id=%s] confirm blocked: %s", run_id, reason)
             await emitter.emit(run_id,
-                SSEEvent(type="node_end", node="confirm", phase="error", run_id=run_id,
-                         data={"error": "Clarification required: choose a page context via page_context_choice."}))
-            return _error_state(state, run_id, "confirm",
-                "Clarification required: choose a page context via page_context_choice.",
-                {"interpretation_status": interp_status, "choices": choices, "page_context_choice": pcc}, 0)
-        if not choices:
-            logger.warning("[run_id=%s] confirm blocked: needs_clarification (generic)", run_id)
-            await emitter.emit(run_id,
-                SSEEvent(type="node_end", node="confirm", phase="error", run_id=run_id,
-                         data={"error": "Clarification required: rephrase your request first."}))
-            return _error_state(state, run_id, "confirm",
-                "Clarification required: rephrase your request first.",
-                {"interpretation_status": interp_status}, 0)
+                SSEEvent(type="node_end", node="confirm", phase="awaiting_confirmation",
+                         run_id=run_id, data={"error": reason}))
+            return {
+                **state,
+                "interpretation": interpretation,
+                "phase": "awaiting_confirmation",
+                "trace": (state.get("trace") or []) + [{
+                    "node": "confirm",
+                    "input": {"action": "blocked_clarification"},
+                    "output": {"error": reason},
+                    "latency_ms": 0,
+                }],
+                "_next_node": "return_result",
+            }
 
     contract_id = state.get("confirmed_intent", {}).get("contract_id") or interpretation.get("contract_id", "")
     if not contract_id:
@@ -103,6 +132,10 @@ async def confirm_node(state: AgentState) -> dict:
     }
     if page_context_choice:
         confirm_payload["page_context_choice"] = page_context_choice
+    if confirmed_intent.get("alternative_index") is not None:
+        confirm_payload["alternative_index"] = confirmed_intent["alternative_index"]
+    if confirmed_intent.get("selected_alternative"):
+        confirm_payload["selected_alternative"] = confirmed_intent["selected_alternative"]
 
     input_data = {"confirm_payload": confirm_payload}
     await emitter.emit(
@@ -123,7 +156,7 @@ async def confirm_node(state: AgentState) -> dict:
         logger.error("[run_id=%s] confirm failed: %s", run_id, str(e))
         await emitter.emit(
             run_id,
-            SSEEvent(type="node_end", node="confirm", phase="error", run_id=run_id, data={"error": str(e)}),
+            SSEEvent(type="node_end", node="confirm", phase="failed", run_id=run_id, data={"error": str(e)}),
         )
         return _error_state(state, run_id, "confirm", str(e), input_data, latency)
 
@@ -146,7 +179,7 @@ async def confirm_node(state: AgentState) -> dict:
             **state,
             "error": reason,
             "trace": trace[-50:],
-            "phase": "error",
+            "phase": "failed",
             "_next_node": "return_result",
         }
 
@@ -157,7 +190,7 @@ async def confirm_node(state: AgentState) -> dict:
     await emitter.emit(
         run_id,
         SSEEvent(
-            type="plan_preview_ready", node="confirm", phase="awaiting_apply",
+            type="plan_preview_ready", node="confirm", phase="confirmed",
             run_id=run_id, data={"plan": plan, "plan_preview": plan_preview, "gate": gate},
         ),
     )
@@ -168,7 +201,8 @@ async def confirm_node(state: AgentState) -> dict:
         "confirmed_intent": confirmed_intent,
         "plan_preview": plan_preview,
         "trace": trace[-50:],
-        "phase": "awaiting_apply",
+        "gate": gate,
+        "phase": "confirmed",
         "_next_node": "validate_plan",
     }
 
@@ -181,6 +215,6 @@ def _error_state(state, run_id, node, error, input_data, latency):
         **state,
         "error": error,
         "trace": trace[-50:],
-        "phase": "error",
+        "phase": "failed",
         "_next_node": "return_result",
     }

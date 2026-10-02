@@ -83,7 +83,7 @@ def test_historical_memory_cannot_reinterpret_confirmed_create(create_workspace,
 
     status_b = res_b.get("execution", {}).get("status")
     detail_b = res_b.get("execution", {}).get("detail", "")
-    assert status_b == "clarification_needed", (
+    assert status_b == "conflict", (
         f"Confirmed CREATE on existing target must yield explicit conflict, "
         f"got status={status_b!r} detail={detail_b!r} (FAIL)."
     )
@@ -104,7 +104,7 @@ def test_apply_engine_detects_plan_mismatch_and_returns_conflict(run_context):
     silently reinterpreting or applying a different plan.
 
     This test creates ambiguous on-disk state for a delete target and expects
-    `apply_engine` to return a `clarification_needed` style response.
+    `apply_engine` to return a `conflict` style response.
     """
     # Create two files that both map to the same capability name (KpiRow)
     ws = run_context.workspace
@@ -125,8 +125,8 @@ def test_apply_engine_detects_plan_mismatch_and_returns_conflict(run_context):
     res = apply_engine(str(uuid.uuid4()), plan.to_dict(), run_context, dry_run=True)
 
     status = res.get("execution", {}).get("status")
-    assert status == "clarification_needed", (
-        f"Expected clarification_needed for ambiguous delete, got: {status}"
+    assert status == "conflict", (
+        f"Expected conflict for ambiguous delete, got: {status}"
     )
 
 
@@ -226,7 +226,7 @@ def test_create_over_existing_component_in_custom_named_file_yields_conflict(cre
 
     status = res.get("execution", {}).get("status")
     detail = res.get("execution", {}).get("detail", "")
-    assert status == "clarification_needed", (
+    assert status == "conflict", (
         f"CREATE over existing physical target must conflict, got status={status!r} detail={detail!r}"
     )
     assert res.get("execution", {}).get("conflict") == "repository_conflict", detail
@@ -259,7 +259,7 @@ def test_modify_over_multiple_instances_without_selection_yields_conflict(run_co
     res = apply_engine(str(uuid.uuid4()), plan.to_dict(), run_context, dry_run=True)
 
     status = res.get("execution", {}).get("status")
-    assert status == "clarification_needed", (
+    assert status == "conflict", (
         f"Ambiguous MODIFY (N instances, no selection) must yield a conflict, got: {status}"
     )
     res_ops = res.get("execution", {}).get("operations", [])

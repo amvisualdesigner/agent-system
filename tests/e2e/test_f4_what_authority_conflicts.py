@@ -81,7 +81,7 @@ class TestConfirmedPlanWithoutAuthority:
     def test_missing_target_capability_is_invalid_confirmed_plan(self, repo_copy):
         plan = _plan([{"verb": "create", "object": "kpi"}])
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "invalid_confirmed_plan", ex
         assert ex["operations"] == [], ex
 
@@ -100,7 +100,7 @@ class TestConfirmedPlanWithoutAuthority:
             intents=[{"id": "i1", "capability": "capability.inexistente"}],
         )
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "missing_component", ex
         assert ex["operations"] == [], ex
 
@@ -112,7 +112,7 @@ class TestConfirmedPlanWithoutAuthority:
             intents=[{"id": "i1", "capability": "presentation.filter_panel"}],
         )
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "missing_component", ex
         assert ex["operations"] == [], ex
 
@@ -122,7 +122,7 @@ class TestConfirmedPlanWithoutAuthority:
                        "target_capability": CAP}])
         plan.pop("actions")
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "invalid_confirmed_plan", ex
         assert ex["operations"] == [], ex
 

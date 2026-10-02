@@ -48,7 +48,7 @@ from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops, FileOp
 from app.graphir.utils import extract_component_name
 from app.graphir.utils import check_repo_integrity
-from app.intent.models import FallbackExecutionRequest, RefactorChange
+from app.intent.models import FallbackExecutionRequest, RefactorChange, conflict_result
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 from app.graphir.constraint.models import FileNode, FileOpDecision
@@ -222,16 +222,13 @@ def _validate_confirmed_deletions(
         confirmed = set(confirmed_deletions)
         for pd in pending:
             if pd.capability not in confirmed:
-                return {
-                    "execution": {
-                        "status": "rejected",
-                        "reason": f"unconfirmed_deletion:{pd.capability}",
-                        "detail": f"Pending deletion '{pd.capability}' must be confirmed via confirmed_deletions. "
-                                 f"Confirmed: {confirmed}",
-                        "diff": None, "operations": [],
-                    },
-                    "context": {"repo_snapshot": []},
-                }
+                return conflict_result(
+                    "unconfirmed_deletion",
+                    f"Pending deletion '{pd.capability}' must be confirmed via "
+                    f"confirmed_deletions. Confirmed: {sorted(confirmed)}",
+                    candidates=[{"capability": pd.capability}],
+                    details={"unconfirmed": pd.capability, "confirmed": sorted(confirmed)},
+                )
     return None
 
 
@@ -432,6 +429,11 @@ def _validate_repository_matrix(
                     level=2,
                 ).to_result()
             if len(instances) > 1:
+                from app.graphir.structure.resolver import _instance_matches
+
+                chosen = [i for i in instances if _instance_matches(i, rc.instance_hint or "")]
+                if len(chosen) == 1:
+                    continue
                 paths = structural_index.resolve_all_file_paths(rc.name)
                 return FallbackExecutionRequest(
                     reason=(
@@ -443,6 +445,23 @@ def _validate_repository_matrix(
                     ),
                     conflict_type="ambiguity",
                     level=2,
+                    options=[
+                        {
+                            "instance_id": i.instance_id,
+                            "slot_id": i.slot_id,
+                            "label": i.slot_id or i.path,
+                            "path": i.path,
+                            "file_path": i.file_path,
+                            "instance_hint": i.slot_id or i.instance_id,
+                        }
+                        for i in instances
+                    ],
+                    details={
+                        "capability": rc.name,
+                        "required_field": "instance_hint",
+                        "candidate_count": len(instances),
+                        "supplied_instance_hint": rc.instance_hint,
+                    },
                 ).to_result()
         elif rc.action == DELETE:
             if structural_index is not None and not structural_index.exists(rc.name):
@@ -1281,6 +1300,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             conflict_type="invalid_confirmed_plan",
             level=2,
             details={"invalid_plan_actions": confirmed_actions},
+            retryable=False,
         ).to_result()
 
     # ── Build ExecutionContext ──
@@ -1362,6 +1382,7 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 details={
                     "dropped_actions": dropped_actions,
                 },
+                retryable=False,
             ).to_result()
 
         # ── Early exit: all capabilities resolved to KEEP ──
@@ -1423,24 +1444,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 )
 
                 if resolution.reason is not None:
-                    return {
-                        "execution": {
-                            "status": "clarification_needed",
-                            "reason": resolution.reason,
-                            "detail": (
-                                f"No structural targets resolved. "
-                                f"Canonicalization: {len(canon_trace.structural_valid)} valid, "
-                                f"{len(canon_trace.structural_unknown)} unknown, "
-                                f"{len(canon_trace.non_structural)} non_structural"
-                            ),
-                            "diff": None,
-                            "operations": [],
-                        },
-                        "context": {
-                            "repo_snapshot": [],
+                    return conflict_result(
+                        "target_not_found",
+                        resolution.reason,
+                        details={
                             "canonicalization_trace": canon_trace.to_dict(),
+                            "resolver_reason": resolution.reason,
                         },
-                    }
+                    )
         except AmbiguousStructuralTargetError as e:
             return FallbackExecutionRequest(
                 reason=str(e), conflict_type="ambiguity", level=2,
@@ -1550,21 +1561,13 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
             if p_op.action.lower() == "create":
                 abs_target = os.path.join(context.workspace, p_op.path)
                 if os.path.isfile(abs_target):
-                    return {
-                        "execution": {
-                            "status": "clarification_needed",
-                            "reason": "page_target_exists",
-                            "detail": (
-                                f"page_creator CONFLICT: target '{p_op.path}' "
-                                f"already exists; a new page requires a target "
-                                f"that does not exist. No overwrite, no "
-                                f"alternate path."
-                            ),
-                            "diff": None,
-                            "operations": [],
-                        },
-                        "context": {"repo_snapshot": []},
-                    }
+                    return conflict_result(
+                        "repository_conflict",
+                        f"page_creator CONFLICT: target '{p_op.path}' already "
+                        f"exists; a new page requires a target that does not "
+                        f"exist. No overwrite, no alternate path.",
+                        details={"target": p_op.path},
+                    )
             fileops.append(FileOp(
                 action=p_op.action.lower(),
                 path=p_op.path,
@@ -1849,13 +1852,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                     f"(e.g., \"remove the {names[0].replace('.tsx', '').lower()}\")."
                 )
     except AmbiguousStructuralTargetError as e:
-        return {
-            "execution": {
-                "status": "clarification_needed", "reason": "ambiguous_target",
-                "detail": str(e), "diff": None, "operations": [],
-            },
-            "context": {"repo_snapshot": []},
-        }
+        _cands = [
+            {"path": fp, "name": os.path.basename(fp)}
+            for fp in (locals().get("all_files") or [])
+        ]
+        return conflict_result(
+            "target_ambiguity", str(e), candidates=_cands,
+            details={"target": locals().get("target")},
+        )
 
     # ── Phase 5A+5C: Build substitution FileOps and add to pipeline ──
     sub_fileops: list[FileOp] = []

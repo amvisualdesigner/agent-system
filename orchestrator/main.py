@@ -13,7 +13,7 @@ from state import AgentState
 from graph import compiled_graph
 from models import (
     RunRequest, RunResponse,
-    ConfirmRequest, ApplyRequest,
+    ConfirmRequest, ApplyRequest, RetryRequest, CancelRequest,
     SSEEvent,
 )
 from run_id import validate_run_id
@@ -40,7 +40,7 @@ def _build_initial_state(run_id: str, task: str, start_node: str = "interpret", 
         "run_details": None,
         "error": None,
         "trace": [],
-        "phase": "planning",
+        "phase": "interpreting",
         "cancelled": False,
         "backend_run_id": None,
         "planner_meta": None,
@@ -68,7 +68,7 @@ async def run_graph(state: dict):
         logger.error("[run_id=%s] graph crashed: %s", run_id, str(e))
         await emitter.emit(
             run_id,
-            SSEEvent(type="error", phase="error", run_id=run_id, error=str(e)),
+            SSEEvent(type="error", phase="failed", run_id=run_id, error=str(e)),
         )
     finally:
         background_tasks.pop(run_id, None)
@@ -159,12 +159,15 @@ async def confirm_run(run_id: str, req: ConfirmRequest):
         "params": req.params or interpretation.get("params_proposed", {}),
         "user_message": req.user_message,
         "page_context_choice": req.page_context_choice,
+        # Structured disambiguation (Fase 5A) — never re-derived.
+        "alternative_index": req.alternative_index,
+        "selected_alternative": req.selected_alternative,
     }
 
     state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm", session_id=snapshot.get("session_id"))
     state["interpretation"] = interpretation
     state["confirmed_intent"] = confirmed_intent
-    state["phase"] = "confirming"
+    state["phase"] = "awaiting_confirmation"
 
     emitter.register(run_id)
     task = asyncio.create_task(run_graph(state))
@@ -182,18 +185,21 @@ async def apply_run(run_id: str, req: ApplyRequest = ApplyRequest()):
         raise HTTPException(status_code=404, detail="run not found")
 
     phase = snapshot.get("phase", "")
-    if phase not in ("awaiting_apply",):
+    if phase not in ("confirmed",):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot apply in phase '{phase}'. Expected 'awaiting_apply'.",
+            detail=f"Cannot apply in phase '{phase}'. Expected 'confirmed'.",
         )
 
     if run_id in background_tasks:
         raise HTTPException(status_code=409, detail="run already in progress")
 
-    # Check gate from plan_preview
-    plan_preview = snapshot.get("plan_preview", {})
-    gate = plan_preview.get("gate", {}) if isinstance(plan_preview, dict) else {}
+    # G10: the gate is a TOP-LEVEL field of the /agent/confirm response, not a
+    # child of plan_preview.
+    plan_preview = snapshot.get("plan_preview") or {}
+    gate = snapshot.get("gate")
+    if not isinstance(gate, dict) or not gate:
+        gate = plan_preview.get("gate", {}) if isinstance(plan_preview, dict) else {}
     if gate.get("blocked", False):
         raise HTTPException(
             status_code=400,
@@ -207,6 +213,7 @@ async def apply_run(run_id: str, req: ApplyRequest = ApplyRequest()):
     state["confirmed_intent"] = snapshot.get("confirmed_intent")
     state["plan"] = snapshot.get("plan")
     state["plan_preview"] = plan_preview
+    state["gate"] = gate
     state["phase"] = "applying"
 
     emitter.register(run_id)
@@ -214,6 +221,94 @@ async def apply_run(run_id: str, req: ApplyRequest = ApplyRequest()):
     background_tasks[run_id] = task
 
     return {"status": "accepted", "run_id": run_id, "message": "applying"}
+
+
+@app.post("/run/{run_id}/retry")
+async def retry_run(run_id: str, req: RetryRequest | None = None):
+    """Re-apply the SAME Confirmed Plan after a conflict (no reinterpretation)."""
+    validate_run_id(run_id)
+    req = req or RetryRequest()
+
+    snapshot = load_snapshot(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    phase = snapshot.get("phase", "")
+    if phase != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot retry in phase '{phase}'. Retry requires a Run parked "
+                "in 'confirmed' after a conflict."
+            ),
+        )
+
+    if run_id in background_tasks:
+        raise HTTPException(status_code=409, detail="run already in progress")
+
+    conflict = (snapshot.get("execution") or {}).get("conflict")
+    if conflict and snapshot.get("plan_retryable") is False:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Conflict '{conflict}' is not retryable. The Confirmed Plan is "
+                "inconsistent — start a new Run."
+            ),
+        )
+
+    logger.info("[run_id=%s] POST /run/%s/retry", run_id, run_id)
+
+    state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="retry", session_id=snapshot.get("session_id"))
+    state["interpretation"] = snapshot.get("interpretation")
+    state["confirmed_intent"] = snapshot.get("confirmed_intent")
+    state["plan"] = snapshot.get("plan")
+    state["plan_preview"] = snapshot.get("plan_preview") or {}
+    state["gate"] = snapshot.get("gate") or {}
+    state["is_retry"] = True
+    state["phase"] = "applying"
+
+    emitter.register(run_id)
+    task = asyncio.create_task(run_graph(state))
+    background_tasks[run_id] = task
+
+    return {"status": "accepted", "run_id": run_id, "message": "retrying"}
+
+
+@app.post("/run/{run_id}/cancel")
+async def cancel_run(run_id: str, req: CancelRequest | None = None):
+    """Cancel a Run before apply starts (never while applying)."""
+    validate_run_id(run_id)
+
+    snapshot = load_snapshot(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    phase = snapshot.get("phase", "")
+    cancellable = ("interpreting", "awaiting_confirmation", "confirmed")
+    if phase not in cancellable:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot cancel a run in phase '{phase}'. Cancellable phases: "
+                + ", ".join(cancellable) + "."
+            ),
+        )
+
+    from backend_client import call_cancel
+
+    try:
+        result = await call_cancel(run_id, reason=(req or CancelRequest()).reason)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if run_id in background_tasks:
+        background_tasks[run_id].cancel()
+
+    snapshot["phase"] = "cancelled"
+    snapshot["status"] = "cancelled"
+    save_snapshot(run_id, snapshot)
+
+    return {"status": "cancelled", "run_id": run_id, "result": result}
 
 
 @app.get("/stream/{run_id}")

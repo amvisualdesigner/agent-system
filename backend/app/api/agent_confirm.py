@@ -44,6 +44,10 @@ class ConfirmRequest(BaseModel):
     params: dict = {}
     user_message: str = ""
     page_context_choice: str | None = None
+    # Structured disambiguation of semantic ambiguity (Fase 5A). Selects one
+    # of `InterpretationDraft.alternatives` — never an implicit reinterpretation.
+    alternative_index: int | None = None
+    selected_alternative: str | None = None
 
 
 @router.post("/agent/confirm")
@@ -106,22 +110,97 @@ def _agent_confirm(req: ConfirmRequest):
     # ── Clarification guard: do not confirm if interpretation still needs clarification ──
     draft = state.get("interpretation_draft", {})
     draft_status = draft.get("status") if isinstance(draft, dict) else None
-    if draft_status == "needs_clarification":
+    if draft_status == "clarification_needed":
         has_choices = bool(draft.get("choices"))
         has_page_choice = bool(req.page_context_choice)
+        alternatives = draft.get("alternatives") or []
+        instance_choices = draft.get("instance_choices") or []
+        has_alt_choice = (
+            req.alternative_index is not None or bool(req.selected_alternative)
+        )
+        hinted = {a.get("target_capability") for a in req.actions if a.get("instance_hint")}
+        unresolved = [c.get("target_capability") for c in instance_choices
+                      if c.get("target_capability") not in hinted]
         if has_choices and not has_page_choice:
             return {
                 "status": "rejected",
                 "reason": "Clarification required: choose a page context via page_context_choice.",
-                "gate": {"blocked": True, "reason": "needs_clarification"},
+                "gate": {"blocked": True, "reason": "clarification_needed"},
             }
-        if not has_choices:
+        if alternatives and not has_alt_choice:
+            return {
+                "status": "rejected",
+                "reason": (
+                    "Clarification required: pick one of the proposed "
+                    "alternatives via alternative_index."
+                ),
+                "gate": {"blocked": True, "reason": "alternatives_pending"},
+                "alternatives": alternatives,
+            }
+        if unresolved:
+            return {
+                "status": "rejected",
+                "reason": (
+                    "Clarification required: select one instance per capability "
+                    "via instance_hint."
+                ),
+                "gate": {"blocked": True, "reason": "instance_choices_pending"},
+                "instance_choices": instance_choices,
+            }
+        if not has_choices and not alternatives and not instance_choices:
             return {
                 "status": "rejected",
                 "reason": "Clarification required: rephrase your request first.",
-                "gate": {"blocked": True, "reason": "needs_clarification"},
+                "gate": {"blocked": True, "reason": "clarification_needed"},
             }
-        # If user provided page_context_choice, clarification is resolved — proceed
+        # Every ambiguity source was answered with a structured selection.
+
+    # ── Structured disambiguation: the selected alternative is authoritative ──
+    requested_actions = list(req.actions)
+    selected_alternative: dict | None = None
+    if req.alternative_index is not None or req.selected_alternative:
+        draft_alternatives = draft.get("alternatives") or []
+        chosen: dict | None = None
+        if req.alternative_index is not None:
+            if not (0 <= req.alternative_index < len(draft_alternatives)):
+                return {
+                    "status": "rejected",
+                    "reason": (
+                        f"alternative_index {req.alternative_index} is out of "
+                        f"range (0..{len(draft_alternatives) - 1})."
+                    ),
+                    "gate": {"blocked": True, "reason": "invalid_alternative"},
+                }
+            chosen = draft_alternatives[req.alternative_index]
+        else:
+            for alt in draft_alternatives:
+                if alt.get("id") == req.selected_alternative:
+                    chosen = alt
+                    break
+            if chosen is None:
+                return {
+                    "status": "rejected",
+                    "reason": f"Unknown alternative '{req.selected_alternative}'.",
+                    "gate": {"blocked": True, "reason": "invalid_alternative"},
+                }
+        alt_actions = chosen.get("proposed_actions") or []
+        if not alt_actions:
+            return {
+                "status": "rejected",
+                "reason": f"Alternative '{chosen.get('id')}' carries no actions.",
+                "gate": {"blocked": True, "reason": "invalid_alternative"},
+            }
+        # The selection replaces the draft's actions; any human instance_hint
+        # chosen for the same capability is preserved.
+        hints = {a.get("target_capability"): a.get("instance_hint")
+                 for a in requested_actions if a.get("instance_hint")}
+        requested_actions = []
+        for a in alt_actions:
+            merged = dict(a)
+            if hints.get(merged.get("target_capability")):
+                merged["instance_hint"] = hints[merged["target_capability"]]
+            requested_actions.append(merged)
+        selected_alternative = chosen
 
     # Validate contract exists
     contract = get_contract(req.contract_id, req.contract_version)
@@ -133,9 +212,12 @@ def _agent_confirm(req: ConfirmRequest):
 
     # Build ConfirmedIntent — only pass fields IntentAction accepts.
     # WHAT/WHERE: 'attach' viaja por acción (decisión semántica del plan).
-    _ia_fields = {"verb", "target_capability", "params", "confidence", "instance_hint"}
+    _ia_fields = {
+        "verb", "target_capability", "source_capability", "params",
+        "confidence", "instance_hint",
+    }
     actions: list[IntentAction] = []
-    for a in req.actions:
+    for a in requested_actions:
         action = IntentAction(**{k: v for k, v in a.items() if k in _ia_fields})
         if a.get("attach"):
             action.attach = AttachRef.from_dict(a["attach"])
@@ -168,6 +250,10 @@ def _agent_confirm(req: ConfirmRequest):
         }
 
     # ── Idempotency: if already confirmed with same intent, return cached plan ──
+    # Confirm stays PURELY idempotent: the Confirmed Plan is byte-identical and
+    # no physical re-interpretation happens here. G6 (a stale snapshot reused
+    # forever when continuing a confirmed Plan) is resolved by /agent/retry,
+    # which re-captures the physical baseline without touching WHAT.
     if current_phase == RunPhase.CONFIRMED and state.get("compiled_plan"):
         cached = {
             "status": "ok",
@@ -175,6 +261,10 @@ def _agent_confirm(req: ConfirmRequest):
             "plan_preview": state.get("plan_preview"),
             "gate": state.get("gate", {"blocked": False}),
             "idempotent": True,
+            "run_phase": RunPhase.CONFIRMED.value,
+            "plan_retryable": bool(state.get("plan_retryable", False)),
+            "retry_available": bool(state.get("plan_retryable", False)),
+            "last_conflict": state.get("last_conflict"),
         }
         return cached
 
@@ -370,6 +460,10 @@ def _agent_confirm(req: ConfirmRequest):
         "plan": plan.to_dict(),
         "plan_preview": plan_preview,
         "gate": gate,
+        "run_phase": RunPhase.CONFIRMED.value,
+        "stage": "confirmed",
+        "plan_confirmed": True,
+        "plan_retryable": False,
     }
 
     # Persist: store confirmed intent, compiled plan, preview; transition to confirmed
@@ -378,6 +472,8 @@ def _agent_confirm(req: ConfirmRequest):
         "compiled_plan": plan.to_dict(),
         "plan_preview": plan_preview,
         "gate": gate,
+        "plan_retryable": False,
+        "last_conflict": None,
     }
     if page_creator_ops:
         save_extra["page_creator_ops"] = page_creator_ops
@@ -387,6 +483,16 @@ def _agent_confirm(req: ConfirmRequest):
         save_extra["apply_snapshot"] = apply_snapshot
     if preview_fileops:
         save_extra["preview_fileops"] = preview_fileops
+    # Audit trail of the structured disambiguation the human performed
+    # (Fase 5A). Never re-derived, never re-interpreted.
+    if selected_alternative is not None or req.alternative_index is not None \
+            or req.selected_alternative or req.page_context_choice:
+        save_extra["clarification_resolution"] = {
+            "alternative_id": (selected_alternative or {}).get("id"),
+            "alternative_index": req.alternative_index,
+            "selected_alternative": req.selected_alternative,
+            "page_context_choice": req.page_context_choice,
+        }
     save_run_state(run_id, save_extra)
     transition_phase(run_id, RunPhase.CONFIRMED)
 

@@ -119,14 +119,16 @@ class TestConfirmedDeletionsGate:
         )
 
     def test_rejects_unconfirmed(self):
-        """confirmed_deletions=[] con pending → rejected."""
+        """confirmed_deletions=[] con pending → conflict resoluble."""
         from app.engine.apply_engine import _validate_confirmed_deletions
 
         ir = self._make_ir_with_pending()
         result = _validate_confirmed_deletions(ir, [])
         assert result is not None
-        assert result["execution"]["status"] == "rejected"
-        assert "unconfirmed_deletion" in result["execution"]["reason"]
+        assert result["execution"]["status"] == "conflict"
+        assert result["execution"]["conflict"] == "unconfirmed_deletion"
+        assert result["execution"]["plan_confirmed"] is True
+        assert result["execution"]["plan_retryable"] is True
 
     def test_accepts_with_confirmed(self):
         """confirmed_deletions=["presentation.kpi_row"] → ok (None)."""

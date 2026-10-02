@@ -110,11 +110,11 @@ class TestAPIFullFlow:
 
     def test_interpret_invalid_needs_clarification(self, backend_client: httpx.Client):
         draft = api_interpret(backend_client, "I like the dashboard")
-        assert draft.get("status") == "needs_clarification"
+        assert draft.get("status") == "clarification_needed"
 
     def test_interpret_unsupported(self, backend_client: httpx.Client):
         draft = api_interpret(backend_client, "fix the database schema")
-        assert draft.get("status") in ("unsupported", "needs_clarification")
+        assert draft.get("status") in ("unsupported", "clarification_needed")
 
 
 class TestAPIConfirmFlow:
@@ -228,4 +228,4 @@ class TestAPIErrorCases:
 
     def test_invalid_capability_rejected(self, backend_client: httpx.Client):
         draft = api_interpret(backend_client, "add a filter panel")
-        assert draft.get("status") in ("ok", "needs_clarification", "unsupported")
+        assert draft.get("status") in ("ok", "clarification_needed", "unsupported")

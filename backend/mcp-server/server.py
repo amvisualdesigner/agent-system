@@ -107,6 +107,50 @@ async def agent_apply(run_id: str, dry_run: bool = False):
 
 
 # -------------------------
+# RETRY / CANCEL (Fase 5B)
+# -------------------------
+@mcp.tool()
+async def agent_retry(run_id: str, dry_run: bool = False):
+    """Re-apply the SAME Confirmed Plan after a conflict.
+
+    Re-captures the physical baseline (fresh snapshot) and re-runs the apply.
+    It never reinterprets, recompiles or modifies the Plan (WHAT/WHERE frozen).
+    Only valid for a Run parked in 'confirmed' after a conflict.
+    """
+    validate_run_id(run_id)
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            f"{BASE_URL}/agent/retry",
+            json={"run_id": run_id, "dry_run": dry_run}
+        )
+
+    if r.status_code >= 400:
+        return {"run_id": run_id, "status": "rejected", "detail": r.text}
+    return r.json()
+
+
+@mcp.tool()
+async def agent_cancel(run_id: str, reason: str = None):
+    """Cancel a Run before apply starts.
+
+    Allowed only in interpreting / awaiting_confirmation / confirmed.
+    Not allowed while applying. No artifact, Plan or worktree change is produced.
+    """
+    validate_run_id(run_id)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{BASE_URL}/agent/cancel",
+            json={"run_id": run_id, "reason": reason}
+        )
+
+    if r.status_code >= 400:
+        return {"run_id": run_id, "status": "rejected", "detail": r.text}
+    return r.json()
+
+
+# -------------------------
 # ONE-SHOT (interpret only, human-in-the-loop)
 # -------------------------
 @mcp.tool()
@@ -179,6 +223,11 @@ async def agent_review(run_id: str):
         "workspace": context.get("workspace"),
         "operations": execution.get("operations"),
         "status": execution.get("status"),
+        "run_phase": data.get("run_phase"),
+        "stage": data.get("stage"),
+        "plan_confirmed": data.get("plan_confirmed"),
+        "plan_retryable": data.get("plan_retryable"),
+        "last_conflict": data.get("last_conflict"),
     }
 
 

@@ -9,10 +9,10 @@ from nodes.return_result import return_result_node
 
 def entry_router(state: AgentState) -> str:
     """Conditional entry: dispatch to the right node based on phase."""
-    start = state.get("start_node") or state.get("phase", "planning")
+    start = state.get("start_node") or state.get("phase", "interpreting")
     if start == "confirm":
         return "confirm"
-    if start == "apply":
+    if start in ("apply", "retry"):
         return "call_apply"
     return "interpret"
 
@@ -58,7 +58,7 @@ graph.add_conditional_edges(
     },
 )
 
-# validate_plan: always goes to return_result (awaiting_apply or error)
+# validate_plan: always goes to return_result (confirmed or failed)
 graph.add_conditional_edges(
     "validate_plan",
     router,

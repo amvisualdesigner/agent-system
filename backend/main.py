@@ -78,5 +78,43 @@ def get_run(run_id: str):
         elif "workspace" not in ctx:
             ctx["workspace"] = workspace
 
+    # ----------------------------
+    # 3. RUN STATE — lifecycle authority
+    # ----------------------------
+    try:
+        from app.state.run_state import load_run_state
+
+        state = load_run_state(run_id)
+    except Exception:
+        state = None
+
+    if state:
+        phase = state.get("phase")
+        has_plan = bool(state.get("compiled_plan"))
+        result["run_phase"] = phase
+        result["plan_confirmed"] = has_plan
+        result["plan_retryable"] = bool(state.get("plan_retryable", False))
+        result["last_conflict"] = state.get("last_conflict")
+        result["conflict"] = state.get("last_conflict")
+        result["gate"] = state.get("gate")
+        result["apply_result"] = state.get("apply_result")
+        if phase == "interpreting":
+            result["stage"] = "interpretation"
+        elif phase == "awaiting_confirmation":
+            result["stage"] = "interpretation"
+        elif phase == "confirmed":
+            result["stage"] = "confirmed"
+        elif phase == "applying":
+            result["stage"] = "apply"
+        elif phase == "cancelled":
+            result["stage"] = "cancelled"
+        else:
+            result["stage"] = phase
+    else:
+        result["run_phase"] = None
+        result["plan_confirmed"] = False
+        result["plan_retryable"] = False
+        result["stage"] = "unknown"
+
     return result
 

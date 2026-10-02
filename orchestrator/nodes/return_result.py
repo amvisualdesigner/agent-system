@@ -21,13 +21,10 @@ async def return_result_node(state: AgentState) -> dict:
         result = RunResult(run_id=run_id, status="cancelled")
     elif error:
         logger.warning("[run_id=%s] result: error=%s", run_id, error)
-        result = RunResult(run_id=run_id, status="error", error=error)
+        result = RunResult(run_id=run_id, status="failed", error=error)
     elif phase == "awaiting_confirmation":
         logger.info("[run_id=%s] result: awaiting_confirmation", run_id)
         result = RunResult(run_id=run_id, status="awaiting_confirmation")
-    elif phase == "awaiting_apply":
-        logger.info("[run_id=%s] result: awaiting_apply", run_id)
-        result = RunResult(run_id=run_id, status="awaiting_apply")
     else:
         result_data = state.get("execution") or {}
         exec_block = result_data.get("execution", {})
@@ -54,13 +51,23 @@ async def return_result_node(state: AgentState) -> dict:
             status=status,
         )
 
-    terminal_ok = {"ok", "clarification_needed", "verify_failed"}
-    phase_label = "completed" if result.status in terminal_ok else phase
+    result_types = {"ok", "no_changes", "verify_failed", "conflict",
+                    "awaiting_confirmation", "cancelled", "failed"}
+    event_type = "result" if result.status in result_types else "error"
+
+    # The backend RunPhase is the only lifecycle authority: the orchestrator
+    # mirrors it. A conflict is NOT terminal (D1) — the Run goes back to
+    # `confirmed` so an explicit retry is possible.
     if cancelled:
         phase_label = "cancelled"
-
-    result_types = {"ok", "clarification_needed", "verify_failed", "awaiting_confirmation", "awaiting_apply"}
-    event_type = "result" if result.status in result_types else "error"
+    elif result.status == "conflict":
+        phase_label = "confirmed"
+    elif result.status in ("ok", "no_changes"):
+        phase_label = "completed"
+    elif error or result.status in ("failed", "verify_failed", "rejected", "error"):
+        phase_label = "failed"
+    else:
+        phase_label = phase
 
     snapshot = {
         "run_id": run_id,
@@ -79,6 +86,8 @@ async def return_result_node(state: AgentState) -> dict:
         "interpretation": state.get("interpretation"),
         "confirmed_intent": state.get("confirmed_intent"),
         "plan_preview": state.get("plan_preview"),
+        "gate": state.get("gate"),
+        "plan_retryable": (result.execution or {}).get("plan_retryable", False),
     }
     try:
         save_snapshot(run_id, snapshot)

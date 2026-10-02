@@ -405,7 +405,7 @@ class TestInvalidCapability:
     def test_unknown_action_needs_clarification(self):
         """Message without action verb → clarification needed."""
         result = simulate_interpret("I like the dashboard")
-        assert result["status"] == "needs_clarification"
+        assert result["status"] == "clarification_needed"
 
     def test_unsupported_contract_rejected(self):
         """Message that doesn't match any contract → unsupported."""

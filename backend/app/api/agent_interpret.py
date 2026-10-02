@@ -92,6 +92,8 @@ def agent_interpret(req: InterpretRequest):
             "alternatives": [],
             "params_proposed": {},
             "worktree_capabilities": [],
+            "stage": "interpretation",
+            "plan_confirmed": False,
             "clarification_question": (
                 "An internal error occurred while processing your request. "
                 "Please try again or rephrase."
@@ -109,7 +111,7 @@ def agent_interpret(req: InterpretRequest):
                 structural_index=structural_index,
             )
             if context_decision.needs_clarification:
-                draft.status = "needs_clarification"
+                draft.status = "clarification_needed"
                 draft.clarification_question = (
                     f"No encuentro una página '{context_decision.requested_context}' en el proyecto. "
                     f"¿Dónde quieres añadir los componentes?"
@@ -118,6 +120,17 @@ def agent_interpret(req: InterpretRequest):
             logger.warning("PageContextResolver failed: %s", e)
 
     draft_dict = draft.to_dict()
+    # Pre-plan wire contract: distinct from post-plan `conflict`.
+    draft_dict["stage"] = "interpretation"
+    draft_dict["plan_confirmed"] = False
+
+    # ── Deterministic instance choices (Fase 5A) ──
+    try:
+        from app.intent.instance_choices import enrich_draft_instance_choices
+
+        enrich_draft_instance_choices(draft_dict, structural_index)
+    except Exception as e:
+        logger.warning("instance choice enrichment failed: %s", e)
 
     # Merge page_context choices into draft_dict (not part of InterpretationDraft model)
     if context_decision and context_decision.needs_clarification:

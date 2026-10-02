@@ -7,7 +7,7 @@ Enforces the S1-A contract before Session Lifecycle:
      — never an empty commit and never a spurious git failure.
   2. RunPhase.COMPLETED is only reachable from a real successful apply
      (accepted + verified + committed, or explicit NO_CHANGES). Every other
-     outcome (rejected / verify_failed / clarification_needed / error) is
+     outcome (rejected / verify_failed / conflict / error) is
      terminal FAILED, and the apply outcome is persisted in run_state.
   3. verify_failed stages the worktree and STOPS: no commit, and no destructive
      reset/clean/checkout of the worktree state.
@@ -235,7 +235,7 @@ class TestPhaseMapping:
         assert state["phase"] == RunPhase.COMPLETED.value
         assert state["apply_result"] == status
 
-    @pytest.mark.parametrize("status", ["rejected", "verify_failed", "clarification_needed", "error"])
+    @pytest.mark.parametrize("status", ["rejected", "verify_failed", "error"])
     def test_non_success_statuses_fail(self, run_id, status, monkeypatch):
         from app.state.run_state import load_run_state
         from app.intent.models import RunPhase
@@ -250,6 +250,27 @@ class TestPhaseMapping:
             f"status={status} must never reach COMPLETED"
         )
         assert state["apply_result"] == status
+
+    def test_conflict_returns_to_confirmed_not_failed(self, run_id, monkeypatch):
+        """D1: a post-confirm conflict is NOT terminal — the Run stays retryable."""
+        from app.state.run_state import load_run_state
+        from app.intent.models import RunPhase
+        result = self._run_apply(
+            run_id,
+            {"execution": {
+                "status": "conflict",
+                "conflict": "repository_conflict",
+                "detail": "workspace moved",
+                "plan_retryable": True,
+            }},
+            monkeypatch,
+        )
+        assert result["execution"]["status"] == "conflict"
+        state = load_run_state(run_id)
+        assert state["phase"] == RunPhase.CONFIRMED.value
+        assert state["apply_result"] == "conflict"
+        assert state["plan_retryable"] is True
+        assert state["last_conflict"]["conflict"] == "repository_conflict"
 
     def test_verify_failed_never_completes(self, run_id, monkeypatch):
         from app.state.run_state import load_run_state

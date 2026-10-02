@@ -242,7 +242,7 @@ class StructuralIR:
                         op["instance_hint"] = rc.instance_hint
                 elif rc.action in (CREATE, MODIFY):
                     op["payload"] = dict(rc.params)
-                    if rc.action == CREATE and rc.instance_hint:
+                    if rc.instance_hint:
                         op["instance_hint"] = rc.instance_hint
                     if rc.action == CREATE and rc.attach_to:
                         op["attach_to"] = dict(rc.attach_to)
@@ -951,13 +951,18 @@ def complete_structure(
     instance_hints: dict[str, str] = {}
     for action in semantic_resolution.actions:
         hint = action.get("instance_hint")
-        if hint:
-            obj = action.get("object") or action.get("direct_object") or ""
-            # Find the capability that matches this action's object
-            for cap in capabilities:
-                if cap.endswith(obj):
-                    instance_hints[cap] = hint
-                    break
+        if not hint:
+            continue
+        # F4: target_capability is the CONFIRMED WHAT authority.
+        cap = (action.get("target_capability") or "").strip()
+        if cap:
+            instance_hints[cap] = hint
+            continue
+        obj = action.get("object") or action.get("direct_object") or ""
+        for c in capabilities:
+            if c.endswith(obj):
+                instance_hints[c] = hint
+                break
 
     # Build attach_map: {capability: attach_dict} from semantic actions.
     # WHAT/WHERE — cada acción CREATE con attach explicita el destino físico
@@ -1071,7 +1076,7 @@ def complete_structure(
             action=action,
             provenance=cap_provenance,
             instance_only=instance_only,
-            instance_hint=instance_hints.get(cap) if action == CREATE else None,
+            instance_hint=instance_hints.get(cap) if action in (CREATE, MODIFY) else None,
             attach_to=attach_map.get(cap) if action == CREATE else None,
         ))
 

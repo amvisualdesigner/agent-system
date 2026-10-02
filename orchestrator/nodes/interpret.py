@@ -44,7 +44,7 @@ async def interpret_node(state: AgentState) -> dict:
         logger.error("[run_id=%s] interpret failed: %s", run_id, str(e))
         await emitter.emit(
             run_id,
-            SSEEvent(type="node_end", node="interpret", phase="error", run_id=run_id, data={"error": str(e)}),
+            SSEEvent(type="node_end", node="interpret", phase="failed", run_id=run_id, data={"error": str(e)}),
         )
         return _error_state(state, run_id, "interpret", str(e), input_data, latency)
 
@@ -63,7 +63,7 @@ async def interpret_node(state: AgentState) -> dict:
     )
 
     status = draft.get("status", "ok")
-    if status == "needs_clarification":
+    if status == "clarification_needed":
         # No retry — emit interpretation_ready with clarification question so user can refine
         logger.info("[run_id=%s] interpret: needs_clarification: %s", run_id,
                      draft.get("clarification_question", "unspecified"))
@@ -133,6 +133,6 @@ def _error_state(state, run_id, node, error, input_data, latency):
         **state,
         "error": error,
         "trace": trace[-50:],
-        "phase": "error",
+        "phase": "failed",
         "_next_node": "return_result",
     }

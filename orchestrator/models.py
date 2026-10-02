@@ -26,11 +26,21 @@ class ConfirmRequest(BaseModel):
     params: Dict[str, Any] = {}
     user_message: str = ""
     page_context_choice: str | None = None
+    alternative_index: int | None = None
+    selected_alternative: str | None = None
 
 
 class ApplyRequest(BaseModel):
     dry_run: bool = False
     confirmed_deletions: list[str] = []
+
+
+class RetryRequest(ApplyRequest):
+    """Retry re-applies the SAME Confirmed Plan. It never re-interprets."""
+
+
+class CancelRequest(BaseModel):
+    reason: str | None = None
 
 
 class SSEEvent(BaseModel):

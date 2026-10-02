@@ -19,7 +19,7 @@ def simulate_interpret(message: str) -> dict:
     if not catalog_entry:
         return {"status": "unsupported"}
     if not _has_action_verb(message):
-        return {"status": "needs_clarification", "contract_id": contract_id}
+        return {"status": "clarification_needed", "contract_id": contract_id}
 
     lower = message.lower()
     actions = []

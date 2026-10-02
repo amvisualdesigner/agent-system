@@ -173,6 +173,95 @@ def _has_action_verb(message: str) -> bool:
     return False
 
 
+def _detect_verbs(message: str) -> list[str]:
+    """Deterministically detect which action verbs the message expresses."""
+    lower = message.lower()
+    return [
+        verb for verb, triggers in _ACTION_TRIGGERS.items()
+        if any(t in lower for t in triggers)
+    ]
+
+
+def _capability_verb_score(capability: dict, message_lower: str) -> float:
+    """Deterministic lexical affinity between a catalog capability and the message."""
+    terms = [capability.get("label", "") or "", capability.get("id", "") or ""]
+    terms += list(capability.get("synonyms", []) or [])
+    score = 0.0
+    for term in terms:
+        term_lower = str(term).lower().strip()
+        if not term_lower:
+            continue
+        if term_lower in message_lower:
+            score += 0.6
+            continue
+        tokens = {t for t in term_lower.replace("_", " ").replace(".", " ").split() if len(t) > 2}
+        if tokens and tokens & set(message_lower.split()):
+            score += 0.3
+    return score
+
+
+def _build_semantic_alternatives(
+    contract_id: str,
+    contract_version: int,
+    catalog_entry: dict,
+    message: str,
+    max_options: int = 3,
+) -> list[dict]:
+    """Structured semantic alternatives (Fase 5A / G8).
+
+    Purely deterministic: detected verbs × catalog capabilities, ranked by
+    lexical affinity. This is the SEMANTIC ambiguity surface and is distinct
+    from `instance_choices` (structural index) and `choices` (page context).
+    Empty when the message does not express ≥2 plausible capabilities.
+    """
+    verbs = _detect_verbs(message)
+    if not verbs:
+        return []
+
+    message_lower = message.lower()
+    ranked: list[tuple[float, str, dict, str]] = []
+    for cap in catalog_entry.get("capabilities", []):
+        cap_verbs = set((cap.get("verbs") or {}).keys())
+        matched = [v for v in verbs if v in cap_verbs]
+        if not matched:
+            continue
+        verb = matched[0]
+        score = _capability_verb_score(cap, message_lower)
+        # Only lexically plausible candidates: a capability the message says
+        # nothing about is not an "alternative", it is noise.
+        if score <= 0:
+            continue
+        ranked.append((score, cap["id"], cap, verb))
+
+    if len(ranked) < 2:
+        return []
+
+    # Deterministic order: score desc, then capability id asc.
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+
+    alternatives = []
+    for idx, (score, cap_id, cap, verb) in enumerate(ranked[:max_options]):
+        label = cap.get("label", cap_id)
+        alternatives.append({
+            "id": f"alt_{idx}",
+            "kind": "capability",
+            "label": f"{verb} {label}".strip(),
+            "description": (
+                f"{cap.get('description') or label}"
+                if cap.get("description") else label
+            ),
+            "contract_id": contract_id,
+            "contract_version": contract_version,
+            "score": round(score, 3),
+            "proposed_actions": [{
+                "verb": verb,
+                "target_capability": cap_id,
+                "confidence": max(0.5, round(min(score, 1.0), 3)),
+            }],
+        })
+    return alternatives
+
+
 def _detect_potential_multi_contract(
     message: str,
     contract_id: str,
@@ -441,7 +530,7 @@ def interpret(
     if not _has_action_verb(message):
         return InterpretationDraft(
             interpretation_id=interpretation_id,
-            status="needs_clarification",
+            status="clarification_needed",
             contract_id=contract_id,
             contract_version=1,
             proposed_actions=[],
@@ -476,7 +565,7 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
     if "error" in raw:
         return InterpretationDraft(
             interpretation_id=interpretation_id,
-            status="needs_clarification",
+            status="clarification_needed",
             contract_id=contract_id,
             contract_version=1,
             proposed_actions=[],
@@ -496,11 +585,13 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
     if clarification_needed:
         return InterpretationDraft(
             interpretation_id=interpretation_id,
-            status="needs_clarification",
+            status="clarification_needed",
             contract_id=contract_id,
             contract_version=raw.get("contract_version", 1),
             proposed_actions=raw.get("actions", []),
-            alternatives=[],
+            alternatives=_build_semantic_alternatives(
+                contract_id, raw.get("contract_version", 1), catalog_entry, message,
+            ),
             params_proposed=raw.get("params", {}),
             worktree_capabilities=worktree_caps,
             clarification_question=raw.get("clarification_question", "Could you provide more detail?"),
@@ -511,7 +602,7 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
     if not actions:
         return InterpretationDraft(
             interpretation_id=interpretation_id,
-            status="needs_clarification",
+            status="clarification_needed",
             contract_id=contract_id,
             contract_version=raw.get("contract_version", 1),
             proposed_actions=[],
@@ -551,7 +642,9 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
         contract_id=contract_id,
         contract_version=raw.get("contract_version", 1),
         proposed_actions=enriched,
-        alternatives=[],
+        alternatives=_build_semantic_alternatives(
+            contract_id, raw.get("contract_version", 1), catalog_entry, message,
+        ),
         params_proposed=raw.get("params", {}),
         worktree_capabilities=worktree_caps,
         clarification_question=clarification,

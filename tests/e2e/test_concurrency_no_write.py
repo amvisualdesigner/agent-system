@@ -99,11 +99,14 @@ class TestConcurrencyNoWrite:
 
         execution = result.get("execution", {})
         assert execution.get("status") == "conflict", result
-        assert execution.get("reason") == "concurrency", execution
+        assert execution.get("conflict") == "concurrency", execution
         assert execution.get("operations") == []
         assert execution.get("diff") is None
-        # Phase reverted to confirmed: the user can restart (re-plan) or cancel.
+        assert execution.get("plan_confirmed") is True
+        assert execution.get("plan_retryable") is True
+        # Phase reverted to confirmed: the user can retry (fresh snapshot) or cancel.
         assert state.get("phase") == "confirmed"
+        assert state.get("plan_retryable") is True
 
     def test_stale_workspace_leaves_files_untouched(self):
         from app.api.agent_apply import _agent_apply

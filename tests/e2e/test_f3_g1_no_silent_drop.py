@@ -102,7 +102,7 @@ class TestG1NoSilentDrop:
         assert ex["status"] != "ok", ex
         assert ex.get("operations") in ([], None), ex
         # Conflicto explícito con la semántica existente.
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex.get("conflict") == "missing_component", ex
         assert "cannot be expressed" in ex.get("detail", "") or "not in contract" in ex.get("detail", ""), ex
         # Sin reinterpretación: ninguna operation CREATE/MODIFY emitida.
@@ -138,7 +138,7 @@ class TestG1NoSilentDrop:
         result = _apply(ws, plan)
         ex = result["execution"]
 
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex.get("conflict") == "missing_component", ex
         assert ex.get("operations") == [], ex
 
@@ -151,7 +151,7 @@ class TestG1NoSilentDrop:
 
         # Comportamiento preexistente: CREATE sobre un target ya existente → conflicto
         # explícito (nunca ok silencioso); CREATE sobre target ausente → materializa.
-        assert ex["status"] in ("clarification_needed", "ok", "verify_failed"), ex
+        assert ex["status"] in ("conflict", "ok", "verify_failed"), ex
         assert ex.get("conflict") != "missing_component", ex
         ops = ex.get("operations") or []
         if ex["status"] in ("ok", "verify_failed"):
@@ -165,7 +165,7 @@ class TestG1NoSilentDrop:
         result = _apply(ws, plan)
         ex = result["execution"]
 
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex.get("conflict") == "missing_component", ex
         assert ex.get("operations") == [], ex
 
@@ -177,7 +177,7 @@ class TestG1NoSilentDrop:
         result = _apply(ws, plan)
         ex = result["execution"]
 
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex.get("conflict") == "missing_component", ex
         assert ex.get("conflict") != "repository_conflict", (
             "RepositoryValidation NO debe ser quien corrija la pérdida semántica"

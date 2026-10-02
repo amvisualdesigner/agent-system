@@ -11,7 +11,7 @@ async def validate_plan_node(state: AgentState) -> dict:
     run_id = state["run_id"]
     logger.info("node=validate_plan run_id=%s", run_id)
 
-    phase = state.get("phase", "confirming")
+    phase = state.get("phase", "confirmed")
 
     if state.get("cancelled"):
         logger.warning("[run_id=%s] validate_plan cancelled", run_id)
@@ -19,7 +19,7 @@ async def validate_plan_node(state: AgentState) -> dict:
 
     if state.get("error"):
         logger.warning("[run_id=%s] validate_plan skipped (prior error)", run_id)
-        return {**state, "phase": "error", "_next_node": "return_result"}
+        return {**state, "phase": "failed", "_next_node": "return_result"}
 
     await emitter.emit(
         run_id,
@@ -34,7 +34,7 @@ async def validate_plan_node(state: AgentState) -> dict:
         output = {"valid": False, "reason": "no_plan"}
         trace = _add_trace(state, "validate_plan", input_data, output, 0)
         await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-        return {**state, "trace": trace[-50:], "phase": "error", "error": "no_plan", "_next_node": "return_result"}
+        return {**state, "trace": trace[-50:], "phase": "failed", "error": "no_plan", "_next_node": "return_result"}
 
     # Compiled plan from /agent/confirm
     actions = plan.get("actions", [])
@@ -52,14 +52,14 @@ async def validate_plan_node(state: AgentState) -> dict:
         output = {"valid": True}
         trace = _add_trace(state, "validate_plan", input_data, output, 0)
         await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-        # Go to awaiting_apply — user must trigger apply via POST /run/{id}/apply
-        return {**state, "trace": trace[-50:], "phase": "awaiting_apply", "_next_node": "return_result"}
+        # Confirmed and parked — user triggers apply via POST /run/{id}/apply
+        return {**state, "trace": trace[-50:], "phase": "confirmed", "_next_node": "return_result"}
 
     logger.warning("[run_id=%s] validate_plan: invalid plan (no actions, no skill_ir)", run_id)
     output = {"valid": False, "reason": "no_valid_actions"}
     trace = _add_trace(state, "validate_plan", input_data, output, 0)
     await emitter.emit(run_id, SSEEvent(type="node_end", node="validate_plan", phase=phase, run_id=run_id, data=output))
-    return {**state, "trace": trace[-50:], "_next_node": "return_result", "error": "no_valid_actions", "phase": "error"}
+    return {**state, "trace": trace[-50:], "_next_node": "return_result", "error": "no_valid_actions", "phase": "failed"}
 
 
 def _add_trace(state, node, input_data, output, latency):

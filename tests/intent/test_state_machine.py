@@ -38,11 +38,17 @@ class TestPhaseTransitions:
         validate_transition(RunPhase.APPLYING, RunPhase.COMPLETED)
 
     def test_valid_transition_non_terminal_to_cancelled(self):
-        """Cualquier fase no terminal puede ir a cancelled."""
+        """Cualquier fase no terminal puede ir a cancelled (excepto applying)."""
         terminal = {RunPhase.COMPLETED, RunPhase.FAILED, RunPhase.CANCELLED}
         for phase in RunPhase:
-            if phase not in terminal:
-                validate_transition(phase, RunPhase.CANCELLED)
+            if phase in terminal or phase == RunPhase.APPLYING:
+                continue
+            validate_transition(phase, RunPhase.CANCELLED)
+
+    def test_invalid_applying_to_cancelled(self):
+        """Cancelar durante applying NO está permitido (sub-decisión B)."""
+        with pytest.raises(ValueError, match="Cannot transition"):
+            validate_transition(RunPhase.APPLYING, RunPhase.CANCELLED)
 
     def test_invalid_skip_interpret(self):
         """Cannot confirm without interpreting first."""
@@ -452,8 +458,8 @@ class TestTransitionMatrix:
             (RunPhase.CONFIRMED, RunPhase.APPLYING),
             (RunPhase.CONFIRMED, RunPhase.CANCELLED),
             (RunPhase.APPLYING, RunPhase.COMPLETED),
+            (RunPhase.APPLYING, RunPhase.CONFIRMED),
             (RunPhase.APPLYING, RunPhase.FAILED),
-            (RunPhase.APPLYING, RunPhase.CANCELLED),
         }
 
         for current in RunPhase:

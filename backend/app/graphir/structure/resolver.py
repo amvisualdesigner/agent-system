@@ -17,12 +17,16 @@ if TYPE_CHECKING:
 GLOBAL_THRESHOLD: float = 0.5
 
 
-def _select_instance(instances: list[ComponentInstanceInfo]) -> str | None:
+def _select_instance(
+    instances: list[ComponentInstanceInfo],
+    instance_hint: str | None = None,
+) -> str | None:
     """Strict deterministic instance selection.
 
+    0 instances → return None (caller creates new)
+    explicit instance_hint → the single instance it names (no fuzzy)
     1 instance → return its instance_id
     N instances → return min lexicographic instance_id
-    0 instances → return None (caller creates new)
 
     F11 contract: PROPOSAL/PROPERTE-level only. This selection feeds
     `capability_to_path` (used for RepositoryValidation R1c projection and
@@ -33,7 +37,34 @@ def _select_instance(instances: list[ComponentInstanceInfo]) -> str | None:
     """
     if not instances:
         return None
+    if instance_hint:
+        matched = [i for i in instances if _instance_matches(i, instance_hint)]
+        if len(matched) == 1:
+            return matched[0].instance_id
+        if len(matched) > 1:
+            raise AmbiguousStructuralTargetError(
+                f"instance_hint '{instance_hint}' matches multiple instances for "
+                f"'{instances[0].capability}'. Select a single instance."
+            )
     return min(info.instance_id for info in instances)
+
+
+def _instance_matches(inst: ComponentInstanceInfo, hint: str) -> bool:
+    """Exact identity match for a human-selected instance (no fuzzy)."""
+    if not hint:
+        return False
+    needle = hint.strip().lower()
+    if not needle:
+        return False
+    if (inst.slot_id or "").lower() == needle:
+        return True
+    if str(inst.instance_id).lower() == needle:
+        return True
+    if inst.path.lower() == needle:
+        return True
+    if inst.file_path and inst.file_path.lower() == needle:
+        return True
+    return False
 
 
 def resolve(
@@ -82,9 +113,15 @@ def resolve(
 
         # ── Determine instance_id ──
         instance_id = None
+        selected_inst = None
+        instance_hint = op.get("instance_hint")
         if structural_index is not None:
             instances = structural_index.get_instances(target)
-            instance_id = _select_instance(instances)
+            instance_id = _select_instance(instances, instance_hint)
+            if instance_hint:
+                matched = [i for i in instances if _instance_matches(i, instance_hint)]
+                if len(matched) == 1:
+                    selected_inst = matched[0]
 
         if instance_id is None:
             instance_id = "0"
@@ -93,6 +130,17 @@ def resolve(
 
         # ── Determine path ──
         candidates = registry.resolve_candidates(target)
+
+        # Human-selected instance IS the physical target (exact, no fuzzy).
+        if selected_inst is not None and selected_inst.file_path:
+            capability_to_path[target] = selected_inst.file_path
+            total_score += 1.0
+            resolved_count += 1
+            trace.append(
+                f"op:{action}:{target} → {selected_inst.file_path} "
+                f"(instance={instance_id}, instance_hint={instance_hint})"
+            )
+            continue
 
         if not candidates:
             if structural_index is not None:

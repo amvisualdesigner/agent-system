@@ -17,6 +17,7 @@ __all__ = [
     "RefactorChange",
     "PendingDeletion",
     "FallbackExecutionRequest",
+    "conflict_result",
 ]
 
 
@@ -25,11 +26,14 @@ class RunPhase(str, Enum):
 
     Transiciones permitidas:
         interpreting → awaiting_confirmation
-        awaiting_confirmation → confirmed         (via /confirm)
-        confirmed → applying                       (via /apply)
-        applying → completed                       (success)
-        applying → failed                          (error)
-        * → cancelled
+        awaiting_confirmation → confirmed          (via /confirm)
+        confirmed → applying                        (via /apply)
+        applying → completed                        (success)
+        applying → confirmed                        (conflict resoluble, Plan intacto)
+        applying → failed                           (error técnico, no resoluble)
+        interpreting | awaiting_confirmation | confirmed → cancelled
+
+    Cancelar durante `applying` NO está permitido (sub-decisión B).
     """
     INTERPRETING = "interpreting"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
@@ -44,7 +48,7 @@ _VALID_TRANSITIONS: dict[RunPhase, set[RunPhase]] = {
     RunPhase.INTERPRETING: {RunPhase.AWAITING_CONFIRMATION, RunPhase.CANCELLED},
     RunPhase.AWAITING_CONFIRMATION: {RunPhase.CONFIRMED, RunPhase.CANCELLED},
     RunPhase.CONFIRMED: {RunPhase.APPLYING, RunPhase.CANCELLED},
-    RunPhase.APPLYING: {RunPhase.COMPLETED, RunPhase.FAILED, RunPhase.CANCELLED},
+    RunPhase.APPLYING: {RunPhase.COMPLETED, RunPhase.CONFIRMED, RunPhase.FAILED},
     RunPhase.COMPLETED: set(),
     RunPhase.FAILED: set(),
     RunPhase.CANCELLED: set(),
@@ -162,7 +166,7 @@ class IntentAction:
 class InterpretationDraft:
     """Propuesta de intención — salida del LLM, antes de confirmación humana."""
     interpretation_id: str
-    status: str  # "ok" | "needs_clarification" | "unsupported"
+    status: str  # "ok" | "clarification_needed" | "unsupported"
     contract_id: str
     contract_version: int
     proposed_actions: list[dict]  # [{verb, target_capability, label, confidence, reason}]
@@ -286,23 +290,60 @@ class FallbackExecutionRequest:
         "target_ambiguity",
         "target_not_found",
         "invalid_confirmed_plan",
+        # The workspace changed after confirm. It cannot be expressed by any
+        # catalog category: it is not about WHAT, only about the physical
+        # baseline. Resolution is exclusively an explicit retry.
+        "concurrency",
     ]
     level: int  # 0=info, 1=warning, 2=blocking
     details: dict = field(default_factory=dict)
     options: list[dict] = field(default_factory=list)
+    retryable: bool = True
 
     def to_result(self) -> dict:
-        status = "clarification_needed" if self.level >= 2 else "warning"
-        return {
-            "execution": {
-                "status": status,
-                "conflict": self.conflict_type,
-                "detail": self.reason,
-                "diff": None,
-                "operations": [],
-            },
-            "context": {"fallback": True},
-        }
+        return conflict_result(
+            self.conflict_type,
+            self.reason,
+            candidates=self.options,
+            details=self.details,
+            retryable=self.retryable,
+        )
+
+
+def conflict_result(
+    conflict_type: str,
+    detail: str,
+    *,
+    candidates: list[dict] | None = None,
+    details: dict | None = None,
+    operations: list[dict] | None = None,
+    retryable: bool = True,
+    run_phase: str = "confirmed",
+) -> dict:
+    """Canonical post-confirm conflict payload.
+
+    Un conflicto post-confirm NO terminaliza el Run: el Confirmed Plan sigue
+    siendo la única autoridad semántica y el Run vuelve a ``confirmed`` para
+    permitir un retry explícito con snapshot físico fresco (D1/sub-decisión A).
+    """
+    execution: dict = {
+        "status": "conflict",
+        "stage": "apply",
+        "plan_confirmed": True,
+        "plan_retryable": bool(retryable),
+        "run_phase": run_phase,
+        "conflict": conflict_type,
+        "detail": detail,
+        "candidates": list(candidates or []),
+        "operations": list(operations or []),
+        "diff": None,
+    }
+    if details:
+        execution["details"] = details
+    return {
+        "execution": execution,
+        "context": {"fallback": True, "repo_snapshot": []},
+    }
 
 
 @dataclass

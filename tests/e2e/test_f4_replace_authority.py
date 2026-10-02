@@ -153,7 +153,7 @@ class TestMissingTargetCapability:
                            "params": {}, "confidence": 1.0}],
         )
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "invalid_confirmed_plan", ex
         assert ex["operations"] == [], ex
 
@@ -168,7 +168,7 @@ class TestMissingTargetCapability:
                            "params": {}, "confidence": 1.0}],
         )
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "invalid_confirmed_plan", ex
         assert "frame action" in (ex.get("detail") or ""), ex
         assert ex["operations"] == [], ex
@@ -212,7 +212,7 @@ class TestNonexpressibleReplaceTarget:
             target_capability="presentation.chart.pie",
         )], intents=[{"id": "i1", "capability": "presentation.chart.pie"}])
         ex = _apply(repo_copy, plan)["execution"]
-        assert ex["status"] == "clarification_needed", ex
+        assert ex["status"] == "conflict", ex
         assert ex["conflict"] == "missing_component", ex
         assert ex["operations"] == [], ex
 

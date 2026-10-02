@@ -34,7 +34,7 @@ def _simulate_interpret(message: str) -> dict:
         return {"status": "unsupported"}
 
     if not _has_action_verb(message):
-        return {"status": "needs_clarification", "contract_id": contract_id}
+        return {"status": "clarification_needed", "contract_id": contract_id}
 
     # Para test, hardcodeamos los actions esperados según el message
     lower = message.lower()
