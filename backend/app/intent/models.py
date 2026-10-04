@@ -18,6 +18,15 @@ __all__ = [
     "PendingDeletion",
     "FallbackExecutionRequest",
     "conflict_result",
+    "DataSourceRef",
+    "DataSchemaRef",
+    "DataMappingEntry",
+    "DataBinding",
+    "BindingRequirement",
+    "BindingProposal",
+    "EvidenceItem",
+    "SOURCE_KINDS",
+    "BINDING_PROPOSAL_STATUSES",
 ]
 
 
@@ -157,6 +166,280 @@ class IntentAction:
     confidence: float = 1.0
     instance_hint: str | None = None
     attach: AttachRef | None = None
+    binding: "DataBinding | None" = None
+
+
+# ── Data Binding (Fase 6) ───────────────────────────────────────────
+#
+# DataBinding = conexión de datos CONFIRMADA. Tras /agent/confirm es
+# inmutable y es la única autoridad: Renderer, GraphIR y
+# RepositoryValidation la consumen; nadie la redescubre ni la modifica.
+#
+# BindingRequirement / BindingProposal / EvidenceItem viven SOLO en la
+# fase pre-confirmación. BindingProposal NO es DataBinding: son tipos
+# distintos y no intercambiables.
+
+
+SOURCE_KINDS = ("hook", "slice", "service", "symbol", "query")
+
+BINDING_PROPOSAL_STATUSES = ("auto_unique", "needs_choice", "unresolved")
+
+
+@dataclass(frozen=True)
+class DataSourceRef:
+    """Identidad estable de una fuente de datos.
+
+    NO admite nombres libres, scores ni fuzzy matching: `kind` + `ref`
+    (+ `selector`) deben resolverse de forma determinista contra el
+    worktree o el registry v4.
+
+    kind: catálogo cerrado (SOURCE_KINDS).
+    ref: identificador repo-based (p.ej. "hook:useDashboardData",
+         "slice:SalesOverviewPage.filters").
+    selector: subpath dentro de la fuente (p.ej. "kpiData").
+    """
+    kind: str
+    ref: str
+    selector: str | None = None
+
+    def to_dict(self) -> dict:
+        d = {"kind": self.kind, "ref": self.ref}
+        if self.selector is not None:
+            d["selector"] = self.selector
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "DataSourceRef | None":
+        if not d:
+            return None
+        return cls(
+            kind=d.get("kind", ""),
+            ref=d.get("ref", ""),
+            selector=d.get("selector"),
+        )
+
+    def identity(self) -> tuple[str, str, str | None]:
+        return (self.kind, self.ref, self.selector)
+
+
+@dataclass(frozen=True)
+class DataSchemaRef:
+    """Referencia al esquema de una fuente — NO un snapshot de tipos.
+
+    ref: referencia estable al esquema declarado (p.ej.
+         "data_access:Page.slices" o "contract:analytics.filter").
+    shape: forma mínima necesaria para validar compatibilidad
+           ("scalar" | "array" | "object" | "unknown").
+    fields: solo campos demostrables y relevantes para el mapping.
+    """
+    ref: str
+    shape: str = "unknown"
+    fields: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "ref": self.ref,
+            "shape": self.shape,
+            "fields": list(self.fields),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "DataSchemaRef | None":
+        if not d:
+            return None
+        fields = d.get("fields") or ()
+        if isinstance(fields, str):
+            fields = (fields,)
+        return cls(
+            ref=d.get("ref", ""),
+            shape=d.get("shape", "unknown"),
+            fields=tuple(fields),
+        )
+
+
+@dataclass(frozen=True)
+class DataMappingEntry:
+    """Un mapeo dato → prop del consumidor.
+
+    Es el RESULTADO de evaluar BindingRequirement × schema de la fuente,
+    nunca un input circular de la compatibilidad.
+
+    transform: nombre de la whitelist de transforms del resolver
+               (identity/items/wrap/value/label). None => "identity".
+    """
+    prop: str
+    from_field: str
+    transform: str | None = None
+    required: bool = False
+    default: Any | None = None
+
+    def to_dict(self) -> dict:
+        d = {
+            "prop": self.prop,
+            "from_field": self.from_field,
+            "required": self.required,
+        }
+        if self.transform is not None:
+            d["transform"] = self.transform
+        if self.default is not None:
+            d["default"] = self.default
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DataMappingEntry":
+        return cls(
+            prop=d.get("prop", ""),
+            from_field=d.get("from_field", ""),
+            transform=d.get("transform"),
+            required=bool(d.get("required", False)),
+            default=d.get("default"),
+        )
+
+
+@dataclass(frozen=True)
+class DataBinding:
+    """Conexión de datos CONFIRMADA — inmutable post-confirmación.
+
+    Invariante: si el binding existe, mapping tiene ≥1 entrada y
+    source.ref no está vacío.
+    """
+    source: DataSourceRef
+    schema: DataSchemaRef | None = None
+    mapping: tuple[DataMappingEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.source or not self.source.ref:
+            raise ValueError("DataBinding requires a non-empty source.ref")
+        if not self.mapping:
+            raise ValueError("DataBinding requires at least one mapping entry")
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source.to_dict(),
+            "schema": self.schema.to_dict() if self.schema else None,
+            "mapping": [m.to_dict() for m in self.mapping],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "DataBinding | None":
+        """Reconstruye un DataBinding. Devuelve None si el dict está incompleto.
+
+        Tolerancia deliberada en el frontera de transporte: un dict sin
+        source o sin mapping NO es un binding, es ausencia de binding
+        (binding=None). La decisión semántica "esta acción requería binding
+        y no lo tiene" se toma en la validación de confirm, no aquí.
+        """
+        if not d:
+            return None
+        source = DataSourceRef.from_dict(d.get("source"))
+        if source is None or not source.ref:
+            return None
+        mapping = tuple(
+            DataMappingEntry.from_dict(m) for m in (d.get("mapping") or [])
+            if isinstance(m, dict)
+        )
+        if not mapping:
+            return None
+        return cls(
+            source=source,
+            schema=DataSchemaRef.from_dict(d.get("schema")),
+            mapping=mapping,
+        )
+
+    def mapping_for(self, prop: str) -> DataMappingEntry | None:
+        for entry in self.mapping:
+            if entry.prop == prop:
+                return entry
+        return None
+
+
+@dataclass(frozen=True)
+class BindingRequirement:
+    """Qué necesita el consumidor ANTES de elegir fuente.
+
+    Se construye desde evidencia ya existente (ast_template.slots[].props,
+    firma real del componente, registry v4, input_schema del contrato).
+    Existe para romper la circularidad: la compatibilidad se evalúa
+    contra el requirement, nunca contra un mapping aún por descubrir.
+    """
+    target_component: str
+    required_props: tuple[str, ...] = ()
+    expected_shapes: tuple[tuple[str, str], ...] = ()
+
+    def shape_for(self, prop: str) -> str | None:
+        for p, shape in self.expected_shapes:
+            if p == prop:
+                return shape
+        return None
+
+    def to_dict(self) -> dict:
+        return {
+            "target_component": self.target_component,
+            "required_props": list(self.required_props),
+            "expected_shapes": {p: s for p, s in self.expected_shapes},
+        }
+
+
+@dataclass(frozen=True)
+class EvidenceItem:
+    """Evidencia estructural determinista (repo-only). NUNCA autoridad.
+
+    kind ∈ {"declared_dataslice", "existing_registry_binding",
+            "existing_import", "existing_call", "contract_slot_prop"}
+    """
+    kind: str
+    ref: str
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        d = {"kind": self.kind, "ref": self.ref}
+        if self.detail is not None:
+            d["detail"] = self.detail
+        return d
+
+
+@dataclass(frozen=True)
+class BindingProposal:
+    """Propuesta de binding PRE-confirmación. NO es DataBinding.
+
+    status:
+      "auto_unique"  → 1 candidata estructuralmente válida (inequívoca)
+      "needs_choice" → N>1 candidatas; requiere decisión humana
+      "unresolved"   → 0 candidatas; requiere clarification_needed
+    """
+    status: str
+    target_component: str
+    source: DataSourceRef | None = None
+    schema: DataSchemaRef | None = None
+    mapping: tuple[DataMappingEntry, ...] = ()
+    evidence: tuple[EvidenceItem, ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "target_component": self.target_component,
+            "source": self.source.to_dict() if self.source else None,
+            "schema": self.schema.to_dict() if self.schema else None,
+            "mapping": [m.to_dict() for m in self.mapping],
+            "evidence": [e.to_dict() for e in self.evidence],
+            "provenance": dict(self.provenance),
+        }
+
+    def to_binding(self) -> DataBinding | None:
+        """Convierte una propuesta RESUELTA en DataBinding confirmable.
+
+        Sólo es válido para status="auto_unique" o cuando el usuario ya
+        eligió una candidata concreta (status="needs_choice" + selección
+        explícita). Para "unresolved" devuelve None.
+        """
+        if self.status == "unresolved" or self.source is None or not self.mapping:
+            return None
+        return DataBinding(
+            source=self.source,
+            schema=self.schema,
+            mapping=self.mapping,
+        )
 
 
 # ── InterpretationDraft (output of IntentInterpreter) ───────────────
@@ -217,6 +500,9 @@ class ConfirmedIntent:
             )
             if a.get("attach"):
                 action.attach = AttachRef.from_dict(a["attach"])
+            # Zero-loss: el binding confirmado se reconstruye tipado.
+            if a.get("binding"):
+                action.binding = DataBinding.from_dict(a["binding"])
             actions.append(action)
         return cls(
             contract_id=d["contract_id"],

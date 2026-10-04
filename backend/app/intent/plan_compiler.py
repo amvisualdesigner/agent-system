@@ -41,6 +41,11 @@ def _build_actions(
             entry["instance_hint"] = action.instance_hint
         if action.attach:
             entry["attach"] = action.attach.to_dict()
+        if action.binding is not None:
+            # Fase 6: el binding confirmado viaja al Plan comosemantic
+            # authority. Renderer/GraphIR/Validation lo consumen; nadie lo
+            # redescubre. Zero-loss: solo se emite si existe.
+            entry["binding"] = action.binding.to_dict()
         result.append(entry)
     return result
 
@@ -172,6 +177,11 @@ def _build_semantic_frame_from_actions(
             frame_action["instance_hint"] = action.instance_hint
         if action.attach:
             frame_action["attach"] = action.attach.to_dict()
+        if action.binding is not None:
+            # Transporte/auditoría. Al igual que target_capability, tras la
+            # confirmación el binding del Plan es la ÚNICA autoridad de la
+            # conexión de datos.
+            frame_action["binding"] = action.binding.to_dict()
         # Preserve source_capability for transform/swap/replace actions
         src = action.source_capability or action.params.get("source", "")
         if src:
