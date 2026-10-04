@@ -220,6 +220,7 @@ class TestBindingRequirement:
             "target_component": "FilterPanel",
             "required_props": ["filters"],
             "expected_shapes": {"filters": "array<string>"},
+            "incompatibilities": [],
         }
 
 

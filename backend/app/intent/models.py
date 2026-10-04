@@ -361,10 +361,15 @@ class BindingRequirement:
     firma real del componente, registry v4, input_schema del contrato).
     Existe para romper la circularidad: la compatibilidad se evalúa
     contra el requirement, nunca contra un mapping aún por descubrir.
+
+    incompatibilities: evidencia en conflicto o ausente. Se REGISTRA en
+    lugar de fabricar un requisito (regla "no inventar shapes"). Nunca es
+    autoridad: solo explica por qué algo quedó fuera.
     """
     target_component: str
     required_props: tuple[str, ...] = ()
     expected_shapes: tuple[tuple[str, str], ...] = ()
+    incompatibilities: tuple[str, ...] = ()
 
     def shape_for(self, prop: str) -> str | None:
         for p, shape in self.expected_shapes:
@@ -377,6 +382,7 @@ class BindingRequirement:
             "target_component": self.target_component,
             "required_props": list(self.required_props),
             "expected_shapes": {p: s for p, s in self.expected_shapes},
+            "incompatibilities": list(self.incompatibilities),
         }
 
 
