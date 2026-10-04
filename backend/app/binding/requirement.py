@@ -62,7 +62,7 @@ except Exception:  # pragma: no cover
 _PRIMITIVES = ("string", "number", "boolean", "object", "unknown")
 
 
-def _shape_from_declared_type(declared) -> str | None:
+def declared_shape(declared) -> str | None:
     """Normaliza una declaración de tipo (dict JSON-schema o string TS).
 
     Dict  → {type: array, items: {type: string}}  == "array<string>"
@@ -114,7 +114,7 @@ def _signature_prop_types(signature: dict | None) -> dict[str, str]:
     out: dict[str, str] = {}
     for match in _PROP_DETAIL_PATTERN.finditer(block):
         name, _optional, declared = match.group(1), match.group(2), match.group(3)
-        shape = _shape_from_declared_type(declared)
+        shape = declared_shape(declared)
         if shape:
             out.setdefault(name, shape)
     return out
@@ -199,10 +199,10 @@ def build_binding_requirement(
 
         binding = registry_props.get(prop)
         if binding is not None:
-            declared = _shape_from_declared_type(getattr(binding, "type_info", None))
+            declared = declared_shape(getattr(binding, "type_info", None))
             if declared:
                 declarations.append(declared)
-            declared = _shape_from_declared_type(getattr(binding, "shape", None))
+            declared = declared_shape(getattr(binding, "shape", None))
             if declared:
                 declarations.append(declared)
 
@@ -211,7 +211,7 @@ def build_binding_requirement(
 
         param = prop_to_param.get(prop)
         if param and param in contract_props:
-            declared = _shape_from_declared_type(contract_props[param])
+            declared = declared_shape(contract_props[param])
             if declared:
                 declarations.append(declared)
 
