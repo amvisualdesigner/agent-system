@@ -120,7 +120,7 @@ def _signature_prop_types(signature: dict | None) -> dict[str, str]:
     return out
 
 
-def _slot_prop_to_param(contract, target_component: str) -> dict[str, str]:
+def slot_prop_to_param(contract, target_component: str) -> dict[str, str]:
     """{prop del consumidor: contract_param} desde evidencia del contrato.
 
     Reutiliza `capability_param_map` (precompilado en `SkillContract`), que
@@ -164,7 +164,7 @@ def build_binding_requirement(
     """
     incompatibilities: list[str] = []
 
-    prop_to_param = _slot_prop_to_param(contract, target_component)
+    prop_to_param = slot_prop_to_param(contract, target_component)
     registry_props = (v4_bindings or {}).get(target_component) or {}
 
     # ── Candidatas: solo fuentes que declaran conexión a datos ──
