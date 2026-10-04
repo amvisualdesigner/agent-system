@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from app.binding.discovery import BindingDiscovery, CandidateSource
+from app.binding.discovery import BindingDiscovery, CandidateSource, rooted_at
 from app.binding.requirement import declared_shape, slot_prop_to_param
 from app.intent.models import BindingRequirement, BindingProposal, DataMappingEntry, EvidenceItem
 
@@ -70,28 +70,47 @@ class CandidateMapping:
         return (self.prop, self.stage, self.value_path, self.transform)
 
 
-def _slice_mappings(requirement: BindingRequirement, candidate: CandidateSource):
+def _slice_mappings(requirement: BindingRequirement, candidate: CandidateSource, contract=None):
     """Etapa fisica: el slice es el valor completo."""
+    component = requirement.target_component
+    fields = set(candidate.schema.fields)
     out = []
     for prop, selector in candidate.prop_field_links:
         if prop not in set(requirement.required_props):
             continue
-        if selector not in set(candidate.schema.fields):
+        # El selector es una RUTA dentro del resultado del hook
+        # ('chartData.timeseries'), no un campo de primer nivel. Se valida por
+        # enraizado, igual que hace discovery; exigir igualdad exacta
+        # descartaria en silencio los slices anidados.
+        if not rooted_at(selector, tuple(sorted(fields))):
             continue
+        shape = "unknown"
+        slot_map = slot_prop_to_param(contract, component) if contract is not None else {}
+        param = slot_map.get(prop)
+        if param and param == selector:
+            contract_props = (
+                ((getattr(contract, "input_schema", None) or {}) or {}).get("properties") or {}
+            )
+            shape = declared_shape(contract_props.get(param)) or "unknown"
         out.append(
             CandidateMapping(
                 prop=prop,
                 stage=STAGE_SLICE,
                 value_path=f"_pageData.{selector}",
                 transform="identity",
-                # El slice no declara shape. Se deja "unknown" en vez de asumir
-                # que el valor coincide con el objeto fuente.
-                value_schema=MappingValueSchema("unknown"),
+                value_schema=MappingValueSchema(shape),
                 evidence=(
                     EvidenceItem(
                         kind="structural",
                         ref=f"candidate:{candidate.source.kind}:{candidate.source.ref}",
-                        detail=f"slice selector {selector} -> {selector}",
+                        detail=(
+                            f"slice selector {selector} -> {selector}"
+                            + (
+                                f"; slot param {param} + input_schema confirm {shape}"
+                                if param and param == selector and shape != "unknown"
+                                else ""
+                            )
+                        ),
                     ),
                 ),
             )
@@ -105,15 +124,19 @@ def _param_mappings(
     v4_bindings: Mapping[str, Mapping[str, object]],
     contract,
 ):
-    """Etapa logica: el valor es contract_params[<param>] con su transform."""
+    """Etapa logica: el valor es contract_params[<param>] con su transform.
+
+    Solo un binding real del registry (`existing_registry_binding`) produce una
+    expresion de valor. Un `contract_slot_prop` NO la produce: declara
+    prop <- param como enlace, y ese param ya es la ruta del slice cuando el
+    selector coincide (caso Fase 1C). Emitir tambien `_pageData.<selector>` y
+    `contract_params[<param>]` para la MISMA declaracion crearia una ambiguedad
+    artificial entre dos expresiones del mismo dato.
+    """
     component = requirement.target_component
     specs = dict(v4_bindings.get(component) or {})
-    slot_map = slot_prop_to_param(contract, component) if contract is not None else {}
 
     links: dict[str, set[str]] = {}
-    for prop, param in slot_map.items():
-        if isinstance(prop, str) and isinstance(param, str) and param:
-            links.setdefault(prop, set()).add(param)
     for prop, spec in specs.items():
         from_field = getattr(spec, "from_field", "") or ""
         if from_field:
@@ -152,7 +175,7 @@ def build_candidate_mappings(
     contract=None,
 ) -> tuple[CandidateMapping, ...]:
     """Mappings candidatos para un candidato. Ambiguidad se preserva, no se resuelve."""
-    mappings = _slice_mappings(requirement, candidate)
+    mappings = _slice_mappings(requirement, candidate, contract)
     mappings += _param_mappings(requirement, candidate, dict(v4_bindings or {}), contract)
     unique: dict[tuple[str, str, str, str], CandidateMapping] = {}
     for m in mappings:

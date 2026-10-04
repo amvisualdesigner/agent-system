@@ -304,3 +304,175 @@ def test_full_chain_real_registry_and_contract(page_ds, v4):
     assert d.candidate_count == 1
     p = derive_binding_proposal(d, v4_bindings=v4, contract=contract)
     assert p.status in {"auto_unique", "needs_choice", "unresolved"}
+
+# ── Fase 1C: slice confirms its value shape via the contract ──────────────
+#
+# Regla: un declared_dataslice confirma MappingValueSchema SOLO cuando el
+# selector esta estructuralmente ligado al param del contrato
+# (ast_template.slots[].props: prop -> param, selector == param) y el
+# input_schema aporta el shape. Es identidad, no similitud, y reutiliza las
+# mismas dos evidencias que Subfase B ya consume.
+
+FILTER_CONTRACT_SCHEMA = {
+    "properties": {"filters": {"type": "array", "items": "string"}}
+}
+
+
+def test_filter_panel_reaches_auto_unique(page_ds, v4):
+    """DataSlice.selector=filters -> slot filters -> input_schema array<string>."""
+    contract = _contract_for(
+        "FilterPanel", {"filters": "filters"}, input_schema=FILTER_CONTRACT_SCHEMA
+    )
+    req = build_binding_requirement("FilterPanel", contract=contract, v4_bindings=v4)
+    assert req.shape_for("filters") == "array<string>"
+
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    assert d.candidate_count == 1
+
+    p = derive_binding_proposal(d, v4_bindings=v4, contract=contract)
+    assert p.status == "auto_unique", p.provenance
+    assert p.provenance["candidate_count"] == 1
+    assert p.provenance["ambiguous_props"] == []
+    assert p.provenance["shape_conflicts"] == []
+    assert p.provenance["shape_unconfirmed"] == []
+    assert p.provenance["incompatibilities"] == []
+    assert [(e.prop, e.from_field) for e in p.mapping] == [("filters", "_pageData.filters")]
+    assert p.source.kind == "hook" and p.source.ref == "useDashboardData"
+
+
+def test_filter_panel_slice_value_shape_is_confirmed(page_ds, v4):
+    """The slice mapping's VALUE schema comes from input_schema, not the source."""
+    contract = _contract_for(
+        "FilterPanel", {"filters": "filters"}, input_schema=FILTER_CONTRACT_SCHEMA
+    )
+    req = BindingRequirement(
+        target_component="FilterPanel", required_props=("filters",),
+        expected_shapes=(("filters", "array<string>"),),
+    )
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    mappings = build_candidate_mappings(req, d.candidates[0], v4_bindings=v4, contract=contract)
+    slice_mappings = [m for m in mappings if m.stage == "slice"]
+    assert len(slice_mappings) == 1
+    assert slice_mappings[0].value_schema.shape == "array<string>"
+    assert slice_mappings[0].value_schema.is_known
+    # Still not the SOURCE shape.
+    assert d.candidates[0].schema.shape == "object"
+
+
+def test_selector_not_equal_to_param_does_not_confirm(page_ds, v4):
+    """Identity link required: a different selector name confirms nothing."""
+    contract = _contract_for(
+        "FilterPanel", {"filters": "otroParam"}, input_schema=FILTER_CONTRACT_SCHEMA
+    )
+    req = BindingRequirement(
+        target_component="FilterPanel", required_props=("filters",),
+        expected_shapes=(("filters", "array<string>"),),
+    )
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    mappings = build_candidate_mappings(req, d.candidates[0], v4_bindings=v4, contract=contract)
+    assert all(m.value_schema.shape == "unknown" for m in mappings if m.stage == "slice")
+    assert unconfirmed_shapes(req, mappings) == ("filters",)
+
+
+def test_missing_input_schema_does_not_confirm(page_ds, v4):
+    """No input_schema -> no confirmation -> no auto_unique."""
+    contract = _contract_for("FilterPanel", {"filters": "filters"})
+    req = BindingRequirement(
+        target_component="FilterPanel", required_props=("filters",),
+        expected_shapes=(("filters", "array<string>"),),
+    )
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    p = derive_binding_proposal(d, v4_bindings=v4, contract=contract)
+    assert p.status != "auto_unique"
+
+
+def test_no_contract_leaves_slice_unknown(page_ds, v4):
+    req = BindingRequirement(
+        target_component="FilterPanel", required_props=("filters",),
+        expected_shapes=(("filters", "array<string>"),),
+    )
+    d = discover_binding_candidates(
+        req, page_data_source=page_ds, target_file_contents={"Page.tsx": _page()}
+    )
+    mappings = build_candidate_mappings(req, d.candidates[0], v4_bindings=v4)
+    assert unconfirmed_shapes(req, mappings) == ("filters",)
+
+
+# ── KpiRow / Timeseries stay ambiguous: semantics unchanged ───────────────
+
+
+def test_kpi_row_stays_needs_choice(page_ds, v4):
+    """selector 'kpiData' != param 'metrics': no confirmation, no fusion."""
+    req = BindingRequirement(
+        target_component="KpiRow", required_props=("data",),
+        expected_shapes=(("data", "array<KpiItem>"),),
+    )
+    d = discover_binding_candidates(
+        req, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    p = derive_binding_proposal(d, v4_bindings=v4)
+    assert p.status == "needs_choice"
+    assert p.provenance["ambiguous_props"] == ["data"]
+    assert p.mapping == ()
+
+
+def test_timeseries_stays_needs_choice(page_ds, v4):
+    """selector 'chartData.timeseries' != param 'timeseries_metric': unchanged."""
+    req = BindingRequirement(
+        target_component="Timeseries", required_props=("data",),
+        expected_shapes=(("data", "array<Point>"),),
+    )
+    d = discover_binding_candidates(
+        req, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    p = derive_binding_proposal(d, v4_bindings=v4)
+    assert p.status == "needs_choice"
+    assert p.provenance["ambiguous_props"] == ["data"]
+    assert p.mapping == ()
+
+
+def test_ambiguous_case_never_reaches_auto_unique_even_with_contract(page_ds, v4):
+    """Contract input_schema must not silently break the KpiRow ambiguity."""
+    contract = _contract_for(
+        "KpiRow", {"data": "kpiData"},
+        input_schema={"properties": {"kpiData": {"type": "array", "items": "KpiItem"}}},
+    )
+    req = BindingRequirement(
+        target_component="KpiRow", required_props=("data",),
+        expected_shapes=(("data", "array<KpiItem>"),),
+    )
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    p = derive_binding_proposal(d, v4_bindings=v4, contract=contract)
+    assert p.status == "needs_choice"
+    assert p.provenance["ambiguous_props"] == ["data"]
+    assert p.mapping == ()
+
+
+def test_timeseries_title_is_not_required_data(v4):
+    """title is config, not data: it must not become a binding requirement."""
+    contract = _contract_for("Timeseries", {"title": "chartTitle"})
+    req = build_binding_requirement("Timeseries", contract=contract, v4_bindings=v4)
+    assert "title" in req.required_props  # registry declares it, B keeps it
+    d = discover_binding_candidates(
+        req, contract=contract, v4_bindings=v4, page_data_source=page_ds,
+        target_file_contents={"Page.tsx": _page()},
+    )
+    # chartTitle is not a destructured field -> no provable candidate
+    assert d.candidate_count == 0

@@ -107,7 +107,7 @@ def scan_calls(content: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     return tuple(sorted((c, tuple(sorted(f))) for c, f in found.items()))
 
 
-def _rooted_at(selector: str, fields: Sequence[str]) -> bool:
+def rooted_at(selector: str, fields: Sequence[str]) -> bool:
     """True when selector is a path into the hook result proven by `fields`.
 
     'filters' and 'chartData.timeseries' are both rooted at a destructured name.
@@ -195,7 +195,7 @@ def _merge_into_hook(
 ) -> bool:
     """True when every slice selector is proven rooted at the hook's fields."""
     return bool(slice_links) and all(
-        _rooted_at(selector, fields) for _, selector in slice_links
+        rooted_at(selector, fields) for _, selector in slice_links
     )
 
 
@@ -286,7 +286,7 @@ def discover_binding_candidates(
                 )
             )
         for prop, from_field in registry_links:
-            if _rooted_at(from_field, fields):
+            if rooted_at(from_field, fields):
                 links.append((prop, from_field))
                 relations.append("existing_registry_binding")
                 ev.append(
@@ -297,7 +297,7 @@ def discover_binding_candidates(
                     )
                 )
         for prop, param in slot_links:
-            if _rooted_at(param, fields):
+            if rooted_at(param, fields):
                 links.append((prop, param))
                 relations.append("contract_slot_prop")
                 ev.append(
