@@ -40,24 +40,66 @@ from app.binding.translate import (
 from app.graphir.backends.react_backend import JSVariable
 from app.intent.models import DataBinding, IntentAction
 
-# conflict_type nuevo: el binding confirmado no se puede representar fielmente.
-CONFLICT_UNREPRESENTABLE_BINDING = "invalid_confirmed_plan"
+# El binding confirmado es valido; lo que falla es la materializacion fisica.
+# Se reutiliza la envolvente post-confirmacion existente (`repository_conflict`),
+# que NO terminaliza el Run: `_settle_phase` devuelve el run a CONFIRMED con
+# plan_retryable=True. La causa especifica se conserva en `details.cause`, sin
+# crear un tipo publico nuevo ni tocar el contrato de API.
+CONFLICT_UNREPRESENTABLE_BINDING = "repository_conflict"
+UNREPRESENTABLE_BINDING_CAUSE = "unrepresentable_binding"
+
+
+@dataclass(frozen=True)
+class DriftItem:
+    """Un prop donde el binding confirmado discrepa de la resolucion del registry.
+
+    Estrictamente diagnostico. El binding confirmado prevalece siempre.
+    """
+
+    component: str
+    prop: str
+    confirmed: str
+    registry: str | None = None
+
+    def describe(self) -> str:
+        if self.registry is None:
+            return (
+                f"{self.component}.{self.prop}: registry has no physical value; "
+                f"confirmed binding uses {self.confirmed!r}"
+            )
+        return (
+            f"{self.component}.{self.prop}: registry resolves {self.registry!r} "
+            f"but confirmed binding freezes {self.confirmed!r}"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "component": self.component,
+            "prop": self.prop,
+            "confirmed": self.confirmed,
+            "registry": self.registry,
+        }
 
 
 @dataclass(frozen=True)
 class DriftReport:
     """Binding confirmado que difiere de la representacion fisica del registry.
 
-    Puramente informativo: el binding confirmado prevalece. Solo escalate a
-    CONFLICT cuando el drift hace imposible representarlo fielmente, lo que se
-    detecta en `materialize_confirmed_bindings`, no aqui.
+    Puramente informativo: el binding confirmado prevalece. NUNCA bloquea y
+    nunca se convierte en CONFLICT por si mismo.
     """
 
-    items: tuple[str, ...] = ()
+    items: tuple[DriftItem, ...] = ()
 
     @property
     def has_drift(self) -> bool:
         return bool(self.items)
+
+    def to_dict(self) -> list[dict]:
+        return [i.to_dict() for i in self.items]
+
+    def describe(self) -> tuple[str, ...]:
+        return tuple(i.describe() for i in self.items)
 
 
 def detect_registry_drift(
@@ -67,22 +109,32 @@ def detect_registry_drift(
 
     El registry es evidencia: si dice otra cosa, se REGISTRA. Nunca gana.
     """
-    items: list[str] = []
+    items: list[DriftItem] = []
     for component, binding in sorted(confirmed.items()):
         for entry in binding.mapping:
             current = (resolved.component_props.get(component) or {}).get(entry.prop)
-            current_name = getattr(current, "name", None)
+            registry_name = getattr(current, "name", None)
+            # Solo se registra cuando HAY discrepancia. Coincidencia no es
+            # drift: emitirla seria un falso positivo que报警 sin causa.
             if current is None:
-                items.append(
-                    f"{component}.{entry.prop}: registry has no physical value; "
-                    f"confirmed binding uses {entry.from_field!r}"
+                differs = True
+            elif registry_name is None:
+                # El registry resuelve un valor concreto, no un JSVariable: no
+                # es comparable como ruta fisica, pero tampoco lo contradice.
+                continue
+            else:
+                differs = registry_name != entry.from_field
+            if not differs:
+                continue
+            items.append(
+                DriftItem(
+                    component=component,
+                    prop=entry.prop,
+                    confirmed=entry.from_field,
+                    registry=registry_name,
                 )
-            elif current_name is not None and current_name != entry.from_field:
-                items.append(
-                    f"{component}.{entry.prop}: registry resolves {current_name!r} "
-                    f"but confirmed binding freezes {entry.from_field!r}"
-                )
-    return DriftReport(tuple(sorted(items)))
+            )
+    return DriftReport(tuple(items))
 
 
 def materialize_confirmed_bindings(
@@ -107,31 +159,67 @@ def materialize_confirmed_bindings(
     return materialized, drift
 
 
+@dataclass(frozen=True)
+class MaterializationRequirements:
+    """Lo que el binding CONFIRMADO exige generar, y lo que no se puede.
+
+    Se devuelven los tres campos explicitamente porque un retorno posicional
+    ambiguo hacia que el llamador lea `imports` como `missing` y convierta una
+    materializacion correcta en un CONFLICT falso.
+    """
+
+    declaration: str | None = None
+    imports: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+
+
+def _confirmed_requires_page_data(confirmed: dict[str, DataBinding]) -> bool:
+    return any(
+        entry.from_field.startswith("_pageData.")
+        for binding in confirmed.values()
+        for entry in binding.mapping
+    )
+
+
 def required_materialization(
     materialized: ResolvedBindings | None,
-) -> tuple[str | None, list[str]]:
-    """Declaracion del hook e imports que el binding confirmado exige.
+    confirmed: dict[str, DataBinding] | None = None,
+) -> MaterializationRequirements:
+    """Declaracion del hook, imports y bloqueos, derivados del binding confirmado.
 
     Derivado del propio binding confirmado, no del registry: `_pageData.<sel>`
     requiere que `_pageData` exista, y su declaracion la produce el hook de la
     fuente. Si no hay `page_data_source` en la representacion fisica, el binding
-    confirmado NO es materializable y el llamador debe emitir CONFLICT.
+    confirmado NO es materializable: se informa en `missing`.
+
+    `confirmed` es necesario cuando `materialized` es None: el requisito se lee
+    del binding confirmado, no de la representacion ausente. Sin el, un binding
+    confirmado que exige `_pageData` se saltaria en silencio.
     """
     if materialized is None:
-        return None, []
+        if confirmed and _confirmed_requires_page_data(confirmed):
+            return MaterializationRequirements(
+                missing=(
+                    "confirmed binding requires _pageData but there is no "
+                    "physical representation to materialize it into",
+                )
+            )
+        return MaterializationRequirements()
     page = materialized.page_data_source
     if page is None:
-        needs_page = any(
+        needs_page = _confirmed_requires_page_data(confirmed) if confirmed else any(
             getattr(v, "name", "").startswith("_pageData.")
             for props in materialized.component_props.values()
             for v in props.values()
         )
         if needs_page:
-            return None, [
-                "confirmed binding requires _pageData but the physical "
-                "representation has no page_data_source"
-            ]
-        return None, []
+            return MaterializationRequirements(
+                missing=(
+                    "confirmed binding requires _pageData but the physical "
+                    "representation has no page_data_source",
+                )
+            )
+        return MaterializationRequirements()
 
     from app.graphir.backends.react_backend import (
         ReactBackend,
@@ -146,11 +234,16 @@ def required_materialization(
         hook_import = _HOOK_IMPORT_MAP.get(hook_name) if hook_name else None
         if hook_import:
             imports.append(hook_import)
-    return declaration, sorted(set(imports))
+    return MaterializationRequirements(
+        declaration=declaration, imports=tuple(sorted(set(imports)))
+    )
 
 
 __all__ = [
     "CONFLICT_UNREPRESENTABLE_BINDING",
+    "UNREPRESENTABLE_BINDING_CAUSE",
+    "DriftItem",
+    "MaterializationRequirements",
     "DriftReport",
     "UntranslatableBinding",
     "detect_registry_drift",

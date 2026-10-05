@@ -1043,3 +1043,86 @@ class TestTransportSurfaces:
                      "nodes/interpret.py", "nodes/return_result.py"):
             text = (orch / name).read_text(encoding="utf-8")
             assert '"awaiting_apply"' not in text, f"{name} still uses awaiting_apply"
+
+# ══════════════════════════════════════════════════════════════════
+# Fase 6F — binding no materializable usa esta MISMA envolvente
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestBindingUnrepresentableIsPostConfirmConflict:
+    """El Plan confirmado sigue siendo valido: solo falta representacion fisica."""
+
+    def _result(self, binding):
+        from app.binding.materialize import (
+            CONFLICT_UNREPRESENTABLE_BINDING,
+            UNREPRESENTABLE_BINDING_CAUSE,
+            UntranslatableBinding,
+            materialize_confirmed_bindings,
+        )
+        from app.binding.models import ResolvedBindings
+        from app.intent.models import IntentAction, conflict_result
+
+        action = IntentAction(
+            verb="modify", target_capability="FilterPanel",
+            params={"filters": []}, binding=binding,
+        )
+        try:
+            materialize_confirmed_bindings(ResolvedBindings(), [action])
+        except UntranslatableBinding as e:
+            return conflict_result(
+                CONFLICT_UNREPRESENTABLE_BINDING,
+                f"NO WRITE: unrepresentable ({e})",
+                details={"cause": UNREPRESENTABLE_BINDING_CAUSE},
+            )
+        raise AssertionError("expected UntranslatableBinding")
+
+    def _binding(self, from_field):
+        from app.intent.models import DataBinding, DataMappingEntry, DataSourceRef
+        return DataBinding(
+            source=DataSourceRef(kind="hook", ref="useDashboardData"),
+            schema=None,
+            mapping=(DataMappingEntry(prop="filters", from_field=from_field),),
+        )
+
+    def test_uses_canonical_post_confirm_envelope(self):
+        ex = self._result(self._binding("contract_params['filters']"))["execution"]
+        for field in CONFLICT_CONTRACT_FIELDS:
+            assert field in ex, f"missing {field}"
+
+    def test_is_not_invalid_confirmed_plan(self):
+        ex = self._result(self._binding("contract_params['filters']"))["execution"]
+        assert ex["conflict"] != "invalid_confirmed_plan"
+
+    def test_is_retryable_and_returns_to_confirmed(self):
+        ex = self._result(self._binding("contract_params['filters']"))["execution"]
+        assert ex["plan_confirmed"] is True
+        assert ex["plan_retryable"] is True
+        assert ex["run_phase"] == RunPhase.CONFIRMED.value
+
+    def test_is_not_terminal_failure(self):
+        ex = self._result(self._binding("contract_params['filters']"))["execution"]
+        assert ex["status"] == "conflict"
+        assert ex["operations"] == []
+        assert ex["diff"] is None
+
+    def test_specific_cause_preserved_internally(self):
+        ex = self._result(self._binding("contract_params['filters']"))["execution"]
+        assert ex["details"]["cause"] == "unrepresentable_binding"
+
+    def test_conflict_returns_run_to_confirmed_phase(self):
+        """_settle_phase devuelve el Run a CONFIRMED y guarda plan_retryable."""
+        from app.api.agent_apply import _settle_phase
+        from app.state.run_state import load_run_state
+
+        run_id = str(uuid.uuid4())
+        try:
+            save_run_state(run_id, {"phase": RunPhase.APPLYING.value})
+            _settle_phase(
+                run_id, self._result(self._binding("contract_params['filters']"))
+            )
+            state = load_run_state(run_id)
+            assert state["phase"] == RunPhase.CONFIRMED.value
+            assert state["plan_retryable"] is True
+            assert state["last_conflict"]["conflict"] == "repository_conflict"
+        finally:
+            delete_run_state(run_id)

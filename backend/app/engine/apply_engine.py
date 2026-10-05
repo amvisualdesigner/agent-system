@@ -45,7 +45,9 @@ from app.graphir.compiler import MISSING_REQUIRED_PROPS
 from app.binding.resolver import resolve as resolve_bindings
 from app.binding.materialize import (
     CONFLICT_UNREPRESENTABLE_BINDING,
+    UNREPRESENTABLE_BINDING_CAUSE,
     UntranslatableBinding,
+    confirmed_bindings_from_actions,
     materialize_confirmed_bindings,
     required_materialization,
 )
@@ -1368,6 +1370,9 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     sreport: StructuralCoverageReport | None = None
     semantic_resolution: SemanticResolution | None = None
     contract_resolution: ContractResolution | None = None
+    # Fase 6F drift del binding confirmado. Se inicializa aqui (no dentro del
+    # bloque try) porque el except amplio de la rama graph continua al return final.
+    _f6_drift = None
 
     try:
         from app.engine.reconciliation import reconcile
@@ -1803,37 +1808,57 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # Se materializa sobre la representacion fisica antes de render, el
         # UNICO punto donde ambas se encuentran. El registry puede producir
         # drift (se reporta) pero nunca sustituye al binding confirmado.
-        _f6_drift = None
         _confirmed_actions = _confirmed_binding_actions(plan)
-        if _confirmed_actions and resolved_bindings is not None:
+        if _confirmed_actions:
+            _f6_confirmed = confirmed_bindings_from_actions(_confirmed_actions)
             try:
                 resolved_bindings, _f6_drift = materialize_confirmed_bindings(
                     resolved_bindings, _confirmed_actions,
                 )
             except UntranslatableBinding as e:
-                return FallbackExecutionRequest(
-                    reason=(
-                        "Confirmed DataBinding cannot be materialized faithfully: "
-                        f"{e}"
-                    ),
-                    conflict_type=CONFLICT_UNREPRESENTABLE_BINDING,
-                    level=2,
-                ).to_result()
+                # El Confirmed Plan sigue siendo VALIDO: lo que falla es la
+                # materializacion fisica. Se usa la envolvente post-confirmacion
+                # existente (`repository_conflict`), que devuelve el run a
+                # CONFIRMED con plan_retryable=True. Sin fallback, sin
+                # rediscover, sin registry, sin LLM, sin cambiar el mapping.
+                return conflict_result(
+                    CONFLICT_UNREPRESENTABLE_BINDING,
+                    "NO WRITE: the Confirmed DataBinding cannot be materialized "
+                    f"faithfully ({e}). The Confirmed Plan is unchanged and stays "
+                    "authoritative; retry re-captures the physical snapshot.",
+                    details={
+                        "cause": UNREPRESENTABLE_BINDING_CAUSE,
+                        "detail": str(e),
+                        "components": sorted(
+                            a.target_capability for a in _confirmed_actions
+                        ),
+                    },
+                )
 
             # Si el binding confirmado exige _pageData y la representacion
             # fisica no puede generarla, es CONFLICT: sin fallback ni
             # reinterpretacion.
-            _page_decl, _missing = required_materialization(resolved_bindings)
-            if _missing:
-                return FallbackExecutionRequest(
-                    reason="; ".join(_missing),
-                    conflict_type=CONFLICT_UNREPRESENTABLE_BINDING,
-                    level=2,
-                ).to_result()
+            _f6_req = required_materialization(resolved_bindings, _f6_confirmed)
+            if _f6_req.missing:
+                return conflict_result(
+                    CONFLICT_UNREPRESENTABLE_BINDING,
+                    "NO WRITE: " + "; ".join(_f6_req.missing) + ". The Confirmed Plan is "
+                    "unchanged and stays authoritative; retry re-captures the "
+                    "physical snapshot.",
+                    details={
+                        "cause": UNREPRESENTABLE_BINDING_CAUSE,
+                        "missing": list(_f6_req.missing),
+                        "components": sorted(
+                            a.target_capability for a in _confirmed_actions
+                        ),
+                    },
+                )
             if _f6_drift is not None and _f6_drift.has_drift:
+                # Diagnostico estructurado MAS el log: el log no es el unico
+                # canal. No bloquea, no cambia el Plan ni el FileOp.
                 logger.warning(
                     "F6 binding drift (registry is evidence, confirmed binding wins): %s",
-                    "; ".join(_f6_drift.items),
+                    "; ".join(_f6_drift.describe()),
                 )
 
         try:
@@ -2130,13 +2155,21 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     ]
     all_refactor_changes.extend(asdict(rc) for rc in sub_refactor_changes)
 
+    _execution: dict = {
+        "status": execution_status,
+        "diff": diff or None,
+        "operations": [fop.to_dict() for fop in fileops],
+        "refactor_changes": all_refactor_changes,
+    }
+    # Diagnostico estructurado de drift: el logger.warning deja de ser el unico
+    # canal. No modifica Plan, DataBinding, lifecycle ni FileOps, y no bloquea.
+    if _f6_drift is not None and _f6_drift.has_drift:
+        _execution["diagnostics"] = {
+            "binding_drift": _f6_drift.to_dict(),
+        }
+
     return {
-        "execution": {
-            "status": execution_status,
-            "diff": diff or None,
-            "operations": [fop.to_dict() for fop in fileops],
-            "refactor_changes": all_refactor_changes,
-        },
+        "execution": _execution,
         "context": {
             "run_id": run_id,
             "dry_run": dry_run,
