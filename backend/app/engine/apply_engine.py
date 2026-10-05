@@ -43,17 +43,53 @@ from app.graphir.structural_coverage import (
 )
 from app.graphir.compiler import MISSING_REQUIRED_PROPS
 from app.binding.resolver import resolve as resolve_bindings
+from app.binding.materialize import (
+    CONFLICT_UNREPRESENTABLE_BINDING,
+    UntranslatableBinding,
+    materialize_confirmed_bindings,
+    required_materialization,
+)
 from app.graphir.pipeline import GraphIRPipeline
 from app.graphir.backends import ReactBackend, BackendConfig
 from app.graphir.utils import validate_fileops, FileOp
 from app.graphir.utils import extract_component_name
 from app.graphir.utils import check_repo_integrity
-from app.intent.models import FallbackExecutionRequest, RefactorChange, conflict_result
+from app.intent.models import (
+    FallbackExecutionRequest,
+    RefactorChange,
+    conflict_result,
+    DataBinding,
+    IntentAction,
+)
 from app.graphir.boundary import enforce_graph_purity
 from app.graphir.constraint import ExecutionContext
 from app.graphir.constraint.models import FileNode, FileOpDecision
 
 logger = logging.getLogger(__name__)
+
+
+def _confirmed_binding_actions(plan: dict) -> list[IntentAction]:
+    """Acciones del Confirmed Plan que traen un DataBinding confirmado.
+
+    El Confirmed Plan es la unica autoridad de WHAT, asi que el binding se lee
+    de `plan['actions']`, nunca del GraphIR ni del registry. Una accion sin
+    binding devuelve None y no es autoridad.
+    """
+    out: list[IntentAction] = []
+    for a in plan.get("actions") or []:
+        if not isinstance(a, dict) or not a.get("binding"):
+            continue
+        binding = DataBinding.from_dict(a["binding"])
+        if binding is None:
+            continue
+        out.append(
+            IntentAction(
+                verb=a.get("verb") or "",
+                target_capability=a.get("target_capability") or "",
+                binding=binding,
+            )
+        )
+    return out
 
 
 def _check_orphan_components_3layer(
@@ -1762,6 +1798,44 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         resolved_bindings = resolve_bindings(
             contract_params or {},
         ) if contract_params else None
+
+        # ── Fase 6F: el binding CONFIRMADO es la autoridad semantica ──
+        # Se materializa sobre la representacion fisica antes de render, el
+        # UNICO punto donde ambas se encuentran. El registry puede producir
+        # drift (se reporta) pero nunca sustituye al binding confirmado.
+        _f6_drift = None
+        _confirmed_actions = _confirmed_binding_actions(plan)
+        if _confirmed_actions and resolved_bindings is not None:
+            try:
+                resolved_bindings, _f6_drift = materialize_confirmed_bindings(
+                    resolved_bindings, _confirmed_actions,
+                )
+            except UntranslatableBinding as e:
+                return FallbackExecutionRequest(
+                    reason=(
+                        "Confirmed DataBinding cannot be materialized faithfully: "
+                        f"{e}"
+                    ),
+                    conflict_type=CONFLICT_UNREPRESENTABLE_BINDING,
+                    level=2,
+                ).to_result()
+
+            # Si el binding confirmado exige _pageData y la representacion
+            # fisica no puede generarla, es CONFLICT: sin fallback ni
+            # reinterpretacion.
+            _page_decl, _missing = required_materialization(resolved_bindings)
+            if _missing:
+                return FallbackExecutionRequest(
+                    reason="; ".join(_missing),
+                    conflict_type=CONFLICT_UNREPRESENTABLE_BINDING,
+                    level=2,
+                ).to_result()
+            if _f6_drift is not None and _f6_drift.has_drift:
+                logger.warning(
+                    "F6 binding drift (registry is evidence, confirmed binding wins): %s",
+                    "; ".join(_f6_drift.items),
+                )
+
         try:
             fileops = renderer.render(
                 graph, graph_layout, backend_config,
