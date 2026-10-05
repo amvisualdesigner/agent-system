@@ -5,7 +5,14 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.intent.models import ConfirmedIntent, IntentAction, RunPhase, PendingDeletion, AttachRef
+from app.intent.models import (
+    ConfirmedIntent,
+    IntentAction,
+    RunPhase,
+    PendingDeletion,
+    AttachRef,
+    DataBinding,
+)
 from app.intent.plan_compiler import compile_plan
 from app.contracts.skill_registry import SkillContract, get_contract
 from app.utils.run_id import validate_run_id
@@ -214,13 +221,15 @@ def _agent_confirm(req: ConfirmRequest):
     # WHAT/WHERE: 'attach' viaja por acción (decisión semántica del plan).
     _ia_fields = {
         "verb", "target_capability", "source_capability", "params",
-        "confidence", "instance_hint",
+        "confidence", "instance_hint", "binding",
     }
     actions: list[IntentAction] = []
     for a in requested_actions:
         action = IntentAction(**{k: v for k, v in a.items() if k in _ia_fields})
         if a.get("attach"):
             action.attach = AttachRef.from_dict(a["attach"])
+        if a.get("binding"):
+            action.binding = DataBinding.from_dict(a["binding"])
         actions.append(action)
     confirmed = ConfirmedIntent(
         contract_id=req.contract_id,
