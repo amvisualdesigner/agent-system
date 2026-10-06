@@ -58,6 +58,7 @@ def agent_interpret(req: InterpretRequest):
     # Optional: load StructuralIndex for worktree_capabilities + PageContextResolver
     structural_index = None
     index_snapshot = None
+    workspace = None
     try:
         from app.engine.structural_index import StructuralIndex as _SI
         from app.runtime.context import build_context
@@ -65,6 +66,7 @@ def agent_interpret(req: InterpretRequest):
 
         context = build_context(run_id, session_id=session_id)
         ensure_worktree(context)
+        workspace = context.workspace
         structural_index = _SI.from_worktree(context.workspace)
         index_snapshot = {cap: structural_index.resolve_all_paths(cap) for cap in structural_index}
         logger.info(
@@ -131,6 +133,42 @@ def agent_interpret(req: InterpretRequest):
         enrich_draft_instance_choices(draft_dict, structural_index)
     except Exception as e:
         logger.warning("instance choice enrichment failed: %s", e)
+
+    # ── Deterministic binding proposals (Fase 6.1: Requirement → Discovery → Proposal) ──
+    # El LLM no participa: la propuesta procede de evidencia estructural
+    # (contrato + firma + registry v4 + worktree) y se expone en el draft.
+    # El enforcement (auto_unique / needs_choice / unresolved) ocurre en
+    # /agent/confirm; aquí solo se adjunta y se marcan las decisiones pendientes.
+    try:
+        from app.binding.draft_proposal import enrich_draft_binding_proposals
+
+        binding_summary = enrich_draft_binding_proposals(draft_dict, workspace=workspace)
+        if binding_summary:
+            logger.info(
+                "binding proposals for run_id=%s: %s",
+                run_id,
+                [(s["target_component"], s["status"]) for s in binding_summary],
+            )
+        # Una alternativa elegida reemplaza las acciones: la propuesta de la
+        # capacidad que el usuario pueda escoger viaja con ella (sin
+        # redescubrimiento posterior a la decisión).
+        for alt in draft_dict.get("alternatives") or []:
+            if not isinstance(alt, dict):
+                continue
+            alt_actions = alt.get("proposed_actions")
+            if not isinstance(alt_actions, list) or not alt_actions:
+                continue
+            enrich_draft_binding_proposals(
+                {
+                    "proposed_actions": alt_actions,
+                    "contract_id": alt.get("contract_id") or draft_dict.get("contract_id"),
+                    "contract_version": alt.get("contract_version")
+                    or draft_dict.get("contract_version"),
+                },
+                workspace=workspace,
+            )
+    except Exception as e:
+        logger.warning("binding proposal enrichment failed: %s", e)
 
     # Merge page_context choices into draft_dict (not part of InterpretationDraft model)
     if context_decision and context_decision.needs_clarification:

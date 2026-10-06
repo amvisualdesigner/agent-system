@@ -217,6 +217,86 @@ def _agent_confirm(req: ConfirmRequest):
             "reason": f"Contract '{req.contract_id}' not found",
         }
 
+    # ── Fase 6.1: Data Binding gate ────────────────────────────────
+    # El binding confirmado procede SIEMPRE de la BindingProposal del draft:
+    #   auto_unique   → se materializa la propuesta (sin rediscovery)
+    #   needs_choice  → decisión humana explícita de UNA candidata probada
+    #   unresolved    → clarification; nunca fallback al registry
+    #   sin propuesta → ningún binding es aceptable (no hay autoridad)
+    from app.binding.draft_proposal import (
+        BINDING_CHOICE_PENDING,
+        BINDING_GATING_VERBS,
+        BINDING_NOT_FROM_PROPOSAL,
+        BINDING_UNRESOLVED,
+        resolve_confirmed_binding,
+    )
+
+    proposal_actions = (
+        (selected_alternative or {}).get("proposed_actions")
+        or draft.get("proposed_actions")
+        or []
+    )
+    proposals_by_capability: dict[str, dict] = {}
+    for source_actions in (proposal_actions, draft.get("proposed_actions") or []):
+        for source_action in source_actions:
+            if not isinstance(source_action, dict):
+                continue
+            capability = source_action.get("target_capability")
+            if capability and source_action.get("binding_proposal"):
+                proposals_by_capability.setdefault(capability, source_action["binding_proposal"])
+
+    binding_resolution: list[dict] = []
+    for requested in requested_actions:
+        capability = requested.get("target_capability")
+        verb = (requested.get("verb") or "").lower()
+        # Solo las acciones que MATERIALIZAN el componente exigen binding:
+        # exigirlo a `remove` impediría eliminar un componente ambiguo.
+        proposal = (
+            proposals_by_capability.get(capability)
+            if verb in BINDING_GATING_VERBS
+            else None
+        )
+        binding, binding_error = resolve_confirmed_binding(
+            requested.get("binding"), proposal
+        )
+        if binding_error is not None:
+            if binding_error == BINDING_UNRESOLVED:
+                reason = (
+                    "Clarification required: no data source could be proven "
+                    f"for '{capability}'."
+                )
+            elif binding_error == BINDING_CHOICE_PENDING:
+                candidates = (proposal or {}).get("provenance", {}).get("candidates") or []
+                reason = (
+                    "Clarification required: choose one of the "
+                    f"{len(candidates)} candidate data sources for "
+                    f"'{capability}' via action.binding."
+                )
+            elif binding_error == BINDING_NOT_FROM_PROPOSAL:
+                reason = (
+                    f"Rejected: the submitted binding for '{capability}' does "
+                    "not match the validated proposal."
+                )
+            else:
+                reason = (
+                    f"Rejected: binding for '{capability}' cannot be "
+                    "confirmed from its proposal."
+                )
+            return {
+                "status": "rejected",
+                "reason": reason,
+                "gate": {"blocked": True, "reason": binding_error},
+                "binding_error": binding_error,
+                "binding_proposal": proposal,
+            }
+        if binding is not None:
+            requested["binding"] = binding.to_dict()
+            binding_resolution.append({
+                "target_capability": capability,
+                "source": binding.source.to_dict(),
+                "provenance": (proposal or {}).get("status"),
+            })
+
     # Build ConfirmedIntent — only pass fields IntentAction accepts.
     # WHAT/WHERE: 'attach' viaja por acción (decisión semántica del plan).
     _ia_fields = {
@@ -502,6 +582,10 @@ def _agent_confirm(req: ConfirmRequest):
             "selected_alternative": req.selected_alternative,
             "page_context_choice": req.page_context_choice,
         }
+    # Audit trail del Data Binding confirmado (Fase 6.1): de qué propuesta
+    # procedió y con qué fuente. Nunca se redescubre.
+    if binding_resolution:
+        save_extra["binding_resolution"] = binding_resolution
     save_run_state(run_id, save_extra)
     transition_phase(run_id, RunPhase.CONFIRMED)
 

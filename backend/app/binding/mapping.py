@@ -291,8 +291,28 @@ def derive_binding_proposal(
         provenance={
             "candidate_count": len(per_candidate),
             "candidates": [
-                {"kind": c.source.kind, "ref": c.source.ref, "selector": c.source.selector}
-                for c, _ in per_candidate
+                {
+                    "kind": c.source.kind,
+                    "ref": c.source.ref,
+                    "selector": c.source.selector,
+                    "schema": c.schema.to_dict(),
+                    # Mappings deterministas de ESTA candidata: la seleccion
+                    # humana de `needs_choice` se valida contra esta lista sin
+                    # redescubrir. No son una eleccion: `mapping` (la entrada
+                    # materializada) sigue vacio hasta que haya 1 sola
+                    # candidata.
+                    "mappings": [
+                        {
+                            "prop": m.prop,
+                            "stage": m.stage,
+                            "value_path": m.value_path,
+                            "transform": m.transform,
+                            "shape": m.value_schema.shape,
+                        }
+                        for m in mappings
+                    ],
+                }
+                for c, mappings in per_candidate
             ],
             "ambiguous_props": sorted(ambiguous_props),
             "incompatibilities": list(incompatibilities),

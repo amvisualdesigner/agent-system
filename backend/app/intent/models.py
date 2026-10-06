@@ -432,6 +432,42 @@ class BindingProposal:
             "provenance": dict(self.provenance),
         }
 
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "BindingProposal | None":
+        """Reconstruye una propuesta persistida en el draft.
+
+        Devuelve None si el dict no forma una propuesta utilizable (status
+        fuera del conjunto cerrado o target ausente): una propuesta
+        malformada NO autoriza ningun binding.
+        """
+        if not isinstance(d, dict):
+            return None
+        status = d.get("status")
+        target = d.get("target_component")
+        if status not in BINDING_PROPOSAL_STATUSES or not target:
+            return None
+        return cls(
+            status=status,
+            target_component=target,
+            source=DataSourceRef.from_dict(d.get("source")),
+            schema=DataSchemaRef.from_dict(d.get("schema")),
+            mapping=tuple(
+                DataMappingEntry.from_dict(m)
+                for m in (d.get("mapping") or [])
+                if isinstance(m, dict)
+            ),
+            evidence=tuple(
+                EvidenceItem(
+                    kind=e.get("kind", ""),
+                    ref=e.get("ref", ""),
+                    detail=e.get("detail"),
+                )
+                for e in (d.get("evidence") or [])
+                if isinstance(e, dict)
+            ),
+            provenance=dict(d.get("provenance") or {}),
+        )
+
     def to_binding(self) -> DataBinding | None:
         """Convierte una propuesta RESUELTA en DataBinding confirmable.
 
