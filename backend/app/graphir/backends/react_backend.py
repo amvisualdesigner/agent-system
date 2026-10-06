@@ -183,10 +183,15 @@ class ReactBackend(BackendRenderer):
     def _page_hook_declaration(ds: DataSourceIR) -> str | None:
         """Generate the hook declaration statement for the Page data source.
 
+        Precedence (physical materializer, never a semantic resolver):
+          1. explicit hook_name on the DataSourceIR (confirmed binding lower or
+             registry `hook.name` from data_access.json)
+          2. static _REACT_HOOK_MAP for the IR type
+
         Returns e.g. "const _pageData = useDashboardData();"
         or None if the data source type has no hook mapping.
         """
-        hook_name = _REACT_HOOK_MAP.get(ds.type)
+        hook_name = getattr(ds, "hook_name", None) or _REACT_HOOK_MAP.get(ds.type)
         if not hook_name:
             return None
         return f"const _pageData = {hook_name}();"
@@ -195,10 +200,18 @@ class ReactBackend(BackendRenderer):
     def _page_hook_import(ds: DataSourceIR) -> str | None:
         """Generate the import statement for the Page data source hook.
 
+        Precedence (physical materializer, never a semantic resolver):
+          1. explicit hook_import on the DataSourceIR (confirmed binding lower
+             or registry `hook.import` from data_access.json)
+          2. static _HOOK_IMPORT_MAP for the registry hook
+
         Returns e.g. "import { useDashboardData } from '@/hooks/useDashboardData'"
         or None if no import mapping exists.
         """
-        hook_name = _REACT_HOOK_MAP.get(ds.type)
+        hook_import = getattr(ds, "hook_import", None)
+        if hook_import:
+            return hook_import
+        hook_name = getattr(ds, "hook_name", None) or _REACT_HOOK_MAP.get(ds.type)
         if not hook_name:
             return None
         return _HOOK_IMPORT_MAP.get(hook_name)

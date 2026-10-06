@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.binding.models import ResolvedBindings
+from app.binding.lower import SourceDriftItem
 from app.binding.translate import (
     UntranslatableBinding,
     apply_confirmed_bindings,
@@ -85,21 +86,28 @@ class DriftItem:
 class DriftReport:
     """Binding confirmado que difiere de la representacion fisica del registry.
 
-    Puramente informativo: el binding confirmado prevalece. NUNCA bloquea y
-    nunca se convierte en CONFLICT por si mismo.
+    Cubre el drift a nivel de PROPS (componente.prop) y a nivel de SOURCE de
+    pagina (hook confirmado vs hook del registry, producido por el lowering de
+    Fase 6.2). Puramente informativo: el binding confirmado prevalece. NUNCA
+    bloquea y nunca se convierte en CONFLICT por si mismo.
     """
 
     items: tuple[DriftItem, ...] = ()
+    sources: tuple[SourceDriftItem, ...] = ()
 
     @property
     def has_drift(self) -> bool:
-        return bool(self.items)
+        return bool(self.items) or bool(self.sources)
 
     def to_dict(self) -> list[dict]:
-        return [i.to_dict() for i in self.items]
+        return [i.to_dict() for i in self.items] + [
+            s.to_dict() for s in self.sources
+        ]
 
     def describe(self) -> tuple[str, ...]:
-        return tuple(i.describe() for i in self.items)
+        return tuple(i.describe() for i in self.items) + tuple(
+            s.describe() for s in self.sources
+        )
 
 
 def detect_registry_drift(
@@ -221,17 +229,15 @@ def required_materialization(
             )
         return MaterializationRequirements()
 
-    from app.graphir.backends.react_backend import (
-        ReactBackend,
-        _HOOK_IMPORT_MAP,
-        _REACT_HOOK_MAP,
-    )
+    from app.graphir.backends.react_backend import ReactBackend
 
+    # El binding confirmado ya bajo su `hook_name`/`hook_import` sobre la
+    # representacion fisica (Fase 6.2): el backend es materializador y resuelve
+    # la precedencia hook explicito -> registry hook -> mapa estatico.
     declaration = ReactBackend._page_hook_declaration(page)
     imports: list[str] = []
     if declaration:
-        hook_name = _REACT_HOOK_MAP.get(page.type)
-        hook_import = _HOOK_IMPORT_MAP.get(hook_name) if hook_name else None
+        hook_import = ReactBackend._page_hook_import(page)
         if hook_import:
             imports.append(hook_import)
     return MaterializationRequirements(

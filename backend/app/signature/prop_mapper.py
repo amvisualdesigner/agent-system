@@ -103,6 +103,8 @@ class DataSourceIR:
     type: str
     selector: str | None = None
     slices: tuple[DataSlice, ...] = ()
+    hook_name: str | None = None
+    hook_import: str | None = None
 
 
 # ── Framework lowering maps (DataSourceIR type → framework expression) ──
@@ -334,6 +336,11 @@ def _infer_datasource_ir(source_raw: dict) -> DataSourceIR:
 
     Semantic format (v4): {"type": "dashboard_data", "slices": [...]},
     or any type in _REACT_HOOK_MAP / "raw_selector".
+
+    A `hook` entry ({"name": "useDashboardData", "import": "@/hooks/..."})
+    records the registry's physical hook lowering. It is physical EVIDENCE,
+    never semantic authority: `lower_confirmed_page_source()` compares a
+    confirmed hook against it and overrides it when they differ.
     """
     stype = source_raw.get("type", "")
     slices_raw = source_raw.get("slices", [])
@@ -346,10 +353,23 @@ def _infer_datasource_ir(source_raw: dict) -> DataSourceIR:
         )
         for sr in slices_raw
     )
+    hook_name = None
+    hook_import = None
+    hook_raw = source_raw.get("hook")
+    if isinstance(hook_raw, dict):
+        hook_name = hook_raw.get("name")
+        hook_path = hook_raw.get("import")
+        if hook_name and hook_path:
+            if hook_path.lstrip().startswith("import "):
+                hook_import = hook_path
+            else:
+                hook_import = f"import {{ {hook_name} }} from '{hook_path}'"
     return DataSourceIR(
         type=stype,
         selector=source_raw.get("selector"),
         slices=slices,
+        hook_name=hook_name,
+        hook_import=hook_import,
     )
 
 

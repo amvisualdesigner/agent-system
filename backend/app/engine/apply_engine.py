@@ -11,7 +11,7 @@ import json
 import hashlib
 import subprocess
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import lru_cache
 
 from app.graphir.constraint.executor import FileOpApplier
@@ -46,10 +46,18 @@ from app.binding.resolver import resolve as resolve_bindings
 from app.binding.materialize import (
     CONFLICT_UNREPRESENTABLE_BINDING,
     UNREPRESENTABLE_BINDING_CAUSE,
+    DriftReport,
     UntranslatableBinding,
     confirmed_bindings_from_actions,
     materialize_confirmed_bindings,
     required_materialization,
+)
+from app.binding.lower import (
+    SOURCE_LOWERING_CONFLICT,
+    SourceLoweringConflict,
+    collect_repo_files,
+    lower_confirmed_page_source,
+    retarget_confirmed_to_component_types,
 )
 from app.graphir.pipeline import GraphIRPipeline
 from app.graphir.backends import ReactBackend, BackendConfig
@@ -1809,11 +1817,78 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         # UNICO punto donde ambas se encuentran. El registry puede producir
         # drift (se reporta) pero nunca sustituye al binding confirmado.
         _confirmed_actions = _confirmed_binding_actions(plan)
+        _f6_lowering = None
         if _confirmed_actions:
             _f6_confirmed = confirmed_bindings_from_actions(_confirmed_actions)
+
+            # El Confirmed Plan lleva la capability ("presentation.kpi_row");
+            # la representacion fisica y el GraphIR compiler estan indexados por
+            # node.type ("KpiRow"). Traduccion determinista intent_capability ->
+            # node.type del GraphIR (unica por capability en el contrato). Sin
+            # ella el binding confirmado quedaria inerte y el registry mandaria.
+            _f6_cap_to_type: dict[str, str] = {}
+            if graph is not None:
+                for _node in graph.nodes.values():
+                    _cap = _node.metadata.get("intent_capability")
+                    if _cap and _cap not in _f6_cap_to_type:
+                        _f6_cap_to_type[_cap] = _node.type
+            _f6_confirmed = retarget_confirmed_to_component_types(
+                _f6_confirmed, _f6_cap_to_type,
+            )
+
+            # ── Fase 6.2: lowering del source confirmado a la fuente fisica ──
+            # Confirmed Plan → DataBinding → ResolvedBindings/evidencia fisica
+            # → DataSourceIR (hook_name/hook_import). El registry es EVIDENCIA:
+            # se conserva solo en identidad y nunca sustituye a la fuente
+            # confirmada. Sin LLM, sin discovery, sin scoring: probe de import
+            # determinista (export exacto en frontend/src, 1 unico modulo).
+            try:
+                _f6_repo_files = collect_repo_files(exec_ctx.workspace_root)
+                # Las infra ops programadas en ESTE mismo apply son evidencia
+                # fisica futura: cuentan para el probe (jest de regla: hooks
+                # generados por bootstrap materializan el registry).
+                for _f6_fop in infra_ops:
+                    if (
+                        _f6_fop.action.lower() == "create"
+                        and _f6_fop.path.startswith("frontend/src")
+                        and _f6_fop.path.endswith((".ts", ".tsx"))
+                    ):
+                        _f6_repo_files.setdefault(_f6_fop.path, _f6_fop.content or "")
+                _f6_lowering = lower_confirmed_page_source(
+                    _f6_confirmed, resolved_bindings, _f6_repo_files,
+                )
+            except SourceLoweringConflict as e:
+                # El Confirmed Plan sigue siendo VALIDO: lo que falla es la
+                # materializacion fisica de la fuente. Envolvente post-confirmacion
+                # existente (`repository_conflict`): Run -> CONFIRMED,
+                # plan_retryable=True. Sin fallback al registry, sin
+                # reinterpretar, sin invalidar el Plan.
+                return conflict_result(
+                    CONFLICT_UNREPRESENTABLE_BINDING,
+                    "NO WRITE: the Confirmed DataBinding source cannot be lowered "
+                    f"faithfully ({e}). The Confirmed Plan is unchanged and stays "
+                    "authoritative; retry re-captures the physical snapshot.",
+                    details={
+                        "cause": SOURCE_LOWERING_CONFLICT,
+                        "reason": e.reason,
+                        "hook": e.hook,
+                        "detail": e.detail,
+                        "components": sorted(
+                            a.target_capability for a in _confirmed_actions
+                        ),
+                    },
+                )
+
+            # Caso B/identity: se conserva la representacion registry. Caso C:
+            # override — la fuente fisica de la pagina pasa al hook confirmado.
+            if _f6_lowering is not None and _f6_lowering.ir is not None and resolved_bindings is not None:
+                resolved_bindings = replace(
+                    resolved_bindings, page_data_source=_f6_lowering.ir
+                )
+
             try:
                 resolved_bindings, _f6_drift = materialize_confirmed_bindings(
-                    resolved_bindings, _confirmed_actions,
+                    resolved_bindings, _confirmed_actions, confirmed=_f6_confirmed,
                 )
             except UntranslatableBinding as e:
                 # El Confirmed Plan sigue siendo VALIDO: lo que falla es la
@@ -1852,6 +1927,14 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                             a.target_capability for a in _confirmed_actions
                         ),
                     },
+                )
+
+            # Drift source-level del lowering (hook confirmado vs hook registry)
+            # se suma al drift de props: ambos son diagnostico no bloqueante.
+            if _f6_lowering is not None and _f6_lowering.drift:
+                _f6_drift = DriftReport(
+                    items=_f6_drift.items,
+                    sources=tuple(_f6_lowering.drift),
                 )
             if _f6_drift is not None and _f6_drift.has_drift:
                 # Diagnostico estructurado MAS el log: el log no es el unico
