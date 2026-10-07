@@ -229,7 +229,15 @@
             "filter",
             "facet",
             "filters",
-            "filter panel"
+            "filter panel",
+            "refine",
+            "filtering",
+            "filtro",
+            "filtrar",
+            "filtra",
+            "filtros",
+            "panel de filtros",
+            "facetar"
           ],
           "filename_aliases": [],
           "verbs": {
@@ -260,8 +268,7 @@
           "synonyms": [
             "bar chart",
             "barchart",
-            "bar graph",
-            "chart"
+            "bar graph"
           ],
           "filename_aliases": [
             "bar-chart",

@@ -16,6 +16,7 @@ from typing import Any
 from app.intent.models import InterpretationDraft
 from app.intent.llm_client import llm_chat
 from app.catalog.loader import load_catalog, list_contract_ids
+from app.contracts.skill_registry import get_contract
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,10 @@ _CONTRACT_KEYWORDS: dict[str, set[str]] = {
 _ACTION_TRIGGERS: dict[str, list[str]] = {
     "remove": ["remove", "delete", "hide", "destroy", "drop", "clear", "eliminate"],
     "modify": ["modify", "update", "change", "set", "edit", "adjust", "replace", "configure"],
-    "create": ["create", "add", "build", "generate", "compose", "design", "include", "insert"],
+    "create": [
+        "create", "add", "build", "generate", "compose", "design", "include", "insert",
+        "filter", "filtering", "refine", "filtro", "filtrar", "filtra", "filtros", "facetar",
+    ],
     "keep": ["keep", "maintain", "preserve", "leave"],
     "transform": ["transform", "swap", "migrate", "convert", "morph", "substitute"],
 }
@@ -124,11 +128,63 @@ _VERB_OBJECT_PATTERNS: list[tuple[str, str, float]] = [
 ]
 
 
-# ── Contract selection (deterministic pre-filter) ─────────────────
+# ── Contract selection (intent-first, catalog-derived) ─────────────
+#
+# Fuente de verdad: capability_catalog.json. Cada capability tiene un rol
+# estructural por `graphir_type`: Page/Domain son CONTEXTO (destino/target,
+# p.ej. "sales dashboard"), el resto es INTENCION (p.ej. add/modify filter).
+# La intencion explicita de la capability gana SIEMPRE al contexto: un filtro
+# que se anade EN el dashboard selecciona analytics.filter, no el dashboard.
+
+# graphir_types semanticos SIN intencion propia (solo contexto/target).
+_CONTEXT_GRAPHIR_TYPES = frozenset({"Page", "Domain"})
+
+
+def _is_context_capability(capability: dict) -> bool:
+    gtype = (capability.get("graphir_type") or "").strip()
+    return gtype in _CONTEXT_GRAPHIR_TYPES
+
+
+def _capability_terms(capability: dict) -> list[str]:
+    """Vocabulario de la capability: label + synonyms del catalogo."""
+    terms: list[str] = []
+    label = (capability.get("label") or "").strip()
+    if label:
+        terms.append(label)
+    terms.extend(t for t in (capability.get("synonyms") or []) if t)
+    return terms
+
+
+def _capability_select_score(capability: dict, message_lower: str, tokens: set[str]) -> float:
+    """Affinidad lexical entre una capability y el mensaje (catalogo, no keywords).
+
+    - terminos multi-word → substring exacto en el mensaje
+    - tokens simples → token exacto en el mensaje
+    - overlap parcial de multi-word → aporte menor
+    """
+    score = 0.0
+    for term in _capability_terms(capability):
+        t = str(term).lower().strip()
+        if not t:
+            continue
+        if " " in t:
+            if t in message_lower:
+                score += 0.8
+            else:
+                parts = {p for p in t.split() if len(p) > 2}
+                if parts and (parts & tokens):
+                    score += 0.25
+        elif t in tokens:
+            score += 0.6
+    return score
 
 
 def _score_contract(contract_id: str, message_lower: str) -> float:
-    """Score how well a contract matches the user message by keyword overlap."""
+    """Legacy keyword-overlap score (densidad por keyword set).
+
+    Se mantiene como fallback deterministico y para deteccion multi-contract
+    (_detect_potential_multi_contract). Ya NO es la seleccion primaria.
+    """
     keywords = _CONTRACT_KEYWORDS.get(contract_id, set())
     if not keywords:
         return 0.0
@@ -142,12 +198,8 @@ def _score_contract(contract_id: str, message_lower: str) -> float:
     return score
 
 
-def _select_contract(message: str) -> str | None:
-    """Select best contract by keyword overlap. Returns contract_id or None."""
-    message_lower = message.lower().strip()
-    if not message_lower:
-        return None
-
+def _select_contract_legacy(message_lower: str) -> str | None:
+    """Seleccion clasica por overlap de keywords (conservada intacta)."""
     scores = {}
     for cid in _CONTRACT_KEYWORDS:
         scores[cid] = _score_contract(cid, message_lower)
@@ -162,6 +214,50 @@ def _select_contract(message: str) -> str | None:
         return None
 
     return best
+
+
+def _select_contract(message: str) -> str | None:
+    """Selecciona el contrato intent-first desde el catalogo. contract_id o None.
+
+    Reglas:
+      1. intenciones explicitas (graphir_type != Page/Domain) por affinidad;
+         si hay N, gana la mejor (determinista: score > label > contract_id).
+      2. SI existe una intencion, el contexto NUNCA la derrota: por eso
+         "Add a filter by size in sales dashboard" selecciona analytics.filter.
+      3. sin intencion pero con contexto conocido (p.ej. dashboard) → el
+         contrato de ese contexto (superficie previa: "Update dashboard").
+      4. sin ninguna evidencia → fallback clasico (_CONTRACT_KEYWORDS).
+    """
+    message_lower = message.lower().strip()
+    if not message_lower:
+        return None
+
+    catalog = load_catalog()
+    tokens = set(message_lower.split())
+
+    intents: list[tuple[float, str, str]] = []
+    contexts: list[tuple[float, str, str]] = []
+    for contract_id, entry in (catalog.get("contracts", {}) or {}).items():
+        for capability in entry.get("capabilities") or []:
+            score = _capability_select_score(capability, message_lower, tokens)
+            if score <= 0:
+                continue
+            label = capability.get("label") or capability.get("id") or ""
+            rank = (score, label, contract_id)
+            if _is_context_capability(capability):
+                contexts.append(rank)
+            else:
+                intents.append(rank)
+
+    if intents:
+        intents.sort(key=lambda r: (-r[0], r[1], r[2]))
+        return intents[0][2]
+
+    if contexts:
+        contexts.sort(key=lambda r: (-r[0], r[1], r[2]))
+        return contexts[0][2]
+
+    return _select_contract_legacy(message_lower)
 
 
 def _has_action_verb(message: str) -> bool:
@@ -444,6 +540,57 @@ def _validate_output(
     return warnings, None
 
 
+def _validate_params(params: dict, contract_id: str) -> list[str]:
+    """Valida params propuestos contra el input_schema del contrato.
+
+    Deterministico; la clasificacion resultante es clarification_needed,
+    NUNCA un cambio de contrato. Restricciones soportadas:
+      - type==array: enum de items, o tipo string obligatorio
+      - type==string: enum
+    Parametros desconocidos o ausentes del schema no bloquean (son libres).
+    """
+    if not isinstance(params, dict):
+        return [f"params must be an object, got {type(params).__name__}"]
+
+    contract = get_contract(contract_id, 1)
+    if contract is None:
+        return []
+
+    props = ((contract.input_schema or {}).get("properties") or {})
+    errors: list[str] = []
+    for key, value in params.items():
+        prop = props.get(key)
+        if prop is None or value is None:
+            continue
+        ptype = prop.get("type")
+        if ptype == "array":
+            if not isinstance(value, list):
+                errors.append(f"Parameter '{key}' must be an array")
+                continue
+            items = prop.get("items") or {}
+            enum = items.get("enum") or []
+            if enum:
+                invalid = [v for v in value if v not in enum]
+                if invalid:
+                    errors.append(
+                        f"Parameter '{key}' has invalid value(s): "
+                        f"{', '.join(map(str, invalid))} "
+                        f"(valid: {', '.join(map(str, enum))})"
+                    )
+            elif items.get("type") == "string":
+                non_str = [v for v in value if not isinstance(v, str)]
+                if non_str:
+                    errors.append(f"Parameter '{key}' must contain only strings")
+        elif ptype == "string" and isinstance(value, str):
+            enum = prop.get("enum") or []
+            if enum and value not in enum:
+                errors.append(
+                    f"Parameter '{key}' has invalid value '{value}' "
+                    f"(valid: {', '.join(map(str, enum))})"
+                )
+    return errors
+
+
 # ── Build worktree_capabilities from index snapshot ────────────────
 
 
@@ -579,6 +726,18 @@ Return valid JSON per the schema. If unclear, set clarification_needed=true.
     warnings, clarification = _validate_output(raw, catalog_entry, worktree_caps)
     if warnings:
         logger.warning("Interpret validation warnings: %s", warnings)
+
+    # 8b. Param validation vs contract input_schema (enum/type). Deterministic;
+    #     classification is clarification_needed, NEVER a contract switch.
+    param_errors = _validate_params(raw.get("params") or {}, contract_id)
+    if param_errors:
+        warnings.extend(param_errors)
+        if not raw.get("clarification_needed"):
+            raw["clarification_needed"] = True
+            raw["clarification_question"] = (
+                "Some parameters need attention: " + "; ".join(param_errors)
+                + ". Please provide valid values or rephrase."
+            )
 
     # 9. Check if dry-run action map is empty
     clarification_needed = raw.get("clarification_needed", False)

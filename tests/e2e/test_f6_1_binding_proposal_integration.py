@@ -110,6 +110,17 @@ _DASHBOARD_PAGE = {
     ),
 }
 
+_KPIROW_PAGE = {
+    "src/pages/dashboard/Page.tsx": (
+        "import { useDashboardData } from '@/hooks/useDashboardData';\n"
+        "import { KpiRow } from '@/components/KpiRow';\n"
+        "export function Page() {\n"
+        "  const { kpiData } = useDashboardData();\n"
+        "  return <KpiRow data={kpiData} />;\n"
+        "}\n"
+    ),
+}
+
 
 # ── 1 candidata → auto_unique → binding en el Plan sin rediscovery ─────────
 
@@ -195,13 +206,57 @@ class TestAutoUniqueIntoLandedPlan:
         finally:
             delete_run_state(run_id)
 
+    def test_kpi_row_choice_lands_slice_binding_via_data_prop(self):
+        """KpiRow con slot data←metrics: la pagina que desestructura `kpiData`
+        y renderiza <KpiRow data={kpiData} /> es candidata, pero el registry
+        declara data←contract_params['metrics'] => ambiguedad real =>
+        needs_choice. El humano elige la candidata de la pagina y el binding
+        aterriza como data→_pageData.kpiData."""
+        run_id = str(uuid.uuid4())
+        try:
+            ws = _seed_workspace(run_id, _KPIROW_PAGE)
+            draft = _persist_draft(run_id, ws, {
+                "verb": "create",
+                "target_capability": "presentation.kpi_row",
+                "contract_id": "dashboard.sales_overview",
+                "params": {"metrics": ["revenue"]},
+            })
+            proposal = draft["proposed_actions"][0]["binding_proposal"]
+            assert proposal["status"] == "needs_choice"
+            assert proposal["source"] is None
+            candidates = proposal["provenance"]["candidates"]
+            assert len(candidates) == 1
+            assert candidates[0]["kind"] == "hook"
+            assert candidates[0]["ref"] == "useDashboardData"
+            owned = [m for m in candidates[0]["mappings"] if m["prop"] == "data"]
+            assert any(m["stage"] == "slice" and m["value_path"] == "_pageData.kpiData"
+                       for m in owned)
+
+            out = _confirm(run_id, "dashboard.sales_overview", [{
+                "verb": "create",
+                "target_capability": "presentation.kpi_row",
+                "binding": {
+                    "source": {"kind": "hook", "ref": "useDashboardData"},
+                    "mapping": [{"prop": "data", "from_field": "_pageData.kpiData"}],
+                },
+            }])
+            assert out["status"] == "ok"
+            binding = out["plan"]["actions"][0]["binding"]
+            assert binding["source"]["ref"] == "useDashboardData"
+            assert binding["mapping"][0]["prop"] == "data"
+            assert binding["mapping"][0]["from_field"] == "_pageData.kpiData"
+
+            saved = load_run_state(run_id)
+            assert saved["binding_resolution"][0]["provenance"] == "needs_choice"
+        finally:
+            delete_run_state(run_id)
+
 
 # ── 0 candidatas → unresolved → clarification, sin fallback al registry ────
 
 
 class TestUnresolvedBlocksWithoutFallback:
     @pytest.mark.parametrize("capability", [
-        "presentation.kpi_row",
         "presentation.timeseries",
     ])
     def test_unresolved_component_is_rejected_with_clarification(self, capability):
@@ -226,6 +281,35 @@ class TestUnresolvedBlocksWithoutFallback:
             assert out["gate"]["reason"] == "binding_unresolved"
             assert out["binding_proposal"]["status"] == "unresolved"
             # Ni el registry lo materializa en silencio:
+            assert load_run_state(run_id).get("confirmed_intent") is None
+        finally:
+            delete_run_state(run_id)
+
+    def test_kpi_row_needs_human_choice_never_falls_back_to_registry(self):
+        run_id = str(uuid.uuid4())
+        try:
+            ws = _seed_workspace(run_id, _DASHBOARD_PAGE)
+            draft = _persist_draft(run_id, ws, {
+                "verb": "create",
+                "target_capability": "presentation.kpi_row",
+                "contract_id": "dashboard.sales_overview",
+            })
+            proposal = draft["proposed_actions"][0]["binding_proposal"]
+            assert proposal["status"] == "needs_choice"
+            assert proposal["source"] is None
+            candidates = proposal["provenance"]["candidates"]
+            assert any(c["kind"] == "hook" and c["ref"] == "useDashboardData"
+                       for c in candidates)
+
+            out = _confirm(run_id, "dashboard.sales_overview", [{
+                "verb": "create",
+                "target_capability": "presentation.kpi_row",
+            }])
+            assert out["status"] == "rejected"
+            assert out["gate"]["blocked"] is True
+            assert out["gate"]["reason"] == "binding_choice_pending"
+            assert "Clarification required: choose one" in out["reason"]
+            # Ni el registry responde en silencio:
             assert load_run_state(run_id).get("confirmed_intent") is None
         finally:
             delete_run_state(run_id)

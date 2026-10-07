@@ -76,7 +76,7 @@ SKILL_CONTRACTS: dict[tuple[str, int], SkillContract] = {
         ast_template={
             "layout": "AnalyticsGrid",
             "slots": [
-                {"type": "KpiRow", "props": {"metrics": "metrics"}},
+                {"type": "KpiRow", "props": {"data": "metrics"}},
                 {"type": "Timeseries", "props": {"metric": "timeseries_metric"}},
             ],
             "capabilities": {

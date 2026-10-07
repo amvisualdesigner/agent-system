@@ -91,7 +91,7 @@ class TestRequiredPropsFromSlot:
         r = build_binding_requirement(
             "KpiRow", contract=get_contract("dashboard.sales_overview", 1), v4_bindings=v4
         )
-        assert r.required_props == ("metrics",)
+        assert r.required_props == ("data",)
 
 
 # ═══════════════════════════════════════════════════════════════════

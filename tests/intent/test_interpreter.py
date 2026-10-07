@@ -13,6 +13,7 @@ from app.intent.interpreter import (
     _has_action_verb,
     _build_worktree_caps,
     _score_contract,
+    _validate_params,
 )
 
 
@@ -59,6 +60,18 @@ class TestContractSelection:
         assert _select_contract("Filter the dashboard") == "analytics.filter"
         assert _select_contract("Add a filter panel for region and channel") == "analytics.filter"
 
+    def test_select_filter_main_case_not_dashboard(self):
+        # "Add a filter by size in sales dashboard": la intencion de filtro
+        # NUNCA se va al dashboard solo por mencionarlo (Fase Contract Selection).
+        assert _select_contract("Add a filter by size in sales dashboard") == "analytics.filter"
+        assert _select_contract("Filter the sales dashboard by size") == "analytics.filter"
+
+    def test_select_filter_with_preposition_target(self):
+        assert _select_contract("Add a filter in sales dashboard") == "analytics.filter"
+        assert _select_contract("Add a filter to the dashboard by region") == "analytics.filter"
+        assert _select_contract("Change the filter on the dashboard") == "analytics.filter"
+        assert _select_contract("Remove the filter from the sales dashboard") == "analytics.filter"
+
     def test_select_bar_chart(self):
         assert _select_contract("Create a bar chart of revenue by quarter") == "analytics.chart_bar"
 
@@ -85,6 +98,13 @@ class TestActionDetection:
     def test_no_action(self):
         assert _has_action_verb("The dashboard looks nice") is False
 
+    def test_detect_filter_create_verb(self):
+        # "filter"/"refine"/"filtro" habilitan create: el caso main no cae en
+        # clarification_needed por falta de verbo de accion.
+        assert _has_action_verb("Filter the sales dashboard by size") is True
+        assert _has_action_verb("Refine by region") is True
+        assert _has_action_verb("Filtra el dashboard por tamaño") is True
+
     def test_empty_message_no_action(self):
         assert _has_action_verb("") is False
 
@@ -101,6 +121,45 @@ class TestScoreContract:
     def test_score_no_match(self):
         score = _score_contract("analytics.table", "remove the kpi row")
         assert score == 0.0
+
+
+class TestValidateParams:
+    def test_filter_params_any_string_list_is_valid(self):
+        # analytics.filter: filters=array<string> SIN enum => ["size"] es valido.
+        assert _validate_params({"filters": ["size"]}, "analytics.filter") == []
+
+    def test_filter_params_non_string_rejected(self):
+        errors = _validate_params({"filters": [123]}, "analytics.filter")
+        assert len(errors) == 1
+        assert "filters" in errors[0]
+
+    def test_dashboard_enum_violation_rejected(self):
+        errors = _validate_params(
+            {"metrics": ["revenue", "size"]}, "dashboard.sales_overview",
+        )
+        assert any("metrics" in e for e in errors)
+
+    def test_dashboard_timeseries_enum_violation_rejected(self):
+        errors = _validate_params(
+            {"timeseries_metric": "bogus"}, "dashboard.sales_overview",
+        )
+        assert any("timeseries_metric" in e for e in errors)
+
+    def test_valid_dashboard_params_pass(self):
+        assert _validate_params(
+            {"metrics": ["revenue"], "timeseries_metric": "growth"},
+            "dashboard.sales_overview",
+        ) == []
+
+    def test_unknown_params_are_not_blocking(self):
+        assert _validate_params({"size": "medium"}, "analytics.filter") == []
+
+    def test_non_dict_params_rejected(self):
+        errors = _validate_params([1, 2], "analytics.filter")
+        assert errors
+
+    def test_unknown_contract_no_errors(self):
+        assert _validate_params({"metrics": ["size"]}, "no.such_contract") == []
 
 
 class TestWorktreeCaps:

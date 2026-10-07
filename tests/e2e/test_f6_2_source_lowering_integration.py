@@ -1,9 +1,11 @@
 """Fase 6.2 — E2E: el source del binding confirmado atraviesa al renderer.
 
 Escenario real (dashboard.sales_overview): un workspace que ya consume
-`useSalesData` (hook NO registry) para KpiRow identifica la fuente como
-`auto_unique`. El create de `presentation.kpi_row` confirma el binding
-`useSalesData` y el apply:
+`useSalesData` (hook NO registry) para KpiRow. El slot data←metrics hace que
+el create de `presentation.kpi_row` proponga `needs_choice`: el registry
+tambien declara `data <- contract_params['metrics']`. El humano confirma la
+candidata probada `useSalesData` (data→_pageData.metrics, seleccion humana
+que NO rediscoverya) y el apply:
 
   * baja el source confirmado a `DataSourceIR(hook_name=useSalesData,
     hook_import=@/hooks/useSalesData)` con el probe de import determinista,
@@ -42,7 +44,7 @@ import { KpiRow } from './KpiRow';
 import { useSalesData } from '@/hooks/useSalesData';
 export function SalesOverviewPage() {
   const { metrics } = useSalesData();
-  return <KpiRow metrics={metrics} />;
+  return <KpiRow data={metrics} />;
 }
 """
 
@@ -113,7 +115,11 @@ def _confirm(run_id: str, workspace: str) -> dict:
             contract_id="dashboard.sales_overview",
             contract_version=1,
             actions=[
-                {"verb": "create", "target_capability": "presentation.kpi_row"},
+                {"verb": "create", "target_capability": "presentation.kpi_row",
+                 "binding": {
+                     "source": {"kind": "hook", "ref": "useSalesData"},
+                     "mapping": [{"prop": "data", "from_field": "_pageData.metrics"}],
+                 }},
                 {"verb": "modify", "target_capability": "layout.page"},
             ],
             params={"metrics": ["revenue"], "timeseries_metric": "revenue"},
@@ -181,7 +187,7 @@ def _confirm_search(run_id: str, workspace: str) -> dict:
 
 
 class TestSourceLoweringEndToEnd:
-    def test_auto_unique_confirm_carries_use_sales_data(self, e2e_workspace):
+    def test_human_choice_confirm_carries_use_sales_data(self, e2e_workspace):
         _seed(e2e_workspace)
         out = _confirm(str(uuid.uuid4()), e2e_workspace)
         assert out["status"] == "ok"
@@ -192,7 +198,7 @@ class TestSourceLoweringEndToEnd:
         assert binding["source"]["kind"] == "hook"
         assert binding["source"]["ref"] == "useSalesData"
         mappings = {m["prop"]: m["from_field"] for m in binding["mapping"]}
-        assert mappings.get("metrics") == "_pageData.metrics"
+        assert mappings.get("data") == "_pageData.metrics"
 
     def test_apply_renders_confirmed_source_not_registry(
         self, e2e_workspace, artifacts_dir,
@@ -212,7 +218,7 @@ class TestSourceLoweringEndToEnd:
         assert "import { useSalesData } from '@/hooks/useSalesData'" in page
         assert "useDashboardData" not in page
         assert page.count("const _pageData = useSalesData();") == 1
-        assert "metrics={_pageData.metrics}" in page
+        assert "data={_pageData.metrics}" in page
 
         create_kpi = [op for op in ops if op["action"] == "create" and op["path"].endswith("KpiRow.tsx")]
         assert len(create_kpi) == 1
@@ -377,7 +383,7 @@ class TestConfirmedFieldRootingEndToEnd:
         page_op = [op for op in ok["execution"]["operations"]
                    if op["path"].endswith("SalesOverviewPage.tsx")]
         assert len(page_op) == 1
-        assert "metrics={_pageData.metrics}" in page_op[0]["content"]
+        assert "data={_pageData.metrics}" in page_op[0]["content"]
         assert "useDashboardData" not in page_op[0]["content"]
         assert kpi["binding"]["source"]["ref"] == "useSalesData"
 

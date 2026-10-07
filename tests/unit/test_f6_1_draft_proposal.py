@@ -177,12 +177,15 @@ def test_non_materializing_verbs_are_not_gated(tmp_path):
 # ── Casos ambiguos del contrato: nunca auto_unique ────────────────────────
 
 
-def test_kpi_row_stays_unresolved_without_binding(tmp_path):
+def test_kpi_row_is_needs_choice_even_without_usage(tmp_path):
+    # Tras el slot data←metrics, el registry declara KpiRow.data (slice kpiData
+    # + param contract_params['metrics']) de forma incondicional: la pagina no
+    # aporta nada pero NUNCA es unresolved ni auto_unique => needs_choice.
     ws = _seed(tmp_path, {
         "src/pages/dashboard/Page.tsx": (
             "import { useDashboardData } from '@/hooks/useDashboardData';\n"
             "export function Page() {\n"
-            "  const { kpiData, chartData, filters } = useDashboardData();\n"
+            "  const { chartData } = useDashboardData();\n"
             "  return null;\n"
             "}\n"
         ),
@@ -202,11 +205,12 @@ def test_kpi_row_stays_unresolved_without_binding(tmp_path):
 
     summary = enrich_draft_binding_proposals(draft, workspace=ws)
 
-    assert [s["status"] for s in summary] == ["unresolved"]
+    assert [s["status"] for s in summary] == ["needs_choice"]
     proposal = draft["proposed_actions"][0]["binding_proposal"]
     assert proposal["source"] is None
-    assert proposal["mapping"] == []
-    assert draft["binding_decisions_pending"][0]["status"] == "unresolved"
+    refs = {c["ref"] for c in proposal["provenance"]["candidates"]}
+    assert "kpiData" in refs
+    assert draft["binding_decisions_pending"][0]["status"] == "needs_choice"
 
 
 def test_timeseries_stays_unresolved_without_binding(tmp_path):
@@ -416,6 +420,9 @@ def test_needs_choice_rejects_invented_from_field(tmp_path):
 
 
 def test_unresolved_blocks_even_with_submitted_binding(tmp_path):
+    # Timeseries: la pagina desestructura fuentes de dashboard, pero nada
+    # prueba su prop `metric` => propuesta unresolved y NINGUN binding
+    # presentado por el humano es aceptable.
     ws = _seed(tmp_path, {
         "src/pages/dashboard/Page.tsx": (
             "import { useDashboardData } from '@/hooks/useDashboardData';\n"
@@ -424,17 +431,12 @@ def test_unresolved_blocks_even_with_submitted_binding(tmp_path):
             "  return null;\n"
             "}\n"
         ),
-        "src/pages/dashboard/components/KpiRow.tsx": (
-            "export function KpiRow(props: { data: KpiItem[] }) {\n"
-            "  return null;\n"
-            "}\n"
-        ),
     })
-    proposal = _proposal_for(ws, "dashboard.sales_overview", "presentation.kpi_row")
+    proposal = _proposal_for(ws, "dashboard.sales_overview", "presentation.timeseries")
     assert proposal["status"] == "unresolved"
 
     submitted = {"source": {"kind": "slice", "ref": "kpiData", "selector": "kpiData"},
-                 "mapping": [{"prop": "metrics", "from_field": "_pageData.kpiData"}]}
+                 "mapping": [{"prop": "data", "from_field": "_pageData.kpiData"}]}
     binding, error = resolve_confirmed_binding(submitted, proposal)
 
     assert binding is None and error == BINDING_UNRESOLVED
