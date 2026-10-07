@@ -266,6 +266,18 @@ class DataMappingEntry:
 
     transform: nombre de la whitelist de transforms del resolver
                (identity/items/wrap/value/label). None => "identity".
+    required: METADATA (F6.3 D1): indica que `from_field` es un requisito del
+              campo de datos de la fuente. NO es una regla operativa de la ruta
+              confirmada (ConfirmedPlan -> Renderer): la unica autoridad de
+              props obligatorias es `component_signatures[node.type].
+              required_props`. Ninguna frontera de Fase 6 lo ejecuta como
+              enforcement propio; se documenta para que el metadata descriptivo
+              no se convierta en una segunda autoridad semantica.
+    default: METADATA (F6.3 D1): valor fallback descriptivo del campo de datos
+             de la fuente si `from_field` no esta. NUNCA se aplica en la ruta
+             confirmada: no sustituye ni rellena un `_pageData.<selector>`
+             fisico, ni un valor de prop del renderer. Persiste solo como
+             informacion de transporte hacia pipelines legacy que lo consumen.
     """
     prop: str
     from_field: str

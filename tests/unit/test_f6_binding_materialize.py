@@ -15,7 +15,7 @@ from app.binding.materialize import (
 from app.binding.resolver import resolve
 from app.binding.translate import UntranslatableBinding
 from app.graphir.backends.react_backend import JSVariable
-from app.intent.models import DataBinding, DataMappingEntry, DataSourceRef, IntentAction
+from app.intent.models import DataBinding, DataMappingEntry, DataSchemaRef, DataSourceRef, IntentAction
 
 
 def _binding(prop="filters", from_field="_pageData.filters", transform="identity"):
@@ -271,6 +271,7 @@ def test_drift_non_blocking_structured_diagnostic(rb):
             "prop": "filters",
             "confirmed": "_pageData.otro",
             "registry": "_pageData.filters",
+            "reason": "path_differs",
         }
     ]
     # materialization used the CONFIRMED binding
@@ -301,13 +302,130 @@ def test_no_false_positive_when_confirmed_equals_registry(rb):
     assert _conflict_of(("FilterPanel", _binding())) is None
 
 
-def test_concrete_registry_value_is_not_drift(rb):
-    """A concrete registry value is not a comparable physical path, not a conflict."""
+def test_concrete_registry_value_is_structured_drift_never_conflict(rb):
+    """F6.3 D3: valor concreto del registry -> DriftItem no bloqueante con
+    preview de forma (JAMAS con el valor). Confirmed gana; no hay conflicto."""
+    import json
+
     from app.binding.models import ResolvedBindings
+    from app.binding.materialize import detect_registry_drift
 
     r = ResolvedBindings(component_props={"SearchBar": {"placeholder": "Search..."}})
-    drift = detect_registry_drift(r, {"SearchBar": _binding("placeholder", "_pageData.q")})
-    assert drift.has_drift is False
+    b = _binding("placeholder", "_pageData.q")
+    drift = detect_registry_drift(r, {"SearchBar": b})
+    assert drift.has_drift
+    item = drift.items[0]
+    assert item.component == "SearchBar"
+    assert item.prop == "placeholder"
+    assert item.reason == "registry_concrete_value"
+    assert item.registry is None
+    assert item.registry_value_shape == "string"
+    assert "string" in item.describe()
+    assert "Search..." not in json.dumps(drift.to_dict())
+
+    out, drift2 = materialize_confirmed_bindings(r, _actions(("SearchBar", b)))
+    assert drift2.items == drift.items
+    # confirmed wins
+    assert out.component_props["SearchBar"]["placeholder"] == JSVariable("_pageData.q")
+    # never a conflict, never a fallback
+    assert _conflict_of(("SearchBar", b)) is None
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ([1, 2, 3], "list[3]"),
+        ({"label": "x", "value": 1}, "dict{label, value}"),
+        ({"a": 1, "b": 2, "c": 3, "d": 4}, "dict{a, b, c, ...}"),
+        (42, "number"),
+        (True, "boolean"),
+        (JSVariable("_pageData.x"), "object"),
+    ],
+)
+def test_concrete_value_shape_preview_never_leaks_the_value(value, expected):
+    from app.binding.materialize import _shape_preview
+
+    assert _shape_preview(value) == expected
+
+
+# ── F6.3 D2-B: contradiccion de shape declarado (diagnostico, no conflicto) ─
+
+
+def _binding_shape(prop, from_field, shape):
+    return DataBinding(
+        source=DataSourceRef(kind="hook", ref="useSalesData"),
+        schema=DataSchemaRef(ref="contract:", shape=shape),
+        mapping=(DataMappingEntry(prop=prop, from_field=from_field, transform="identity"),),
+    )
+
+
+def test_declared_shape_contradiction_is_structured_drift(rb):
+    from app.binding.materialize import detect_shape_contradictions
+
+    confirmed = {"KpiRow": _binding_shape("data", "_pageData.kpiData", "array<string>")}
+    items = detect_shape_contradictions(confirmed, {"KpiRow": {"data": "object"}})
+    assert len(items) == 1
+    item = items[0]
+    assert item.reason == "declared_shape_contradiction"
+    assert item.component == "KpiRow" and item.prop == "data"
+    assert item.confirmed == "array<string>"
+    assert item.registry == "object"
+    assert "array<string>" in item.describe() and "object" in item.describe()
+
+    # no bloquea: la materializacion normal sigue y SOLO diagnostica
+    out, drift = materialize_confirmed_bindings(
+        rb, _actions(("KpiRow", _binding_shape("data", "_pageData.kpiData", "array<string>")))
+    )
+    assert "declared_shape_contradiction" not in [
+        d.get("reason") for d in drift.to_dict()
+    ]  # rb no declara shape: sin contradiccion en el camino unitario
+    assert _conflict_of((
+        "KpiRow", _binding_shape("data", "_pageData.kpiData", "array<string>"),
+    )) is None
+
+
+def test_shape_contradiction_both_directions_matter():
+    from app.binding.materialize import detect_shape_contradictions
+
+    confirmed = {"KpiRow": _binding_shape("data", "_pageData.kpiData", "object")}
+    items = detect_shape_contradictions(confirmed, {"KpiRow": {"data": "array<KpiItem>"}})
+    assert len(items) == 1
+    assert items[0].reason == "declared_shape_contradiction"
+
+
+def test_unknown_shape_never_contradicts():
+    from app.binding.materialize import detect_shape_contradictions, _shape_family
+
+    # confirmed unknown vs declared object -> no item
+    confirmed = {"KpiRow": _binding_shape("data", "_pageData.kpiData", "unknown")}
+    assert detect_shape_contradictions(confirmed, {"KpiRow": {"data": "object"}}) == ()
+    # confirmed array vs declared unknown/missing -> no item
+    confirmed = {"KpiRow": _binding_shape("data", "_pageData.kpiData", "array")}
+    assert detect_shape_contradictions(confirmed, {"KpiRow": {"data": "unknown"}}) == ()
+    assert detect_shape_contradictions(confirmed, {"KpiRow": {}}) == ()
+    assert detect_shape_contradictions(confirmed, {}) == ()
+    assert _shape_family(None) == "unknown"
+    assert _shape_family("") == "unknown"
+    assert _shape_family("any") == "unknown"
+
+
+def test_known_shapes_of_the_same_family_do_not_contradict():
+    from app.binding.materialize import detect_shape_contradictions
+
+    confirmed = {"KpiRow": _binding_shape("data", "_pageData.kpiData", "array<string>")}
+    assert detect_shape_contradictions(
+        confirmed, {"KpiRow": {"data": "array<KpiItem>"}}
+    ) == ()
+
+
+def test_registry_declared_shapes_reads_the_ssot():
+    from app.binding.materialize import registry_declared_shapes
+
+    declared = registry_declared_shapes()
+    assert declared.get("KpiRow", {}).get("data") == "array<KpiItem>"
+    assert declared.get("Timeseries", {}).get("title") == "string"
+    # componentes sin declaracion de shape (slices de composicion) no aparecen
+    assert "FilterPanel" not in declared
 
 
 # --- binding no materializable: las 4 causas ---

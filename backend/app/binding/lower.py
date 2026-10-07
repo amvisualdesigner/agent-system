@@ -20,6 +20,24 @@ Reglas fijadas por el usuario (FASE 6.2):
     exactamente en exactamente UN modulo de `frontend/src/**/*.{ts,tsx}`.
     0 -> missing_hook, >1 -> ambiguous_hook. Nunca fuzzy, scoring, o LLM.
 
+FASE 6.3 (decision D2-A ratificada, SOLO en el override/Caso C):
+
+  * cada mapping confirmado `_pageData.<selector>` debe enraizar en el
+    snapshot FISICO FRESCO: el root del selector debe figurar entre los campos
+    desestructurados del hook confirmado (`scan_calls`, los mismos campos que
+    discovery) o quedar enraizado por la extraccion `_pageData = hook(...)`
+    (mismo nivel de certeza estructural que usa el registry para componer).
+    Sin raiz verificada -> CONFLICT `missing_field` retryable, sin rediscovery.
+  * selectores anidados validan SOLO el root (R6: sin heuristica profunda).
+  * la extraccion `_pageData = hook(...)` enraiza todos los `_pageData.<sel>`
+    del hook: es la representacion POST-apply, asi el re-apply del mismo Plan
+    confirmado NO produce un falso-positivo (la operacion es "binding congelado
+    -> verificacion fisica", nunca rediscovery ni re-escritura).
+  * Caso B (identidad) NO se re-valida: el registry ya materializo esa
+    representacion; un re-check sobre paginas compuestas (p.ej. FilterPanel
+    registrado en forma `_pageData`) seria un falso-positivo. Solo el override
+    que RE-CABLEA la pagina fisica exige prueba de campos en el momento.
+
 Funciones puras: los contenidos llegan ya leidos (`repo_files`, snapshot de la
 aplicacion). `collect_repo_files()` es la unica lectura acotada de disco.
 """
@@ -32,6 +50,7 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 
+from app.binding.discovery import rooted_at, scan_calls
 from app.intent.models import DataBinding
 from app.signature.prop_mapper import DataSourceIR, _REACT_HOOK_MAP
 
@@ -53,6 +72,7 @@ _SKIP_DIRS = frozenset({"node_modules", ".git", "dist", "build", ".next", "__pyc
 _EXPORT_FUNCTION = re.compile(r"export\s+(?:async\s+)?function\s+(\w+)")
 _EXPORT_CONST = re.compile(r"export\s+(?:const|let|var)\s+(\w+)")
 _EXPORT_NAMED = re.compile(r"export\s*\{([^}]*)\}")
+_PAGE_DATA_ASSIGN = re.compile(r"\b_pageData\s*=\s*(\w+)\s*\(")
 
 
 @dataclass(frozen=True)
@@ -102,7 +122,7 @@ class SourceLoweringConflict(Exception):
         detail: str,
         components: list[str] | None = None,
     ):
-        self.reason = reason  # unsupported_kind | missing_hook | ambiguous_hook | multiple_hooks | missing_target | ambiguous_target
+        self.reason = reason  # unsupported_kind | missing_hook | ambiguous_hook | multiple_hooks | missing_target | ambiguous_target | missing_field
         self.hook = hook
         self.detail = detail
         self.components = sorted(set(components or ()))
@@ -196,6 +216,71 @@ def _module_stem(rel: str) -> str:
             rel = rel[: -len(ext)]
             break
     return rel.strip("/")
+
+
+def _hook_call_fields(hook: str, repo_files: Mapping[str, str]) -> frozenset[str]:
+    """Campos desestructurados de `hook` en el snapshot fisico (union).
+
+    Mismos regex/campos que discovery (`scan_calls`): la EVIDENCIA de que el
+    hook confirmado esta cableado en la aplicacion. Union determinista sobre
+    `frontend/src/**/*.{ts,tsx}`, exactamente el alcance del probe.
+    """
+    fields: set[str] = set()
+    for rel, content in sorted(repo_files.items()):
+        rel = rel.replace(os.sep, "/")
+        if not rel.startswith("frontend/src/") or not rel.endswith(_PROBE_EXTENSIONS):
+            continue
+        if not content:
+            continue
+        for callee, flds in scan_calls(content):
+            if callee == hook:
+                fields.update(flds)
+    return frozenset(fields)
+
+
+def _page_data_extracted_from(hook: str, repo_files: Mapping[str, str]) -> bool:
+    """La pagina extrae el root entero: `_pageData = hook(...)`.
+
+    Es la representacion POST-apply del override (y la que usa el registry para
+    componer): enraiza TODOS los `_pageData.<selector>` del hook con el mismo
+    nivel de certeza estructural que los campos desestructurados. Permite que
+    el re-apply de un Plan ya materializado NO produzca un falso `missing_field`.
+    """
+    for content in repo_files.values():
+        if not content:
+            continue
+        for callee in _PAGE_DATA_ASSIGN.findall(content):
+            if callee == hook:
+                return True
+    return False
+
+
+def _missing_confirmed_field_roots(
+    confirmed_bindings: Mapping[str, DataBinding],
+    hook: str,
+    repo_files: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Roots de `_pageData.<selector>` no enraizados en el snapshot (F6.3 D2-A).
+
+    Solo los mappings `_pageData.` son representables fisicamente por lowering
+    (los demas los cubre translate con `UntranslatableBinding`). Se valida el
+    ROOT del selector (R6: sin heuristica profunda) contra los campos
+    desestructurados/extraidos del hook confirmado. Determinista y puro.
+    """
+    fields = _hook_call_fields(hook, repo_files)
+    if _page_data_extracted_from(hook, repo_files):
+        return ()
+    missing: set[str] = set()
+    for binding in confirmed_bindings.values():
+        for entry in binding.mapping:
+            if not entry.from_field.startswith("_pageData."):
+                continue
+            selector = entry.from_field[len("_pageData."):]
+            if not rooted_at(selector, fields):
+                root = selector.split(".", 1)[0]
+                if root:
+                    missing.add(root)
+    return tuple(sorted(missing))
 
 
 def probe_hook_modules(
@@ -321,6 +406,25 @@ def lower_confirmed_page_source(
             detail=(
                 f"exactly {len(matches)} modules export {hook!r}: {matches}; "
                 "the confirmed source is physically ambiguous"
+            ),
+            components=components_of,
+        )
+
+    # ── D2-A (F6.3): enraizar los campos confirmados en el snapshot fresco ──
+    # Solo en override (Caso C): la pagina fisica debe seguir desestructurando
+    # el ROOT de cada `_pageData.<selector>` confirmado (o extraer _pageData del
+    # hook). Evidencia = el MISMO snapshot fisico (repo_files), via scan_calls:
+    # la operacion es "binding congelado -> verificacion fisica", SIN discovery.
+    missing_fields = _missing_confirmed_field_roots(confirmed_bindings, hook, repo_files)
+    if missing_fields:
+        raise SourceLoweringConflict(
+            reason="missing_field",
+            hook=hook,
+            detail=(
+                "confirmed binding fields are no longer rooted in the physical "
+                f"snapshot: _pageData<.{', _pageData.'.join(missing_fields)}> "
+                f"not destructured/extracted from confirmed hook {hook!r}. No "
+                "registry fallback; retry re-captures the physical snapshot."
             ),
             components=components_of,
         )

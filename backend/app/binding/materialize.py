@@ -21,6 +21,16 @@ Reglas fijadas por el usuario:
     Confirmado sigue materializable        -> continuar SOLO con el confirmado
     Drift impide representar fielmente     -> CONFLICT, sin fallback
 
+FASE 6.3 (decisiones D2-B/D3 ratificadas):
+
+    * D2-B  -> contradiccion de shape DECLARADO (binding.schema.shape vs
+               registry type_info/arity) = DriftItem no bloqueante
+               (`declared_shape_contradiction`); `unknown` nunca contradice.
+    * D3    -> el registry resuelve un VALOR CONCRETO (no un path): DriftItem
+               no bloqueante (`registry_concrete_value`) con preview de forma
+               (list[n] / dict{k} / string / number / boolean / object), NUNCA
+               el valor completo. Sin fallback, sin bloqueo, confirmed gana.
+
 El registry es evidencia de repositorio: produce drift, nunca sustituye ni
 corrige un binding confirmado. Aqui no se consulta el registry para decidir
 nada: el drift se detecta comparando el binding confirmado con la
@@ -30,6 +40,7 @@ representacion fisica ya resuelta, que es un hecho, no una consulta.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Mapping
 
 from app.binding.models import ResolvedBindings
 from app.binding.lower import SourceDriftItem
@@ -55,14 +66,37 @@ class DriftItem:
     """Un prop donde el binding confirmado discrepa de la resolucion del registry.
 
     Estrictamente diagnostico. El binding confirmado prevalece siempre.
+
+    reason:
+        path_differs                  -> la ruta fisica del registry difiere.
+        registry_concrete_value       -> el registry resuelve un valor concreto
+                                         (no una ruta): no comparable como path,
+                                         se informa con `registry_value_shape`
+                                         (preview de forma, JAMAS el valor).
+        declared_shape_contradiction  -> el shape declarado del binding
+                                         confirmado contradice la declaracion
+                                         del registry (type_info/arity).
     """
 
     component: str
     prop: str
     confirmed: str
     registry: str | None = None
+    reason: str = "path_differs"
+    registry_value_shape: str | None = None
 
     def describe(self) -> str:
+        if self.reason == "registry_concrete_value":
+            return (
+                f"{self.component}.{self.prop}: registry has a concrete value "
+                f"({self.registry_value_shape}) that is not a comparable physical "
+                f"path; confirmed binding freezes {self.confirmed!r}"
+            )
+        if self.reason == "declared_shape_contradiction":
+            return (
+                f"{self.component}.{self.prop}: confirmed shape {self.confirmed!r} "
+                f"contradicts the registry declaration {self.registry!r}"
+            )
         if self.registry is None:
             return (
                 f"{self.component}.{self.prop}: registry has no physical value; "
@@ -74,12 +108,16 @@ class DriftItem:
         )
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "component": self.component,
             "prop": self.prop,
             "confirmed": self.confirmed,
             "registry": self.registry,
+            "reason": self.reason,
         }
+        if self.registry_value_shape is not None:
+            payload["registry_value_shape"] = self.registry_value_shape
+        return payload
 
 
 @dataclass(frozen=True)
@@ -110,6 +148,113 @@ class DriftReport:
         )
 
 
+def _shape_preview(value: object) -> str:
+    """Preview de forma de un valor concreto del registry. NUNCA el valor."""
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, dict):
+        keys = sorted(str(k) for k in value.keys())
+        head = ", ".join(keys[:3])
+        suffix = ", ..." if len(keys) > 3 else ""
+        return f"dict{{{head}{suffix}}}"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "object"
+
+
+def _shape_family(shape: str | None) -> str:
+    """Familia determinista de una shape declarada: 'array' | 'non-array'.
+
+    'unknown'/'any'/None/'' no permiten probar nada -> se devuelve 'unknown'.
+    'array', 'array<X>', 'X[]' -> 'array'; todo lo demas conocido -> 'non-array'
+    (string/number/boolean/object/scalar). Es la regla MINIMA de contradiccion:
+    solo la dimension array vs no-array es demostrable entre capas sin
+    heuristica profunda (R6). Sin scoring, sin fuzzy.
+    """
+    s = (shape or "").strip().lower()
+    if not s or s in ("unknown", "any"):
+        return "unknown"
+    if s == "array" or s.startswith("array") or s.endswith("[]"):
+        return "array"
+    return "non-array"
+
+
+def registry_declared_shapes() -> dict[str, dict[str, str]]:
+    """Shapes declaradas del registry (type_info/arity) por node.type -> prop.
+
+    Evidencia ACTUAL (data_access.json SSOT) exclusivamente para el diagnostico
+    de contradiccion de shape declarado de F6.3 (D2-B): nunca decide, solo
+    describe. `KpiRow.data` -> 'array<KpiItem>', `Timeseries.title` -> 'string'.
+    """
+    from app.signature.prop_mapper import load_v4_bindings
+
+    out: dict[str, dict[str, str]] = {}
+    for comp, props in load_v4_bindings().items():
+        for prop, b in props.items():
+            decl: str | None = None
+            ti = b.type_info
+            if isinstance(ti, dict) and ti.get("type"):
+                t = str(ti["type"]).lower()
+                if t == "array":
+                    items = ti.get("items")
+                    decl = f"array<{items}>" if items else "array"
+                else:
+                    decl = t
+            elif b.arity:
+                if b.arity.lower().startswith("array"):
+                    decl = "array"
+                else:
+                    decl = "scalar"
+            if decl is not None:
+                out.setdefault(comp, {})[prop] = decl
+    return out
+
+
+def detect_shape_contradictions(
+    confirmed: Mapping[str, DataBinding],
+    declared: Mapping[str, Mapping[str, str]],
+) -> tuple[DriftItem, ...]:
+    """Contradicciones de shape declarado (F6.3 D2-B): SOLO diagnostico.
+
+    Compara `binding.schema.shape` del binding confirmado contra la declaracion
+    del registry para el mismo componente.prop. Sigo la regla minima: ambos
+    deben ser conocidos y disgregar en la dimension array vs no-array.
+    `unknown` en cualquiera de los lados NUNCA contradice (sin drift
+    artificial). El resultado son DriftItems no bloqueantes: el binding
+    confirmado prevalece y el conflicto no existe.
+    """
+    items: list[DriftItem] = []
+    for component, binding in sorted(confirmed.items()):
+        schema = binding.schema
+        if schema is None:
+            continue
+        confirmed_family = _shape_family(schema.shape)
+        if confirmed_family == "unknown":
+            continue
+        for entry in binding.mapping:
+            raw_declared = (declared.get(component) or {}).get(entry.prop)
+            if raw_declared is None:
+                continue
+            declared_family = _shape_family(raw_declared)
+            if declared_family == "unknown":
+                continue
+            if confirmed_family != declared_family:
+                items.append(
+                    DriftItem(
+                        component=component,
+                        prop=entry.prop,
+                        confirmed=schema.shape,
+                        registry=raw_declared,
+                        reason="declared_shape_contradiction",
+                    )
+                )
+    return tuple(items)
+
+
 def detect_registry_drift(
     resolved: ResolvedBindings, confirmed: dict[str, DataBinding]
 ) -> DriftReport:
@@ -123,12 +268,24 @@ def detect_registry_drift(
             current = (resolved.component_props.get(component) or {}).get(entry.prop)
             registry_name = getattr(current, "name", None)
             # Solo se registra cuando HAY discrepancia. Coincidencia no es
-            # drift: emitirla seria un falso positivo que报警 sin causa.
+            # drift: emitirla seria un falso positivo que alerta sin causa.
             if current is None:
                 differs = True
             elif registry_name is None:
                 # El registry resuelve un valor concreto, no un JSVariable: no
-                # es comparable como ruta fisica, pero tampoco lo contradice.
+                # es comparable como ruta fisica. F6.3 (D3): se informa como
+                # drift ESTRUCTURADO no bloqueante con preview de forma (nunca
+                # el valor completo). El binding confirmado sigue ganando.
+                items.append(
+                    DriftItem(
+                        component=component,
+                        prop=entry.prop,
+                        confirmed=entry.from_field,
+                        registry=None,
+                        reason="registry_concrete_value",
+                        registry_value_shape=_shape_preview(current),
+                    )
+                )
                 continue
             else:
                 differs = registry_name != entry.from_field
@@ -253,6 +410,8 @@ __all__ = [
     "DriftReport",
     "UntranslatableBinding",
     "detect_registry_drift",
+    "detect_shape_contradictions",
     "materialize_confirmed_bindings",
+    "registry_declared_shapes",
     "required_materialization",
 ]

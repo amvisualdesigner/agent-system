@@ -49,7 +49,9 @@ from app.binding.materialize import (
     DriftReport,
     UntranslatableBinding,
     confirmed_bindings_from_actions,
+    detect_shape_contradictions,
     materialize_confirmed_bindings,
+    registry_declared_shapes,
     required_materialization,
 )
 from app.binding.lower import (
@@ -1935,6 +1937,18 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
                 _f6_drift = DriftReport(
                     items=_f6_drift.items,
                     sources=tuple(_f6_lowering.drift),
+                )
+            # D2-B (F6.3): contradiccion de shape declarado (confirmed
+            # schema.shape vs registry type_info/arity) -> drift estructurado,
+            # nunca conflicto. `unknown` en cualquiera de los lados no
+            # contradice, asi el diagnostico nunca es un falso positivo.
+            _f6_shape_items = detect_shape_contradictions(
+                _f6_confirmed, registry_declared_shapes(),
+            )
+            if _f6_shape_items:
+                _f6_drift = DriftReport(
+                    items=_f6_drift.items + _f6_shape_items,
+                    sources=_f6_drift.sources,
                 )
             if _f6_drift is not None and _f6_drift.has_drift:
                 # Diagnostico estructurado MAS el log: el log no es el unico

@@ -13,6 +13,16 @@ Escenario real (dashboard.sales_overview): un workspace que ya consume
     a `KpiRow` para que el binding NO quede inerte en el render.
   * host In re-apply tras BORRAR el hook => CONFLICT retryable
     (source_lowering_conflict / missing_hook), sin fallback al registry.
+
+FASE 6.3 (decisiones D2-A/D3 ratificadas):
+
+  * E2E-B: quitar el campo CONFIRMADO desestructurado de la pagina entre
+    confirm y apply => CONFLICT retryable (missing_field), sin FileOps.
+  * E2E-C: restaurar el campo y RETRY con el MISMO Plan => ok, misma fuente,
+    sin rediscovery.
+  * E2E-D: registry resuelve un VALOR CONCRETO (SearchBar.placeholder default)
+    => drift estructurado `registry_concrete_value` (preview de forma, nunca
+    el valor), confirmed gana, apply NO bloquea.
 """
 
 import json
@@ -38,6 +48,17 @@ export function SalesOverviewPage() {
 
 _HOOK = "export function useSalesData() { return { metrics: [] as any[] }; }\n"
 
+_SEARCH_PAGE = """\
+import { SearchBar } from '@/components/SearchBar';
+import { useSearchData } from '@/hooks/useSearchData';
+export function SearchPage() {
+  const { placeholder } = useSearchData();
+  return <SearchBar placeholder={placeholder} />;
+}
+"""
+
+_SEARCH_HOOK = "export function useSearchData() { return { placeholder: 'Type...' }; }\n"
+
 
 def _seed(workspace: str) -> None:
     os.makedirs(os.path.join(workspace, "frontend", "src", "pages", "dashboard"), exist_ok=True)
@@ -46,6 +67,15 @@ def _seed(workspace: str) -> None:
         f.write(_PAGE)
     with open(os.path.join(workspace, "frontend/src/hooks/useSalesData.ts"), "w") as f:
         f.write(_HOOK)
+
+
+def _seed_search(workspace: str) -> None:
+    os.makedirs(os.path.join(workspace, "frontend", "src", "pages", "search"), exist_ok=True)
+    os.makedirs(os.path.join(workspace, "frontend", "src", "hooks"), exist_ok=True)
+    with open(os.path.join(workspace, "frontend/src/pages/search/SearchPage.tsx"), "w") as f:
+        f.write(_SEARCH_PAGE)
+    with open(os.path.join(workspace, "frontend/src/hooks/useSearchData.ts"), "w") as f:
+        f.write(_SEARCH_HOOK)
 
 
 def _commit(workspace: str, msg: str = "seed"):
@@ -93,17 +123,61 @@ def _confirm(run_id: str, workspace: str) -> dict:
         delete_run_state(run_id)
 
 
-def _apply(workspace: str, artifacts: str, plan: dict) -> dict:
+def _apply(workspace: str, artifacts: str, plan: dict) -> tuple:
+    from app.engine.apply_engine import apply_engine
+    from app.runtime.context import RunContext
+
+    run_id = str(uuid.uuid4())
     ctx = RunContext(
-        run_id=str(uuid.uuid4()),
-        workspace=workspace,
+        run_id=run_id,
         base_dir=workspace,
+        workspace=workspace,
         artifacts=artifacts,
     )
-    plan = {**plan, "gate": {"blocked": False}}
-    snapshot = json.loads(json.dumps(plan))
-    result = apply_engine(ctx.run_id, plan, ctx, dry_run=True)
-    return result, snapshot
+    result = apply_engine(run_id, plan, ctx, dry_run=True)
+    return result, ctx
+
+
+def _confirm_search(run_id: str, workspace: str) -> dict:
+    """Confirma un create de interaction.search con seleccion humana explicita."""
+    from app.api.agent_confirm import ConfirmRequest, _agent_confirm
+
+    draft = {
+        "status": "ok",
+        "contract_id": "interaction.search",
+        "contract_version": 1,
+        "interpretation_id": f"i-{run_id}",
+        "proposed_actions": [
+            {"verb": "create", "target_capability": "interaction.search",
+             "contract_id": "interaction.search"},
+        ],
+        "alternatives": [],
+        "params_proposed": {"placeholder": "Foo Bar"},
+        "worktree_capabilities": [],
+    }
+    enrich_draft_binding_proposals(draft, workspace=workspace)
+    save_run_state(run_id, {
+        "phase": RunPhase.AWAITING_CONFIRMATION.value,
+        "interpretation_draft": draft,
+    })
+    try:
+        return _agent_confirm(ConfirmRequest(
+            run_id=run_id,
+            interpretation_id=f"i-{run_id}",
+            contract_id="interaction.search",
+            contract_version=1,
+            actions=[{
+                "verb": "create", "target_capability": "interaction.search",
+                "binding": {
+                    "source": {"kind": "hook", "ref": "useSearchData"},
+                    "mapping": [{"prop": "placeholder", "from_field": "_pageData.placeholder"}],
+                },
+            }],
+            params={"placeholder": "Foo Bar"},
+            user_message="test",
+        ))
+    finally:
+        delete_run_state(run_id)
 
 
 class TestSourceLoweringEndToEnd:
@@ -226,3 +300,124 @@ class TestSourceLoweringEndToEnd:
         # El registry no escribio nada en el repo: el FileOp no toca la pagina.
         page = os.path.join(e2e_workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx")
         assert open(page).read() == _PAGE
+
+
+# ── F6.3 D2-A: campo confirmado fuera del snapshot => missing_field ─────────
+
+
+class TestConfirmedFieldRootingEndToEnd:
+    def test_field_removed_after_confirm_is_missing_field_conflict(
+        self, e2e_workspace, artifacts_dir,
+    ):
+        """E2E-B: quitar `metrics` de la pagina entre confirm y apply."""
+        _seed(e2e_workspace)
+        _commit(e2e_workspace)
+        out = _confirm(str(uuid.uuid4()), e2e_workspace)
+        assert out["status"] == "ok"
+
+        page_path = os.path.join(
+            e2e_workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx"
+        )
+        page = open(page_path).read()
+        blocked = page.replace(
+            "const { metrics } = useSalesData();", "useSalesData();",
+        )
+        open(page_path, "w").write(blocked)
+        _commit(e2e_workspace, "drop confirmed field")
+
+        result, _ = _apply(e2e_workspace, artifacts_dir, out["plan"])
+        ex = result["execution"]
+        assert ex["status"] == "conflict"
+        assert ex["conflict"] == "repository_conflict"
+        assert ex["plan_confirmed"] is True
+        assert ex["plan_retryable"] is True
+        assert ex["run_phase"] == "confirmed"
+        assert ex["operations"] == []
+        assert ex["diff"] is None
+        details = ex.get("details") or {}
+        assert details.get("cause") == "source_lowering_conflict"
+        assert details.get("reason") == "missing_field"
+        assert "metrics" in (details.get("detail") or "")
+        # la pagina fisica no fue reescrita por el apply fallido
+        assert open(page_path).read() == blocked
+
+    def test_restore_field_and_retry_same_plan_succeeds(
+        self, e2e_workspace, artifacts_dir,
+    ):
+        """E2E-C: restaurar el campo y RETRY con el MISMO Plan confirmado."""
+        _seed(e2e_workspace)
+        _commit(e2e_workspace)
+        out = _confirm(str(uuid.uuid4()), e2e_workspace)
+        assert out["status"] == "ok"
+        plan = out["plan"]
+        kpi = [a for a in plan["actions"] if a["target_capability"] == "presentation.kpi_row"][0]
+        assert kpi["binding"]["source"]["ref"] == "useSalesData"
+
+        page_path = os.path.join(
+            e2e_workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx"
+        )
+        page = open(page_path).read()
+
+        # romper el campo -> conflict missing_field (sin escrituras)
+        open(page_path, "w").write(page.replace(
+            "const { metrics } = useSalesData();", "useSalesData();",
+        ))
+        _commit(e2e_workspace, "drop confirmed field")
+        conflict, _ = _apply(e2e_workspace, artifacts_dir, plan)
+        assert conflict["execution"]["status"] == "conflict"
+        assert conflict["execution"].get("details", {}).get("reason") == "missing_field"
+
+        # restaurar el campo y retry con el MISMO Plan: mismo binding, sin
+        # rediscovery (la fuente confirmada sigue siendo useSalesData)
+        open(page_path, "w").write(page)
+        _commit(e2e_workspace, "restore confirmed field")
+        ok, _ = _apply(e2e_workspace, artifacts_dir, plan)
+        assert ok["execution"]["status"] == "ok"
+        assert ok["execution"].get("conflict") is None
+        page_op = [op for op in ok["execution"]["operations"]
+                   if op["path"].endswith("SalesOverviewPage.tsx")]
+        assert len(page_op) == 1
+        assert "metrics={_pageData.metrics}" in page_op[0]["content"]
+        assert "useDashboardData" not in page_op[0]["content"]
+        assert kpi["binding"]["source"]["ref"] == "useSalesData"
+
+
+# ── F6.3 D3: valor concreto del registry => drift estructurado, no bloqueo ─
+
+
+class TestConcreteRegistryValueDriftEndToEnd:
+    def test_concrete_registry_value_emits_structured_drift_without_blocking(
+        self, e2e_workspace, artifacts_dir,
+    ):
+        """E2E-D: SearchBar.placeholder (default del registry) es un valor
+        concreto -> DriftItem registry_concrete_value (preview de forma, nunca
+        el valor); el apply NO bloquea y el Plan confirmado queda intacto."""
+        _seed_search(e2e_workspace)
+        _commit(e2e_workspace)
+        out = _confirm_search(str(uuid.uuid4()), e2e_workspace)
+        assert out["status"] == "ok"
+        plan = out["plan"]
+        binding = plan["actions"][0]["binding"]
+        assert binding["source"] == {"kind": "hook", "ref": "useSearchData"}
+        assert binding["mapping"][0]["from_field"] == "_pageData.placeholder"
+
+        result, _ = _apply(e2e_workspace, artifacts_dir, plan)
+        ex = result["execution"]
+        assert ex["status"] == "ok"
+        assert ex.get("conflict") is None
+        assert ex["operations"], "el render no debe bloquearse por el drift"
+
+        drift = (ex.get("diagnostics") or {}).get("binding_drift", [])
+        concrete = [d for d in drift if d.get("reason") == "registry_concrete_value"]
+        assert any(
+            d.get("component") == "SearchBar"
+            and d.get("prop") == "placeholder"
+            and d.get("registry") is None
+            and d.get("registry_value_shape") == "string"
+            and d.get("confirmed") == "_pageData.placeholder"
+            for d in concrete
+        ), f"expected concrete-value drift, got {drift}"
+        # el valor en si jamas se serializa como diagnostico
+        assert all("Foo Bar" not in json.dumps(d) for d in drift)
+        # el Plan confirmado no se muto y la fuente confirmada sigue mandando
+        assert plan["actions"][0]["binding"]["source"]["ref"] == "useSearchData"

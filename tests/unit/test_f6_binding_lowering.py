@@ -112,6 +112,11 @@ class TestConfirmedOverride:
                 "frontend/src/hooks/useSalesData.ts": (
                     "export function useSalesData() { return { filters: [] }; }"
                 ),
+                # D2-A: la pagina fisica debe enraizar el campo confirmado.
+                "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                    "import { useSalesData } from '@/hooks/useSalesData';\n"
+                    "const { filters } = useSalesData();\n"
+                ),
             },
         )
         assert result.ir is not None
@@ -130,7 +135,12 @@ class TestConfirmedOverride:
         result = lower_confirmed_page_source(
             confirmed,
             res,
-            {"frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}"},
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/dashboard/SalesOverviewPage.tsx": (
+                    "const { filters, data } = useSalesData();\n"
+                ),
+            },
         )
         assert len(result.drift) == 2
         item = result.drift[0]
@@ -147,12 +157,182 @@ class TestConfirmedOverride:
         result = lower_confirmed_page_source(
             confirmed,
             None,
-            {"frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}"},
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                    "const { filters } = useSalesData();\n"
+                ),
+            },
         )
         assert result.ir is not None
         assert result.ir.slices == ()
         assert result.ir.selector is None
         assert result.drift[0].registry is None
+
+
+# ── F6.3 D2-A: enraizar los campos confirmados en el snapshot fresco ────────
+
+
+class TestConfirmedFieldRooting:
+    """P2.1-P2.5: la validacion de campo corre SOLO en el override (Caso C).
+
+    Identidad (Caso B, p.ej. FilterPanel registrado en forma `_pageData`) y
+    pagina POST-apply (`_pageData = hook(...)`) NO producen falsos missing_field.
+    """
+
+    def test_root_present_is_valid(self):
+        confirmed = {"presentation.filter_panel": _binding("hook", "useSalesData")}
+        result = lower_confirmed_page_source(
+            confirmed,
+            _resolved(_registered_ds()),
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                    "const { filters } = useSalesData();\n"
+                ),
+            },
+        )
+        assert result.ir is not None
+        assert result.ir.hook_name == "useSalesData"
+
+    def test_root_missing_is_conflict_missing_field(self):
+        confirmed = {"presentation.filter_panel": _binding("hook", "useSalesData")}
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(
+                confirmed,
+                _resolved(_registered_ds()),
+                {
+                    "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                    "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                        "const { filters } = useOtherData();\n"
+                    ),
+                },
+            )
+        assert exc.value.reason == "missing_field"
+        assert exc.value.hook == "useSalesData"
+        assert "filters" in exc.value.detail
+        assert exc.value.components == ["presentation.filter_panel"]
+
+    def test_root_missing_across_union_of_call_sites(self):
+        confirmed = {"presentation.kpi_row": _binding("hook", "useSalesData", prop="metrics")}
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(
+                confirmed,
+                _resolved(_registered_ds()),
+                {
+                    "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                    "frontend/src/pages/a.tsx": "const { revenue } = useSalesData();\n",
+                    "frontend/src/pages/b.tsx": "useSalesData();\n",
+                },
+            )
+        assert exc.value.reason == "missing_field"
+        assert "metrics" in exc.value.detail
+
+    def test_nested_selector_validates_only_the_root(self):
+        confirmed = {
+            "presentation.kpi_row": DataBinding(
+                source=DataSourceRef(kind="hook", ref="useSalesData"),
+                mapping=(
+                    DataMappingEntry(
+                        prop="data", from_field="_pageData.chartData.timeseries",
+                    ),
+                ),
+            )
+        }
+        # root chartData destructured -> VALID (sin heuristica profunda)
+        ok = lower_confirmed_page_source(
+            confirmed,
+            _resolved(_registered_ds()),
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/dashboard/Page.tsx": (
+                    "const { chartData } = useSalesData();\n"
+                ),
+            },
+        )
+        assert ok.ir is not None
+
+        # solo timeseries destructured -> la raiz chartData NO esta enraizada
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(
+                confirmed,
+                _resolved(_registered_ds()),
+                {
+                    "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                    "frontend/src/pages/dashboard/Page.tsx": (
+                        "const { timeseries } = useSalesData();\n"
+                    ),
+                },
+            )
+        assert exc.value.reason == "missing_field"
+        assert "chartData" in exc.value.detail
+
+    def test_page_data_extraction_roots_the_fields_post_apply(self):
+        """Representacion POST-apply `_pageData = hook(...)`: enraiza todos."""
+        confirmed = {"presentation.kpi_row": _binding("hook", "useSalesData", prop="metrics")}
+        result = lower_confirmed_page_source(
+            confirmed,
+            _resolved(_registered_ds()),
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/dashboard/Page.tsx": (
+                    "const _pageData = useSalesData();\n"
+                ),
+            },
+        )
+        assert result.ir is not None
+
+    def test_non_page_data_mappings_are_skipped(self):
+        confirmed = {
+            "presentation.filter_panel": DataBinding(
+                source=DataSourceRef(kind="hook", ref="useSalesData"),
+                mapping=(
+                    DataMappingEntry(prop="q", from_field="contract_params['x']"),
+                ),
+            )
+        }
+        result = lower_confirmed_page_source(
+            confirmed,
+            _resolved(_registered_ds()),
+            {
+                "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+                "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                    "const { filters } = useSalesData();\n"
+                ),
+            },
+        )
+        assert result.ir is not None
+        assert result.drift  # sigue reportando el override como drift
+
+    def test_missing_field_does_not_mutate_plan_or_snapshot(self):
+        confirmed_inputs = {"presentation.filter_panel": _binding("hook", "useSalesData")}
+        files = {
+            "frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}",
+            "frontend/src/pages/a.tsx": "useSalesData();\n",
+        }
+        before = {k: v for k, v in files.items()}
+        with pytest.raises(SourceLoweringConflict):
+            lower_confirmed_page_source(
+                confirmed_inputs, _resolved(_registered_ds()), files,
+            )
+        # P2.5: la operacion NO muta nada (Plan, binding ni snapshot)
+        assert files == before
+        assert list(confirmed_inputs) == ["presentation.filter_panel"]
+
+    def test_missing_field_does_not_apply_to_identity_case_b(self):
+        """Caso B (identidad, p.ej. FilterPanel registrado) NO se re-valida."""
+        registered = _registered_ds("useDashboardData")
+        confirmed = {"presentation.filter_panel": _binding("hook", "useDashboardData")}
+        result = lower_confirmed_page_source(
+            confirmed,
+            _resolved(registered),
+            {
+                "frontend/src/pages/analytics/AnalyticsPage.tsx": (
+                    "const _pageData = useDashboardData();\n"
+                ),
+            },
+        )
+        assert result.ir is None  # conserva la representacion registry
 
 
 # ── T3: hook ausente ───────────────────────────────────────────────────────
