@@ -6,6 +6,9 @@ Sistema que convierte tareas en lenguaje natural en operaciones Git aisladas med
 
 IMPORTANT: NOT PROD READY
 
+Node: v18.19.1
+NPM: 9.2.0
+
 ---
 
 ## Flujo Canónico
