@@ -167,6 +167,9 @@ async def confirm_run(run_id: str, req: ConfirmRequest):
     state = _build_initial_state(run_id, snapshot.get("task", ""), start_node="confirm", session_id=snapshot.get("session_id"))
     state["interpretation"] = interpretation
     state["confirmed_intent"] = confirmed_intent
+    # Observability only: continue the trace from interpret instead of
+    # restarting it, so the parked snapshot keeps the full lifecycle.
+    state["trace"] = list(snapshot.get("trace") or [])
     state["phase"] = "awaiting_confirmation"
 
     emitter.register(run_id)

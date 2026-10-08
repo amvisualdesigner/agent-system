@@ -66,22 +66,15 @@ async def confirm_node(state: AgentState) -> dict:
             reason = "Clarification required: rephrase your request first."
 
         if reason is not None:
-            logger.warning("[run_id=%s] confirm blocked: %s", run_id, reason)
-            await emitter.emit(run_id,
-                SSEEvent(type="node_end", node="confirm", phase="awaiting_confirmation",
-                         run_id=run_id, data={"error": reason}))
-            return {
-                **state,
-                "interpretation": interpretation,
-                "phase": "awaiting_confirmation",
-                "trace": (state.get("trace") or []) + [{
-                    "node": "confirm",
-                    "input": {"action": "blocked_clarification"},
-                    "output": {"error": reason},
-                    "latency_ms": 0,
-                }],
-                "_next_node": "return_result",
-            }
+            trace = (state.get("trace") or []) + [{
+                "node": "confirm",
+                "input": {"action": "blocked_clarification"},
+                "output": {"error": reason},
+                "latency_ms": 0,
+            }]
+            return await _park_pending_decision(
+                state, run_id, reason, interpretation, trace[-50:],
+            )
 
     contract_id = state.get("confirmed_intent", {}).get("contract_id") or interpretation.get("contract_id", "")
     if not contract_id:
@@ -174,6 +167,22 @@ async def confirm_node(state: AgentState) -> dict:
     status = confirm_result.get("status", "ok")
     if status == "rejected":
         reason = confirm_result.get("reason", "confirm_rejected")
+        binding_error = confirm_result.get("binding_error")
+        # A clarification-shaped rejection is NOT terminal: the backend does
+        # not transition (the Run stays `awaiting_confirmation`), so the
+        # orchestrator must mirror that and hand the pending decision back to
+        # the human. Structured signals only — `binding_error` (F6.1 gate) or
+        # the explicit `Clarification required` contract. Everything else
+        # (missing contract, transport/technical reject) stays terminal.
+        clarification = binding_error or (
+            isinstance(reason, str) and reason.startswith("Clarification required")
+        )
+        if clarification:
+            return await _park_pending_decision(
+                state, run_id, reason, interpretation, trace[-50:],
+                binding_error=binding_error,
+                binding_proposal=confirm_result.get("binding_proposal"),
+            )
         logger.warning("[run_id=%s] confirm rejected: %s", run_id, reason)
         return {
             **state,
@@ -204,6 +213,50 @@ async def confirm_node(state: AgentState) -> dict:
         "gate": gate,
         "phase": "confirmed",
         "_next_node": "validate_plan",
+    }
+
+
+async def _park_pending_decision(
+    state: AgentState,
+    run_id: str,
+    reason: str,
+    interpretation: dict,
+    trace: list,
+    *,
+    binding_error: str | None = None,
+    binding_proposal: dict | None = None,
+) -> dict:
+    """Park a resolvable clarification in `awaiting_confirmation`.
+
+    Shared by the G6 guard and the backend's clarification-shaped rejections
+    (F6.1 binding gate): the backend RunPhase is not transitioned for these, so
+    the orchestrator mirrors `awaiting_confirmation` and re-emits
+    `interpretation_ready` carrying the pending decision — the UI re-renders
+    the choice UI and the human confirms again. No `error` is set: the Run is
+    parked, not failed.
+    """
+    pending = dict(interpretation)
+    pending["clarification_reason"] = reason
+    if binding_error:
+        pending["binding_error"] = binding_error
+    if binding_proposal:
+        pending["binding_rejected_proposal"] = binding_proposal
+
+    logger.warning("[run_id=%s] confirm parked: %s", run_id, reason)
+    await emitter.emit(run_id, SSEEvent(
+        type="node_end", node="confirm", phase="awaiting_confirmation",
+        run_id=run_id, data={"error": reason},
+    ))
+    await emitter.emit(run_id, SSEEvent(
+        type="interpretation_ready", node="confirm", phase="awaiting_confirmation",
+        run_id=run_id, data=pending,
+    ))
+    return {
+        **state,
+        "interpretation": pending,
+        "trace": trace,
+        "phase": "awaiting_confirmation",
+        "_next_node": "return_result",
     }
 
 

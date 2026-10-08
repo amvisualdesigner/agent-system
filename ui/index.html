@@ -185,6 +185,8 @@ let currentInterpretation = null;
 let selectedInstances = {};
 let instanceChoiceCandidates = [];
 let selectedAlternativeIndex = null;
+let selectedBindings = {};
+let bindingChoiceCandidates = [];
 let evtSource = null;
 
 // ---- phase bar ----
@@ -286,7 +288,19 @@ function onInterpretationReady(draft) {
 
   updatePhaseBar("confirm");
 
-  html = `<div class="kv"><dt>Contrato:</dt><dd>${esc(contractId)} v${contractVersion}</dd></div>`;
+  html = "";
+
+  // Clarificación semántica pendiente: un rechazo de confirmación resoluble
+  // (p.ej. binding sin elegir) re-aparea aquí con su razón — no es un error.
+  if (draft.clarification_reason) {
+    html += `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid #f59e0b;border-radius:6px;background:rgba(245,158,11,0.08)">
+      <div style="color:#f59e0b;font-weight:600">⏳ Confirmación pendiente</div>
+      <div style="color:#e2e8f0;margin-top:4px">${esc(draft.clarification_reason)}</div>
+      <div style="color:#94a3b8;font-size:0.8rem;margin-top:4px">Resuelve la decisión y vuelve a confirmar.</div>
+    </div>`;
+  }
+
+  html += `<div class="kv"><dt>Contrato:</dt><dd>${esc(contractId)} v${contractVersion}</dd></div>`;
 
   if (actions.length > 0) {
     html += '<div style="margin-top:8px"><strong>Acciones propuestas</strong></div><div style="margin-top:4px">';
@@ -337,6 +351,41 @@ function onInterpretationReady(draft) {
         </button>`;
       });
       html += `</div>`;
+    });
+    html += "</div>";
+  }
+
+  // ── Data Binding (F6.1): candidatas probadas — decide el humano ──────────
+  // Reutiliza el patrón de instance/alternative/page choices: elige UNA
+  // candidata de la BindingProposal; el payload confirma en `action.binding`.
+  const bindingActions = actions.filter(a => {
+    const bp = a.binding_proposal;
+    return bp && bp.status === "needs_choice" && a.verb !== "remove";
+  });
+  if (bindingActions.length > 0) {
+    html += '<div style="margin-top:10px"><strong>Fuente de datos</strong>';
+    html += '<div style="color:#94a3b8;font-size:0.8rem;margin:2px 0 6px">Selecciona la candidata probada. Sin selección no se puede confirmar.</div>';
+    bindingActions.forEach(a => {
+      const bp = a.binding_proposal || {};
+      const candidates = ((bp.provenance || {}).candidates || [])
+        .filter(c => (c.mappings || []).length > 0);
+      html += `<div style="margin:6px 0"><span class="target">${esc(a.target_capability)}</span></div>`;
+      if (candidates.length === 0) {
+        html += '<div style="color:#f59e0b;font-size:0.8rem">Sin candidatas seleccionables — refina tu mensaje arriba.</div>';
+        return;
+      }
+      html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
+      candidates.forEach(c => {
+        const regIdx = registerBindingChoice(a.target_capability, bindingFromCandidate(c));
+        const mapped = (c.mappings || []).map(m => m.value_path).filter(Boolean).join(", ");
+        html += `<button data-binding-idx="${regIdx}" class="btn-outline"
+          onclick="handleBindingChoice(${regIdx},this)"
+          style="padding:8px 14px;font-size:0.85rem">
+          ${esc(c.ref || c.kind || "candidata")}
+          <span style="color:#64748b;font-size:0.7rem">${esc(c.selector ? c.selector + (mapped ? " · " + mapped : "") : mapped)}</span>
+        </button>`;
+      });
+      html += "</div>";
     });
     html += "</div>";
   }
@@ -599,6 +648,28 @@ function handleSSE(evt) {
         } else {
           setPanelStatus("panel-confirm", "badge-error", "✗ inválido");
         }
+      } else if (evt.node === "confirm") {
+        // Rechazo semántico de confirmación: el run re-aparea en
+        // awaiting_confirmation con una decisión pendiente (no es error técnico
+        // ni completado). Rompe el spinner "Compilando plan..." y muestra la razón.
+        const d = evt.data || {};
+        if (evt.phase === "awaiting_confirmation" && d.error) {
+          setPanelStatus("panel-confirm", "badge-waiting", "pendiente");
+          bodyEl("panel-confirm").innerHTML =
+            `<div><span class="status-rejected">✗ Confirmación pendiente</span></div>` +
+            `<div style="color:#f59e0b;margin-top:6px">${esc(d.error)}</div>` +
+            `<div style="color:#94a3b8;font-size:0.8rem;margin-top:6px">Resuelve la decisión en el panel de interpretación y vuelve a confirmar.</div>`;
+          updatePhaseBar("confirm");
+          // Re-habilita la barra de confirmación del panel de interpretación:
+          // tras el confirm que aparcó, handleConfirm la ocultó y deshabilitó el
+          // botón. La decisión pendiente es resoluble → debe poder re-confirmarse.
+          const bar = document.querySelector("#panel-interpret .action-bar");
+          if (bar) {
+            bar.style.display = "flex";
+            const btn = bar.querySelector(".btn-success");
+            if (btn) { btn.disabled = false; btn.textContent = "✓ Confirmar"; }
+          }
+        }
       } else if (evt.node === "call_apply") {
         onApplyResult(evt.data || {});
       }
@@ -611,7 +682,11 @@ function handleSSE(evt) {
         runBtn.disabled = false;
         runBtn.textContent = "▶ Run";
       } else if (rs === "confirmed") {
-        // Parked after confirm or after a conflict — handled by the panels
+        // Parked after confirm or after a conflict — handled by the panels.
+        // `confirmed` NO es terminal: el EventSource queda abierto para los
+        // eventos de Apply, pero el run no está en curso → Run se reactiva.
+        runBtn.disabled = false;
+        runBtn.textContent = "▶ Run";
       } else if (rs === "conflict") {
         // Rendered by onConflictResult in the apply panel
       } else if (rs === "cancelled") {
@@ -656,6 +731,13 @@ function finalizeResult(evt) {
     html += `<div><span class="status-error">ERROR</span> ${esc(errMsg)}</div>`;
   } else {
     html += `<div>Status: <span class="status-${status}">${esc(status.toUpperCase())}</span></div>`;
+    if (status === "failed" || status === "verify_failed") {
+      const errMsg = d.error || evt.error;
+      if (errMsg) html += `<div style="color:#f59e0b;margin-top:6px">${esc(errMsg)}</div>`;
+      // Un fallo terminal no deja la UI bloqueada en "Ejecutando...".
+      runBtn.disabled = false;
+      runBtn.textContent = "▶ Run";
+    }
   }
 
   const snapshot = ctx.repo_snapshot || [];
@@ -696,11 +778,13 @@ form.onsubmit = async (e) => {
   if (evtSource) evtSource.close();
   panels.innerHTML = "";
   meta.innerHTML = "";
-currentPageChoice = null;
+  currentPageChoice = null;
   selectedInstances = {};
   instanceChoiceCandidates = [];
   pageChoiceCandidates = [];
   selectedAlternativeIndex = null;
+  selectedBindings = {};
+  bindingChoiceCandidates = [];
 
   try {
     const resp = await fetch(`${ORCH}/run`, {
@@ -799,6 +883,42 @@ function handleAlternativeChoice(idx, btn) {
   if (btn) btn.classList.add("btn-success");
 }
 
+// ---- data binding choice registry (capability → selected candidate) ----
+// Convierte UNA candidata probada de la BindingProposal al formato exacto que
+// valida /agent/confirm (source/schema/mapping). La autoridad del binding
+// sigue siendo la propuesta: la UI solo selecciona entre candidatas.
+function bindingFromCandidate(c) {
+  const source = { kind: c.kind || "", ref: c.ref || "" };
+  if (c.selector !== undefined && c.selector !== null) source.selector = c.selector;
+  return {
+    source: source,
+    schema: c.schema || null,
+    mapping: (c.mappings || []).map(m => ({
+      prop: m.prop || "",
+      from_field: m.value_path || "",
+      transform: m.transform || "identity",
+    })),
+  };
+}
+
+function registerBindingChoice(capability, binding) {
+  bindingChoiceCandidates.push({ capability: capability, binding: binding });
+  return bindingChoiceCandidates.length - 1;
+}
+
+function handleBindingChoice(regIdx, btn) {
+  const entry = bindingChoiceCandidates[regIdx];
+  if (!entry) return;
+  selectedBindings[entry.capability] = entry.binding;
+  // Selección radio: solo la candidata elegida queda marcada.
+  document.querySelectorAll("[data-binding-idx]").forEach(el => {
+    const isSel = el.dataset.bindingIdx === String(regIdx);
+    el.style.borderColor = isSel ? "#22c55e" : "#334155";
+    el.style.color = isSel ? "#22c55e" : "#cbd5e1";
+  });
+  if (btn) btn.classList.add("btn-success");
+}
+
 // ---- confirm handler ----
 async function handleConfirm(btn) {
   if (!runId || !currentInterpretation) return;
@@ -822,6 +942,10 @@ async function handleConfirm(btn) {
     if (hint) action.instance_hint = hint;
     if (a.source_capability) action.source_capability = a.source_capability;
     if (a.attach) action.attach = a.attach;
+    // Human-selected data source (F6.1): `action.binding` selects ONE proven
+    // candidate; the backend rebuilds the authority from the proposal.
+    const binding = selectedBindings[a.target_capability];
+    if (binding) action.binding = binding;
     return action;
   });
 

@@ -25,6 +25,16 @@ async def return_result_node(state: AgentState) -> dict:
     elif phase == "awaiting_confirmation":
         logger.info("[run_id=%s] result: awaiting_confirmation", run_id)
         result = RunResult(run_id=run_id, status="awaiting_confirmation")
+    elif phase == "confirmed":
+        # Confirmed Plan parked — Apply has NOT run. `completed` is reserved
+        # for a finished Apply; the backend authority here is still `confirmed`.
+        # No execution block is invented: there is nothing executed yet.
+        logger.info("[run_id=%s] result: confirmed (awaiting apply)", run_id)
+        result = RunResult(
+            run_id=run_id,
+            plan=state.get("plan"),
+            status="confirmed",
+        )
     else:
         result_data = state.get("execution") or {}
         exec_block = result_data.get("execution", {})
@@ -52,7 +62,7 @@ async def return_result_node(state: AgentState) -> dict:
         )
 
     result_types = {"ok", "no_changes", "verify_failed", "conflict",
-                    "awaiting_confirmation", "cancelled", "failed"}
+                    "awaiting_confirmation", "confirmed", "cancelled", "failed"}
     event_type = "result" if result.status in result_types else "error"
 
     # The backend RunPhase is the only lifecycle authority: the orchestrator
@@ -61,6 +71,8 @@ async def return_result_node(state: AgentState) -> dict:
     if cancelled:
         phase_label = "cancelled"
     elif result.status == "conflict":
+        phase_label = "confirmed"
+    elif result.status == "confirmed":
         phase_label = "confirmed"
     elif result.status in ("ok", "no_changes"):
         phase_label = "completed"
