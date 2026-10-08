@@ -61,6 +61,26 @@ export function SearchPage() {
 
 _SEARCH_HOOK = "export function useSearchData() { return { placeholder: 'Type...' }; }\n"
 
+# F6.2.1: la pagina destino NO desestructura `filters` => el slice del registry
+# (`FilterPanel.filters`) no es demostrable por ninguna call y queda como
+# candidato `slice:filters` (binding confirmado kind=slice).
+_FILTER_SALES_PAGE = """\
+import { KpiRow } from '@/components/dashboard/KpiRow';
+import { useDashboardData } from '@/hooks/useDashboardData';
+export function SalesOverviewPage() {
+  const { kpiData } = useDashboardData();
+  return (
+    <div className="page">
+      <KpiRow data={kpiData} />
+    </div>
+  );
+}
+"""
+
+_FILTER_HOOK = (
+    "export function useDashboardData() { return { kpiData: [], filters: [] }; }\n"
+)
+
 
 def _seed(workspace: str) -> None:
     os.makedirs(os.path.join(workspace, "frontend", "src", "pages", "dashboard"), exist_ok=True)
@@ -78,6 +98,15 @@ def _seed_search(workspace: str) -> None:
         f.write(_SEARCH_PAGE)
     with open(os.path.join(workspace, "frontend/src/hooks/useSearchData.ts"), "w") as f:
         f.write(_SEARCH_HOOK)
+
+
+def _seed_filter_slice(workspace: str) -> None:
+    os.makedirs(os.path.join(workspace, "frontend", "src", "pages", "dashboard"), exist_ok=True)
+    os.makedirs(os.path.join(workspace, "frontend", "src", "hooks"), exist_ok=True)
+    with open(os.path.join(workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx"), "w") as f:
+        f.write(_FILTER_SALES_PAGE)
+    with open(os.path.join(workspace, "frontend/src/hooks/useDashboardData.ts"), "w") as f:
+        f.write(_FILTER_HOOK)
 
 
 def _commit(workspace: str, msg: str = "seed"):
@@ -186,6 +215,61 @@ def _confirm_search(run_id: str, workspace: str) -> dict:
         delete_run_state(run_id)
 
 
+def _confirm_filter_slice(run_id: str, workspace: str) -> dict:
+    """Confirma un create de presentation.filter_panel con binding kind=slice.
+
+    El slice `filters` NO es demostrable por ninguna call del workspace, asi que
+    la unica candidata es `slice:filters` (registry Page data source). El humano
+    confirma esa candidata; el canonical mapping es filters→_pageData.filters.
+    """
+    from app.api.agent_confirm import ConfirmRequest, _agent_confirm
+
+    draft = {
+        "status": "ok",
+        "contract_id": "analytics.filter",
+        "contract_version": 1,
+        "interpretation_id": f"i-{run_id}",
+        "proposed_actions": [
+            {"verb": "create", "target_capability": "presentation.filter_panel",
+             "contract_id": "analytics.filter", "params": {"filters": ["size"]}},
+        ],
+        "alternatives": [],
+        "params_proposed": {"filters": ["size"]},
+        "worktree_capabilities": [],
+    }
+    enrich_draft_binding_proposals(draft, workspace=workspace)
+    save_run_state(run_id, {
+        "phase": RunPhase.AWAITING_CONFIRMATION.value,
+        "interpretation_draft": draft,
+    })
+    try:
+        return _agent_confirm(ConfirmRequest(
+            run_id=run_id,
+            interpretation_id=f"i-{run_id}",
+            contract_id="analytics.filter",
+            contract_version=1,
+            actions=[{
+                "verb": "create",
+                "target_capability": "presentation.filter_panel",
+                "params": {"filters": ["size"]},
+                "binding": {
+                    "source": {"kind": "slice", "ref": "filters", "selector": "filters"},
+                    "mapping": [{"prop": "filters",
+                                 "from_field": "_pageData.filters",
+                                 "transform": "identity"}],
+                },
+                "attach": {
+                    "target": {"capability": "layout.page",
+                               "instance_label": "SalesOverviewPage"},
+                },
+            }],
+            params={"filters": ["size"]},
+            user_message="Add a size filter in sales dashboard",
+        ))
+    finally:
+        delete_run_state(run_id)
+
+
 class TestSourceLoweringEndToEnd:
     def test_human_choice_confirm_carries_use_sales_data(self, e2e_workspace):
         _seed(e2e_workspace)
@@ -275,10 +359,10 @@ class TestSourceLoweringEndToEnd:
         assert details.get("cause") == "source_lowering_conflict"
         assert details.get("reason") == "missing_hook"
 
-    def test_slice_kind_is_repository_conflict_no_registry_fallback(
+    def test_unmatched_slice_is_repository_conflict_no_registry_fallback(
         self, e2e_workspace, artifacts_dir,
     ):
-        """kind=slice NUNCA cae al registry: es CONFLICT retryable en apply."""
+        """kind=slice sin slice declarado NUNCA cae al registry: CONFLICT retryable."""
         _seed(e2e_workspace)
         _commit(e2e_workspace)
         out = _confirm(str(uuid.uuid4()), e2e_workspace)
@@ -302,7 +386,7 @@ class TestSourceLoweringEndToEnd:
         assert ex["diff"] is None
         details = ex.get("details") or {}
         assert details.get("cause") == "source_lowering_conflict"
-        assert details.get("reason") == "unsupported_kind"
+        assert details.get("reason") == "missing_slice"
         # El registry no escribio nada en el repo: el FileOp no toca la pagina.
         page = os.path.join(e2e_workspace, "frontend/src/pages/dashboard/SalesOverviewPage.tsx")
         assert open(page).read() == _PAGE
@@ -427,3 +511,69 @@ class TestConcreteRegistryValueDriftEndToEnd:
         assert all("Foo Bar" not in json.dumps(d) for d in drift)
         # el Plan confirmado no se muto y la fuente confirmada sigue mandando
         assert plan["actions"][0]["binding"]["source"]["ref"] == "useSearchData"
+
+
+# ── F6.2.1: el slice confirmado se materializa (main case filter) ───────────
+
+
+class TestSliceLoweringEndToEnd:
+    def test_filter_slice_confirm_keeps_slice_binding(self, e2e_workspace):
+        """El Confirm Plan conserva kind=slice (no se transforma en hook)."""
+        _seed_filter_slice(e2e_workspace)
+        _commit(e2e_workspace)
+        out = _confirm_filter_slice(str(uuid.uuid4()), e2e_workspace)
+        assert out["status"] == "ok"
+        plan = out["plan"]
+        action = [
+            a for a in plan["actions"]
+            if a["target_capability"] == "presentation.filter_panel"
+        ][0]
+        binding = action["binding"]
+        assert binding["source"]["kind"] == "slice"
+        assert binding["source"]["ref"] == "filters"
+        assert binding["source"]["selector"] == "filters"
+        assert binding["mapping"][0]["from_field"] == "_pageData.filters"
+
+    def test_filter_slice_apply_reaches_completed(self, e2e_workspace, artifacts_dir):
+        """El flujo que antes moria en unsupported_kind ahora completa tras Apply.
+
+        La fuente fisica es la Page data source del registry (useDashboardData),
+        que ya declara el slice `filters`: sin fallback, sin re-cablear el root,
+        sin escribir antes de Apply.
+        """
+        _seed_filter_slice(e2e_workspace)
+        _commit(e2e_workspace)
+        out = _confirm_filter_slice(str(uuid.uuid4()), e2e_workspace)
+        assert out["status"] == "ok"
+        plan = out["plan"]
+
+        result, _ = _apply(e2e_workspace, artifacts_dir, plan)
+        ex = result["execution"]
+        assert ex["status"] == "ok"
+        assert ex.get("conflict") is None
+
+        ops = ex["operations"]
+        create_ops = [op for op in ops if op["action"] == "create"]
+        assert len(create_ops) == 1, f"no invented FileOps, got {[op['path'] for op in ops]}"
+        assert create_ops[0]["path"].endswith("FilterPanel.tsx")
+
+        modify_ops = [op for op in ops if op["action"] == "modify"]
+        assert len(modify_ops) == 1
+        assert modify_ops[0]["path"].endswith(
+            "frontend/src/pages/dashboard/SalesOverviewPage.tsx"
+        )
+        assert "FilterPanel" in modify_ops[0]["content"]
+
+        # el lowering del slice confirmado queda registrado como evidencia
+        slices = ex.get("diagnostics", {}).get("binding_slices")
+        assert slices == [
+            {"component": "FilterPanel", "selector": "filters",
+             "target_prop": "filters", "hook": "useDashboardData"}
+        ]
+
+        # el Plan confirmado NO se muta: el binding sigue siendo slice:filters
+        action = [
+            a for a in plan["actions"]
+            if a["target_capability"] == "presentation.filter_panel"
+        ][0]
+        assert action["binding"]["source"]["kind"] == "slice"

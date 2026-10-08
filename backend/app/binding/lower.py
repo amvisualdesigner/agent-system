@@ -20,6 +20,25 @@ Reglas fijadas por el usuario (FASE 6.2):
     exactamente en exactamente UN modulo de `frontend/src/**/*.{ts,tsx}`.
     0 -> missing_hook, >1 -> ambiguous_hook. Nunca fuzzy, scoring, o LLM.
 
+FASE 6.2.1 (decision ratificada):
+
+  * kind == "slice" -> soportado SOLO como validacion estructural contra el Page
+    data source del registry: el slice confirmado (`component`/`selector`/prop
+    de mapping) debe COINCIDIR exactamente con un `DataSlice` declarado en
+    `data_access.json` (`composition.Page.dataSource.slices`). El registry es
+    EVIDENCIA: el slice confirmado NO se transforma en otro hook ni se sustituye
+    por otro binding; solo se reutiliza la fuente fisica existente que ya lo
+    declara (`ir=None`, se conserva la representacion registry). Se registra
+    como lowerings del binding confirmado (`LoweringResult.slices`), nunca como
+    fallback ni consulta fuzzy. Sin coincidencia -> repository_conflict
+    retryable (missing_slice / unrepresentable_mapping / missing_target), sin
+    escribir nada.
+  * kind in {service, symbol, query} -> repository_conflict retryable
+    unsupported_kind (fuera de alcance 6.2.1).
+  * slice confirmado + hook confirmado distinto del registry -> CONFLICT
+    slice_hook_conflict: la pagina tiene un solo `_pageData` root y el override
+    re-cablearia el host fisico del slice.
+
 FASE 6.3 (decision D2-A ratificada, SOLO en el override/Caso C):
 
   * cada mapping confirmado `_pageData.<selector>` debe enraizar en el
@@ -61,8 +80,9 @@ logger = logging.getLogger(__name__)
 # plan_retryable=True, Run=CONFIRMED: el Plan NO se invalida ni se reinterpreta.
 SOURCE_LOWERING_CONFLICT = "source_lowering_conflict"
 
-# solo kinds "hook" son representables fisicamente en Fase 6.2.
+# kinds representables fisicamente: "hook" (F6.2) y "slice" (F6.2.1).
 HOOK_KIND = "hook"
+SLICE_KIND = "slice"
 
 # Alcance del probe de import: igual que el registry real (frontend/src).
 _PROBE_ROOT = os.path.join("frontend", "src")
@@ -122,11 +142,35 @@ class SourceLoweringConflict(Exception):
         detail: str,
         components: list[str] | None = None,
     ):
-        self.reason = reason  # unsupported_kind | missing_hook | ambiguous_hook | multiple_hooks | missing_target | ambiguous_target | missing_field
+        self.reason = reason  # unsupported_kind | missing_hook | ambiguous_hook | multiple_hooks | missing_target | missing_slice | unrepresentable_mapping | slice_hook_conflict | ambiguous_target | missing_field
         self.hook = hook
         self.detail = detail
         self.components = sorted(set(components or ()))
         super().__init__(f"{reason} (hook={hook}): {detail}")
+
+
+@dataclass(frozen=True)
+class SliceLowering:
+    """Registro de un slice confirmado bajado a su slice fisico declarado.
+
+    NO es un fallback ni una sustitucion: es la evidencia de que el binding
+    confirmado (`kind=slice`) se corresponde 1:1 con un slice declarado en la
+    Page data source del registry (`component`/`target_prop`/`selector`), por lo
+    que la representacion fisica del registry se conserva tal cual.
+    """
+
+    component: str
+    selector: str
+    target_prop: str
+    hook_name: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "component": self.component,
+            "selector": self.selector,
+            "target_prop": self.target_prop,
+            "hook": self.hook_name,
+        }
 
 
 @dataclass(frozen=True)
@@ -135,15 +179,20 @@ class LoweringResult:
 
     ir:
       None   -> conservar la representacion fisica (registry) tal cual:
-               Caso A (sin hook confirmado) o identidad (hook == registry).
+               Caso A (sin hook confirmado), identidad (hook == registry), o
+               slice confirmado valido (F6.2.1: el slice vive en el registry).
       DataSourceIR -> representacion fisica del hook confirmado (override).
     drift:
       Items diagnosticos source-level (no bloqueantes) cuando el source
       confirmado difiere del registry.
+    slices:
+      Slices confirmados validados contra la Page data source del registry
+      (F6.2.1). Diagnostico: registra el lowering, nunca sustituye el binding.
     """
 
     ir: DataSourceIR | None = None
     drift: tuple[SourceDriftItem, ...] = ()
+    slices: tuple[SliceLowering, ...] = ()
 
 
 def collect_repo_files(workspace_root: str | None) -> dict[str, str]:
@@ -304,6 +353,115 @@ def probe_hook_modules(
     return found
 
 
+def _slice_conflict(
+    component: str,
+    ref: str | None,
+    components_of: list[str],
+    reason: str,
+    detail: str,
+) -> SourceLoweringConflict:
+    return SourceLoweringConflict(
+        reason=reason,
+        hook=(ref or None),
+        detail=f"{component}: {detail} (no registry fallback).",
+        components=components_of,
+    )
+
+
+def _lower_confirmed_slices(
+    slice_bindings: Mapping[str, DataBinding],
+    registry_ds: object | None,
+    components_of: list[str],
+) -> tuple[SliceLowering, ...]:
+    """Valida los slices confirmados contra la Page data source del registry.
+
+    SOLO evidencia estructural: cada binding `kind=slice` debe corresponderse
+    1:1 con un `DataSlice` declarado (`component` + `selector` + `target_prop`).
+    No hay fuzzy matching, scoring, rediscovery ni sustitucion por el registry.
+    Devuelve los lowerings registrados; sin coincidencia exacta -> CONFLICT
+    retryable (`repository_conflict`).
+    """
+    if not slice_bindings:
+        return ()
+
+    if registry_ds is None:
+        component, binding = next(iter(sorted(slice_bindings.items())))
+        ref = (getattr(binding.source, "ref", "") or "").strip()
+        raise _slice_conflict(
+            component, ref, components_of, "missing_slice",
+            "confirmed DataSourceRef kind 'slice' has no registry page data "
+            "source to host it; the slice is not physically materializable",
+        )
+
+    declared = tuple(getattr(registry_ds, "slices", ()) or ())
+    registry_hook = _registry_hook_name(registry_ds)
+    lowerings: list[SliceLowering] = []
+
+    for component, binding in sorted(slice_bindings.items()):
+        src = binding.source
+        ref = (getattr(src, "ref", "") or "").strip()
+        selector = (getattr(src, "selector", None) or "").strip()
+        wanted = selector or ref
+
+        candidates = [
+            s for s in declared if getattr(s, "component", None) == component
+        ]
+        if not candidates:
+            raise _slice_conflict(
+                component, ref, components_of, "missing_slice",
+                f"registry declares no data slice for component {component!r}",
+            )
+
+        match = next(
+            (s for s in candidates if getattr(s, "selector", None) == wanted),
+            None,
+        )
+        if match is None:
+            available = sorted(str(getattr(s, "selector", "")) for s in candidates)
+            raise _slice_conflict(
+                component, ref, components_of, "missing_slice",
+                f"registry declares no slice {wanted!r} for component "
+                f"{component!r} (available selectors: {available})",
+            )
+
+        # Mapping confirmado INTACTO: cada `_pageData.<sel>` debe apuntar
+        # exactamente al slice declarado y a su target_prop. Reinterpretar el
+        # mapping seria cambiar la autoridad del Confirmed Plan.
+        for entry in binding.mapping:
+            from_field = entry.from_field or ""
+            if not from_field.startswith("_pageData."):
+                raise _slice_conflict(
+                    component, ref, components_of, "unrepresentable_mapping",
+                    f"{component}.{entry.prop}: from_field {from_field!r} is not a "
+                    "_pageData.* slice path; the confirmed mapping cannot be "
+                    "materialized from a data slice",
+                )
+            path = from_field[len("_pageData."):]
+            if path != match.selector:
+                raise _slice_conflict(
+                    component, ref, components_of, "unrepresentable_mapping",
+                    f"{component}.{entry.prop}: confirmed selector {path!r} does "
+                    f"not match the declared slice selector {match.selector!r}",
+                )
+            if entry.prop != match.target_prop:
+                raise _slice_conflict(
+                    component, ref, components_of, "missing_target",
+                    f"{component}.{entry.prop}: the declared slice targets prop "
+                    f"{match.target_prop!r}, not {entry.prop!r}",
+                )
+
+        lowerings.append(
+            SliceLowering(
+                component=component,
+                selector=match.selector,
+                target_prop=match.target_prop,
+                hook_name=registry_hook,
+            )
+        )
+
+    return tuple(lowerings)
+
+
 def lower_confirmed_page_source(
     confirmed_bindings: dict[str, DataBinding],
     resolved_bindings: object | None = None,
@@ -327,37 +485,56 @@ def lower_confirmed_page_source(
     # Apuntes por componente para el diagnostico de conflicto.
     components_of = sorted(confirmed_bindings)
 
-    # ── Kind gate (I3/matriz F6.2): solo hook es representable. ──
-    # Un source no-hook NUNCA cae al registry: es CONFLICT retryable, incluso
-    # cuando conviven otros hooks confirmados.
+    registry_ds = (
+        getattr(resolved_bindings, "page_data_source", None)
+        if resolved_bindings
+        else None
+    )
+
+    # ── Kind gate (I3/matriz F6.2/F6.2.1): hook y slice son representables.
+    # service/symbol/query NUNCA caen al registry: son CONFLICT retryable,
+    # incluso cuando conviven otros sources confirmados.
     hook_refs: dict[str, list[str]] = {}
+    slice_bindings: dict[str, DataBinding] = {}
     for component, binding in sorted(confirmed_bindings.items()):
         src = binding.source
         if src is None:
             continue
-        if src.kind != HOOK_KIND:
+        if src.kind == HOOK_KIND:
+            ref = (src.ref or "").strip()
+            if not ref:
+                raise SourceLoweringConflict(
+                    reason="unsupported_kind",
+                    hook=None,
+                    detail=f"{component}: hook with empty ref (malformed)",
+                    components=components_of,
+                )
+            hook_refs.setdefault(ref, []).append(component)
+        elif src.kind == SLICE_KIND:
+            slice_bindings[component] = binding
+        else:
             raise SourceLoweringConflict(
                 reason="unsupported_kind",
                 hook=src.ref,
                 detail=(
                     f"{component}: DataSourceRef kind {src.kind!r} is not lowerable "
-                    f"in Fase 6.2 (only {HOOK_KIND!r}); no registry fallback."
+                    f"in Fase 6.2 (only {HOOK_KIND!r} and {SLICE_KIND!r}); no "
+                    "registry fallback."
                 ),
                 components=components_of,
             )
-        ref = (src.ref or "").strip()
-        if not ref:
-            raise SourceLoweringConflict(
-                reason="unsupported_kind",
-                hook=None,
-                detail=f"{component}: hook with empty ref (malformed)",
-                components=components_of,
-            )
-        hook_refs.setdefault(ref, []).append(component)
+
+    # ── F6.2.1: slices confirmados contra la Page data source del registry. ──
+    # Evidencia estructural pura: sin coincidencia exacta -> CONFLICT retryable.
+    slice_lowerings = _lower_confirmed_slices(
+        slice_bindings, registry_ds, components_of,
+    )
 
     # ── Caso A: sin hook confirmado → no se inventa fuente. ──
+    # Un slice confirmado valido conserva la representacion registry (el slice
+    # ya vive en su Page data source), registrado en `slice_lowerings`.
     if not hook_refs:
-        return LoweringResult(ir=None)
+        return LoweringResult(ir=None, slices=slice_lowerings)
 
     # ── Un solo hook confirmado, un solo root _pageData (I4). ──
     if len(hook_refs) > 1:
@@ -373,19 +550,33 @@ def lower_confirmed_page_source(
 
     hook = next(iter(hook_refs))
     hook_components = hook_refs[hook]
+    registry_hook = _registry_hook_name(registry_ds)
 
-    registry_ds = getattr(resolved_bindings, "page_data_source", None) if resolved_bindings else None
+    # ── F6.2.1: slice + hook override incompatible. ──
+    # El slice confirmado se materializa en el Page data source del registry;
+    # un hook override re-cablearia ese root unico. Sin fallback: CONFLICT.
+    if slice_lowerings and registry_hook != hook:
+        raise SourceLoweringConflict(
+            reason="slice_hook_conflict",
+            hook=hook,
+            detail=(
+                f"confirmed slice lowering requires the registry page data source "
+                f"{registry_hook!r} to host it, but the confirmed hook {hook!r} "
+                "would replace that single _pageData root"
+            ),
+            components=components_of,
+        )
 
     # ── Caso B: identidad → conservar la representacion registry. ──
     # El registry ya materializa el mismo hook: duplicar el decl/import
     # introduciria un segundo _pageData. NADA que resolver.
-    if _registry_hook_name(registry_ds) == hook:
+    if registry_hook == hook:
         logger.debug(
             "F6.2 source lowering: confirmed hook %s is identical to registry — "
             "keeping registry representation (single _pageData root)",
             hook,
         )
-        return LoweringResult(ir=None)
+        return LoweringResult(ir=None, slices=slice_lowerings)
 
     # ── Caso C: override confirmado → probe de import determinista. ──
     matches = probe_hook_modules(hook, repo_files)
@@ -440,15 +631,15 @@ def lower_confirmed_page_source(
         SourceDriftItem(
             component=component,
             confirmed=hook,
-            registry=_registry_hook_name(registry_ds),
+            registry=registry_hook,
         )
         for component in hook_components
     )
     logger.info(
         "F6.2 source lowering: confirmed hook %s overrides registry %s → %s",
-        hook, _registry_hook_name(registry_ds), f"@/{matches[0]}",
+        hook, registry_hook, f"@/{matches[0]}",
     )
-    return LoweringResult(ir=ir, drift=drift)
+    return LoweringResult(ir=ir, drift=drift, slices=slice_lowerings)
 
 
 def retarget_confirmed_to_component_types(
@@ -509,6 +700,9 @@ def retarget_confirmed_to_component_types(
 
 __all__ = [
     "SOURCE_LOWERING_CONFLICT",
+    "HOOK_KIND",
+    "SLICE_KIND",
+    "SliceLowering",
     "SourceDriftItem",
     "SourceLoweringConflict",
     "LoweringResult",

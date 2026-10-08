@@ -11,8 +11,11 @@ Casos obligatorios (T1-T6):
   T3 missing    hook no exportado bajo frontend/src -> SourceLoweringConflict missing_hook
   T4 ambiguous  hook exportado por >1 modulo      -> SourceLoweringConflict ambiguous_hook
   T5 multiple   >1 hooks confirmados distintos    -> SourceLoweringConflict multiple_hooks
-  T6 kinds      slice/service/symbol/query        -> SourceLoweringConflict unsupported_kind
+  T6 kinds      service/symbol/query              -> SourceLoweringConflict unsupported_kind
                   (nunca cae al registry, incluso con hooks validos presentes)
+  T7 slice      slice confirmado vs Page data source del registry (F6.2.1):
+                  coincidencia exacta -> conserva registry + registro del
+                  lowering; sin coincidencia -> CONFLICT retryable.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import pytest
 
 from app.binding.lower import (
     SOURCE_LOWERING_CONFLICT,
+    SliceLowering,
     SourceDriftItem,
     SourceLoweringConflict,
     lower_confirmed_page_source,
@@ -426,12 +430,12 @@ class TestMultipleHooks:
         assert "multiple" in exc.value.reason
 
 
-# ── T6: kinds no soportados (slice/service/symbol/query) ───────────────────
+# ── T6: kinds fuera de alcance ─────────────────────────────────────────────
 
 
 class TestUnsupportedKinds:
-    @pytest.mark.parametrize("kind", ["slice", "service", "symbol", "query"])
-    def test_non_hook_kinds_are_conflict_never_registry_fallback(self, kind):
+    @pytest.mark.parametrize("kind", ["service", "symbol", "query"])
+    def test_unsupported_kinds_are_conflict_never_registry_fallback(self, kind):
         confirmed = {"presentation.filter_panel": _binding(kind, "SALES.byRegion.tableName")}
         with pytest.raises(SourceLoweringConflict) as exc:
             lower_confirmed_page_source(
@@ -443,7 +447,7 @@ class TestUnsupportedKinds:
 
     def test_unsupported_kind_wins_even_when_a_valid_hook_coexists(self):
         confirmed = {
-            "presentation.filter_panel": _binding("slice", "SALES.byRegion.tableName"),
+            "presentation.filter_panel": _binding("service", "SALES.byRegion.tableName"),
             "presentation.kpi_row": _binding("hook", "useSalesData", prop="data"),
         }
         with pytest.raises(SourceLoweringConflict) as exc:
@@ -460,6 +464,154 @@ class TestUnsupportedKinds:
         with pytest.raises(SourceLoweringConflict) as exc:
             lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
         assert exc.value.reason == "unsupported_kind"
+
+
+# ── T7: lowering de slice confirmado (F6.2.1) ──────────────────────────────
+
+
+class TestConfirmedSlice:
+    """El slice confirmado se corresponde 1:1 con un slice declarado del registry.
+
+    Es evidencia estructural, no fallback: conserva la representacion registry
+    (`ir is None`) y registra el lowering en `result.slices`.
+    """
+
+    def test_valid_slice_keeps_registry_and_registers_lowering(self):
+        registered = _registered_ds("useDashboardData")
+        result = lower_confirmed_page_source(
+            {"FilterPanel": _binding("slice", "filters")},
+            _resolved(registered),
+            {},
+        )
+        assert result.ir is None, "el slice vive en el registry: no se re-cablea"
+        assert result.drift == ()
+        assert result.slices == (
+            SliceLowering(
+                component="FilterPanel",
+                selector="filters",
+                target_prop="filters",
+                hook_name="useDashboardData",
+            ),
+        )
+        assert result.slices[0].to_dict() == {
+            "component": "FilterPanel",
+            "selector": "filters",
+            "target_prop": "filters",
+            "hook": "useDashboardData",
+        }
+
+    def test_valid_slice_skips_the_import_probe(self, monkeypatch):
+        """El slice conserva el registry: no hay override ni probe de import."""
+        def boom(*_a, **_k):
+            raise AssertionError("import probe must NOT run for a slice lowering")
+        monkeypatch.setattr("app.binding.lower.probe_hook_modules", boom)
+        result = lower_confirmed_page_source(
+            {"FilterPanel": _binding("slice", "filters")},
+            _resolved(_registered_ds()),
+            {},
+        )
+        assert result.ir is None
+        assert result.slices[0].selector == "filters"
+
+    def test_selector_is_taken_from_source_selector(self):
+        confirmed = {
+            "FilterPanel": DataBinding(
+                source=DataSourceRef(kind="slice", ref="ignored", selector="filters"),
+                mapping=(
+                    DataMappingEntry(prop="filters", from_field="_pageData.filters"),
+                ),
+            )
+        }
+        result = lower_confirmed_page_source(
+            confirmed, _resolved(_registered_ds()), {},
+        )
+        assert result.slices[0].selector == "filters"
+
+    def test_undeclared_slice_is_conflict_missing_slice(self):
+        confirmed = {"FilterPanel": _binding("slice", "ghost")}
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
+        assert exc.value.reason == "missing_slice"
+        assert exc.value.hook == "ghost"
+        assert exc.value.components == ["FilterPanel"]
+
+    def test_undeclared_component_is_conflict_missing_slice(self):
+        confirmed = {"KpiRow": _binding("slice", "filters")}
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
+        assert exc.value.reason == "missing_slice"
+        assert "KpiRow" in exc.value.detail
+
+    def test_no_registry_page_source_is_conflict_missing_slice(self):
+        confirmed = {"FilterPanel": _binding("slice", "filters")}
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, None, {})
+        assert exc.value.reason == "missing_slice"
+
+    def test_selector_mismatch_is_unrepresentable_mapping(self):
+        confirmed = {
+            "FilterPanel": DataBinding(
+                source=DataSourceRef(kind="slice", ref="filters", selector="filters"),
+                mapping=(
+                    DataMappingEntry(prop="filters", from_field="_pageData.ghost"),
+                ),
+            )
+        }
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
+        assert exc.value.reason == "unrepresentable_mapping"
+
+    def test_non_page_data_mapping_is_unrepresentable(self):
+        confirmed = {
+            "FilterPanel": DataBinding(
+                source=DataSourceRef(kind="slice", ref="filters"),
+                mapping=(
+                    DataMappingEntry(prop="filters", from_field="contract_params['x']"),
+                ),
+            )
+        }
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
+        assert exc.value.reason == "unrepresentable_mapping"
+
+    def test_target_prop_mismatch_is_conflict_missing_target(self):
+        confirmed = {
+            "FilterPanel": DataBinding(
+                source=DataSourceRef(kind="slice", ref="filters", selector="filters"),
+                mapping=(
+                    DataMappingEntry(prop="data", from_field="_pageData.filters"),
+                ),
+            )
+        }
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(confirmed, _resolved(_registered_ds()), {})
+        assert exc.value.reason == "missing_target"
+        assert "data" in exc.value.detail
+
+    def test_slice_plus_hook_override_is_slice_hook_conflict(self):
+        confirmed = {
+            "FilterPanel": _binding("slice", "filters"),
+            "KpiRow": _binding("hook", "useSalesData", prop="data"),
+        }
+        with pytest.raises(SourceLoweringConflict) as exc:
+            lower_confirmed_page_source(
+                confirmed,
+                _resolved(_registered_ds()),
+                {"frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}"},
+            )
+        assert exc.value.reason == "slice_hook_conflict"
+        assert exc.value.hook == "useSalesData"
+
+    def test_conflict_does_not_mutate_plan_or_snapshot(self):
+        confirmed_inputs = {"FilterPanel": _binding("slice", "ghost")}
+        files = {"frontend/src/hooks/useSalesData.ts": "export function useSalesData(){}"}
+        before = dict(files)
+        with pytest.raises(SourceLoweringConflict):
+            lower_confirmed_page_source(
+                confirmed_inputs, _resolved(_registered_ds()), files,
+            )
+        assert files == before
+        assert list(confirmed_inputs) == ["FilterPanel"]
 
 
 # ── Registry `hook` re-hidratado en _infer_datasource_ir ───────────────────

@@ -1383,6 +1383,8 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
     # Fase 6F drift del binding confirmado. Se inicializa aqui (no dentro del
     # bloque try) porque el except amplio de la rama graph continua al return final.
     _f6_drift = None
+    # F6.2.1: lowerings de slice confirmado (evidencia, no fallback).
+    _f6_lowering = None
 
     try:
         from app.engine.reconciliation import reconcile
@@ -2264,6 +2266,11 @@ def apply_engine(run_id, plan: dict, context, dry_run: bool = False, compiler_mo
         _execution["diagnostics"] = {
             "binding_drift": _f6_drift.to_dict(),
         }
+    # F6.2.1: registra el lowering del slice confirmado (evidencia estructural).
+    if _f6_lowering is not None and _f6_lowering.slices:
+        _execution.setdefault("diagnostics", {})["binding_slices"] = [
+            s.to_dict() for s in _f6_lowering.slices
+        ]
 
     return {
         "execution": _execution,
